@@ -7,6 +7,7 @@ import {
   loadStore,
   removeConnection,
   setActiveBusinessId,
+  storageBackend,
   upsertConnection,
 } from "../store/connections.js";
 
@@ -16,6 +17,7 @@ authRouter.get("/status", async (_req, res) => {
   const store = await loadStore();
   res.json({
     configured: hasMyobCredentials(),
+    storage: storageBackend(),
     connections: store.connections.map((c) => ({
       businessId: c.businessId,
       displayName: c.displayName,

@@ -6,7 +6,7 @@ Foundation app for connecting to MYOB Business / AccountRight Online company fil
 
 - Node.js 20+ / TypeScript
 - Express API + static UI (`public/`)
-- File-backed connection store (`.data/connections.json`) for local development
+- Postgres connection store when `DATABASE_URL` is set (Railway); file fallback (`.data/`) for local
 
 ## What this gives you
 
@@ -32,8 +32,18 @@ Foundation app for connecting to MYOB Business / AccountRight Online company fil
 - [ ] `MYOB_API_KEY`
 - [ ] `MYOB_API_SECRET`
 - [ ] Registered redirect URI matching `MYOB_REDIRECT_URI`
+- [ ] `DATABASE_URL` (Railway Postgres reference on the app service)
+- [ ] Optional: `TOKEN_ENCRYPTION_KEY` (`openssl rand -base64 32`)
 - [ ] At least one MYOB company file (sandbox invite or real client file) with an admin user
 - [ ] Optional: `MYOB_CF_USERNAME` / `MYOB_CF_PASSWORD` if your file still requires `x-myobapi-cftoken`
+
+## Railway Postgres
+
+1. In the Railway project: **+ New → Database → PostgreSQL**
+2. Open your **app** service → **Variables** → add reference `DATABASE_URL` from Postgres
+3. Optional: add `TOKEN_ENCRYPTION_KEY` (long random string)
+4. Redeploy the app — logs should show `Connection store: postgres`
+5. Allied connects once; tokens persist across redeploys
 
 ## Run locally
 

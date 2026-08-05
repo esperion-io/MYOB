@@ -19,6 +19,13 @@ function optional(name: string): string | undefined {
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   appBaseUrl: process.env.APP_BASE_URL?.trim() || "http://localhost:3000",
+  /** Railway Postgres connection string. When set, tokens persist in the DB. */
+  databaseUrl: optional("DATABASE_URL"),
+  /**
+   * Optional AES key material for encrypting tokens at rest in Postgres.
+   * Generate with: openssl rand -base64 32
+   */
+  tokenEncryptionKey: optional("TOKEN_ENCRYPTION_KEY"),
   myob: {
     apiKey: () => required("MYOB_API_KEY"),
     apiSecret: () => required("MYOB_API_SECRET"),
