@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Allied Fastenings · MYOB Connection</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Barlow:ital,wght@0,500;0,600;0,700;1,500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="hero-brand">
+          <img
+            class="logo"
+            src="/brand/allied-fastenings.png"
+            alt="Allied Fastenings — Connecting Infrastructure"
+            width="520"
+            height="120"
+          />
+          <p class="lede">
+            Secure MYOB company-file connection for Allied Fastenings.
+            Authorise once, then we verify Contact, Sale, Purchase, and
+            Inventory access.
+          </p>
+        </div>
+        <div class="hero-actions" id="actions">
+          <a class="btn primary" href="/auth/login">Connect MYOB</a>
+        </div>
+      </header>
+
+      <section class="setup" id="setup-panel" hidden>
+        <p>
+          Missing credentials. Set <code>MYOB_API_KEY</code> /
+          <code>MYOB_API_SECRET</code> in <code>.env</code>, then restart.
+        </p>
+      </section>
+
+      <section class="session" aria-labelledby="session-heading">
+        <div class="session-bar">
+          <h2 id="session-heading">Connection status</h2>
+          <button class="btn secondary" id="probe-btn" type="button" disabled>
+            Probe endpoints
+          </button>
+        </div>
+        <dl class="meta" id="session-meta">
+          <div>
+            <dt>Status</dt>
+            <dd id="meta-status">Checking…</dd>
+          </div>
+          <div>
+            <dt>Authorised user</dt>
+            <dd id="meta-user">—</dd>
+          </div>
+          <div>
+            <dt>Company file</dt>
+            <dd id="meta-company">—</dd>
+          </div>
+          <div>
+            <dt>Token expiry</dt>
+            <dd id="meta-expiry">—</dd>
+          </div>
+          <div class="wide">
+            <dt>Granted scopes</dt>
+            <dd id="meta-scopes">—</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="probe" aria-labelledby="probe-heading">
+        <div class="session-bar">
+          <h2 id="probe-heading">Endpoint access</h2>
+          <p class="probe-summary" id="probe-summary">
+            Connect the Allied Fastenings company file to run probes.
+          </p>
+        </div>
+        <div class="groups" id="probe-groups"></div>
+      </section>
+
+      <footer class="foot">
+        <span>Powered by Esperion</span>
+        <span aria-hidden="true">·</span>
+        <span>MYOB Business API</span>
+      </footer>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

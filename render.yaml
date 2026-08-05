@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: allied-myob-bridge
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: APP_BASE_URL
+        sync: false
+      - key: MYOB_API_KEY
+        sync: false
+      - key: MYOB_API_SECRET
+        sync: false
+      - key: MYOB_REDIRECT_URI
+        sync: false
+      - key: MYOB_SCOPES
+        value: sme-company-file sme-contacts-customer sme-contacts-supplier sme-contacts-employee sme-contacts-personal sme-sales sme-purchases sme-inventory
+      - key: MYOB_API_BASE_URL
+        value: https://arl2.api.myob.com/accountright
