@@ -67,9 +67,11 @@ Open [http://localhost:3000](http://localhost:3000) → **Connect MYOB**.
 | POST | `/auth/active` | Switch active company `{ "businessId": "..." }` |
 | POST | `/auth/logout` | Clear local connections |
 | GET | `/api/connection/probe` | Probe Contact / Sale / Purchase / Inventory endpoint access |
+| GET | `/api/dashboard/summary` | Dashboard metrics summary |
 | GET | `/api/inventory/items?top=100` | List inventory items |
 | GET | `/api/inventory/locations` | List inventory locations |
 | GET | `/api/company` | Active company file metadata |
+| GET | `/dashboard` | Allied inventory dashboard UI |
 
 ## Multi-client model
 
@@ -98,9 +100,64 @@ public/               Minimal dashboard UI
 - Prefer `https://arl2.api.myob.com/accountright` as the API base for current cloud files.
 - Rate limits are roughly 8 req/s and 1M req/day per API key; inventory defaults to page size 400 (max 1000).
 
-## Next build steps (suggested)
+## Inventory intelligence dashboard (`/dashboard`)
 
-- Persist connections in a database with encryption at rest
-- Per-client sync jobs + caching for the dashboard
-- HTTPS redirect URI via reverse proxy / tunnel in staging
-- Richer inventory views (locations, adjustments, low-stock filters)
+Decision-support product for Allied Fastenings built on read-only MYOB data.
+The connection console at `/` is unchanged and remains the admin surface for
+OAuth.
+
+### Architecture
+
+```
+MYOB Business API  --(read-only GETs)-->  sync engine  -->  Postgres mirror
+                                                              |
+                                            analytics (SQL + risk scoring)
+                                                              |
+                                                    /api/insights/*  -->  /dashboard SPA
+```
+
+- `src/sync/engine.ts` mirrors items, locations, suppliers, item-layout sales
+  invoices/orders, purchase bills/orders, inventory builds and adjustments into
+  `myob_*` tables (paged at 400 rows, throttled under MYOB's 8 req/s limit,
+  incremental via `LastModified` high-water marks with a 5-minute overlap).
+- `src/insights/queries.ts` computes demand, cover, risk, buildability and
+  purchasing suggestions. `platform_*` tables hold product-created data only.
+- `public/dashboard.*` is the UI: Overview, Inventory, Products & BOM,
+  Purchasing (CSV export), Data & Sync.
+
+### Major product/data decisions
+
+1. **MYOB is strictly read-only.** The sync uses GET only; there is no write
+   path anywhere in the codebase. Everything the product creates (derived
+   relationships, user-entered BOM rows, suggestions) stays in Postgres and is
+   labelled as platform data in the UI.
+2. **Position quantities are MYOB facts.** On hand / committed / on order /
+   available come from the item master and are never recomputed. Our
+   transaction mirror is the *evidence* layer that explains them.
+3. **Demand = direct sales + build consumption.** Item-layout invoice lines
+   (credit notes net off automatically) plus components consumed by Inventory
+   Build transactions. These are distinct MYOB movements, so no double
+   counting. Adjustments and transfers are never demand.
+4. **Product relationships are derived from Build transactions.** The Business
+   API does not expose Auto-Build definitions, so composition is observed from
+   builds with a single finished item (confidence grows with corroborating
+   builds) and can be supplemented by Allied-entered rows, always labelled
+   with their source.
+5. **Every number is traceable.** Item pages show the underlying invoices,
+   bills, builds, adjustments, open orders and purchase history, plus the risk
+   factor breakdown and the arithmetic behind any purchase suggestion.
+
+### Operating it
+
+1. Set `DATABASE_URL` (required), `DASHBOARD_ACCESS_KEY` (recommended) and
+   optionally `SYNC_WINDOW_DAYS` / `TARGET_COVER_WEEKS` / `SYNC_INTERVAL_HOURS`.
+2. Deploy, open `/dashboard`, run **Full sync** (first run reads the whole
+   history window; a few minutes for Allied's dataset).
+3. Afterwards use **Incremental sync** (or set `SYNC_INTERVAL_HOURS`).
+
+### Known limitations (also shown in-app)
+
+- History limited to the sync window; deleted MYOB documents disappear only on
+  a full sync; per-location stock split is not exposed by the item master;
+  supplier lead times are not yet estimated; service-layout invoices carry no
+  item demand.

@@ -89,6 +89,71 @@ async function myobFetch<T>(
   return body as T;
 }
 
+/**
+ * Read-only GET against the MYOB Business API. This is the ONLY verb the
+ * platform uses — there is deliberately no write path to MYOB anywhere.
+ * Retries once on throttle/transient errors (MYOB allows ~8 req/s).
+ */
+export async function myobGet<T>(
+  connection: CompanyConnection,
+  pathOrUrl: string,
+): Promise<T> {
+  try {
+    return await myobFetch<T>(connection, pathOrUrl);
+  } catch (err) {
+    if (
+      err instanceof MyobApiError &&
+      [429, 500, 502, 503, 504].includes(err.status)
+    ) {
+      await new Promise((r) => setTimeout(r, 1500));
+      return myobFetch<T>(connection, pathOrUrl);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Fetch every page of a MYOB collection, invoking `onPage` per page so large
+ * datasets stream through without being held in memory. Follows NextPageLink
+ * and paces requests to stay inside MYOB's throttle limit.
+ */
+export async function myobGetAllPages(
+  connection: CompanyConnection,
+  path: string,
+  options: {
+    top?: number;
+    filter?: string;
+    onPage: (items: Record<string, unknown>[], pageIndex: number) => Promise<void>;
+  },
+): Promise<{ pages: number; rows: number }> {
+  const top = options.top ?? 400;
+  const params = new URLSearchParams();
+  params.set("$top", String(top));
+  if (options.filter) params.set("$filter", options.filter);
+
+  let url: string | null = `${path}?${params.toString()}`;
+  let pages = 0;
+  let rows = 0;
+
+  while (url) {
+    const page: MyobPagedResponse<Record<string, unknown>> = await myobGet(
+      connection,
+      url,
+    );
+    const items = page.Items ?? [];
+    await options.onPage(items, pages);
+    pages += 1;
+    rows += items.length;
+    url = page.NextPageLink ?? null;
+    if (url) {
+      // ~7 req/s keeps us under MYOB's 8 req/s throttle.
+      await new Promise((r) => setTimeout(r, 140));
+    }
+  }
+
+  return { pages, rows };
+}
+
 export async function getCompanyInfo(
   connection?: CompanyConnection | null,
 ): Promise<Record<string, unknown>> {

@@ -31,8 +31,16 @@ async function fetchJson(url, options) {
 function renderActions(hasConnection) {
   actions.innerHTML = "";
 
+  if (hasConnection) {
+    const dash = document.createElement("a");
+    dash.className = "btn primary";
+    dash.href = "/dashboard";
+    dash.textContent = "Open dashboard";
+    actions.appendChild(dash);
+  }
+
   const connect = document.createElement("a");
-  connect.className = "btn primary";
+  connect.className = hasConnection ? "btn secondary" : "btn primary";
   connect.href = "/auth/login";
   connect.textContent = hasConnection ? "Reconnect MYOB" : "Connect MYOB";
   actions.appendChild(connect);

@@ -5,7 +5,10 @@ import { config, hasMyobCredentials } from "./config.js";
 import { ensureSchema, hasDatabaseUrl } from "./db.js";
 import { apiRouter } from "./routes/api.js";
 import { authRouter } from "./routes/auth.js";
+import { insightsRouter } from "./routes/insights.js";
 import { storageBackend } from "./store/connections.js";
+import { ensureInsightsSchema } from "./sync/schema.js";
+import { isSyncRunning, runSync } from "./sync/engine.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, "../public");
@@ -13,6 +16,7 @@ const publicDir = path.resolve(__dirname, "../public");
 async function main() {
   if (hasDatabaseUrl()) {
     await ensureSchema();
+    await ensureInsightsSchema();
   }
 
   const app = express();
@@ -21,7 +25,27 @@ async function main() {
   app.use(express.static(publicDir));
 
   app.use("/auth", authRouter);
+  app.use("/api/insights", insightsRouter);
   app.use("/api", apiRouter);
+
+  app.get("/dashboard", (_req, res) => {
+    res.sendFile(path.join(publicDir, "dashboard.html"));
+  });
+
+  // Optional scheduled refresh (only effective while the instance is awake).
+  const intervalHours = config.insights.syncIntervalHours;
+  if (hasDatabaseUrl() && intervalHours > 0) {
+    setInterval(
+      () => {
+        if (!isSyncRunning()) {
+          runSync("incremental", "schedule").catch((err) =>
+            console.error("Scheduled sync failed:", err),
+          );
+        }
+      },
+      intervalHours * 60 * 60 * 1000,
+    );
+  }
 
   app.get("*", (req, res, next) => {
     if (req.path.startsWith("/api") || req.path.startsWith("/auth")) {

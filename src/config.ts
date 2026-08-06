@@ -44,6 +44,16 @@ export const config = {
     cfPassword: optional("MYOB_CF_PASSWORD"),
   },
   dataDir: path.resolve(process.cwd(), process.env.DATA_DIR || ".data"),
+  insights: {
+    /** How far back transactional history is mirrored on a full sync. */
+    syncWindowDays: Number(process.env.SYNC_WINDOW_DAYS || 365),
+    /** Stock-cover target used by purchasing suggestions. */
+    targetCoverWeeks: Number(process.env.TARGET_COVER_WEEKS || 8),
+    /** Optional auto-refresh interval (hours). 0 disables. */
+    syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS || 0),
+    /** Optional shared access key protecting dashboard APIs. */
+    dashboardAccessKey: optional("DASHBOARD_ACCESS_KEY"),
+  },
 };
 
 export function hasMyobCredentials(): boolean {

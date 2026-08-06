@@ -136,6 +136,61 @@ apiRouter.get("/inventory/locations", async (_req, res) => {
   }
 });
 
+apiRouter.get("/dashboard/summary", async (_req, res) => {
+  try {
+    const connection = await getActiveConnection();
+    if (!connection) {
+      res.status(401).json({ error: "No MYOB company connected" });
+      return;
+    }
+
+    const [itemsPage, locationsPage] = await Promise.all([
+      listInventoryItems({ top: 100, connection }),
+      listInventoryLocations(connection),
+    ]);
+
+    const items = itemsPage.Items ?? [];
+    const activeItems = items.filter((item) => item.IsActive !== false);
+    const inventoried = items.filter((item) => item.IsInventoried);
+    const zeroAvailable = inventoried.filter((item) => {
+      const available = Number(item.QuantityAvailable ?? 0);
+      return Number.isFinite(available) && available <= 0;
+    });
+    const onHandTotal = inventoried.reduce((sum, item) => {
+      const qty = Number(item.QuantityOnHand ?? 0);
+      return sum + (Number.isFinite(qty) ? qty : 0);
+    }, 0);
+    const inventoryValue = inventoried.reduce((sum, item) => {
+      const value = Number(item.CurrentValue ?? 0);
+      return sum + (Number.isFinite(value) ? value : 0);
+    }, 0);
+
+    res.json({
+      businessId: connection.businessId,
+      companyName: connection.displayName ?? null,
+      username: connection.tokens.username ?? null,
+      connectedAt: connection.connectedAt,
+      tokenExpiresAt: new Date(connection.tokens.expiresAt).toISOString(),
+      generatedAt: new Date().toISOString(),
+      source: "live-myob",
+      metrics: {
+        itemCount: itemsPage.Count ?? items.length,
+        locationCount: locationsPage.Count ?? locationsPage.Items?.length ?? 0,
+        sampleSize: items.length,
+        activeInSample: activeItems.length,
+        inventoriedInSample: inventoried.length,
+        zeroAvailableInSample: zeroAvailable.length,
+        onHandQtyInSample: onHandTotal,
+        inventoryValueInSample: inventoryValue,
+      },
+      note:
+        "Sample metrics are based on the first 100 inventory items until a full sync is built.",
+    });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 function parsePositiveInt(value: unknown, fallback: number): number {
   if (typeof value !== "string") return fallback;
   const n = Number.parseInt(value, 10);

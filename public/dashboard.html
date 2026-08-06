@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Allied Fastenings · Inventory Intelligence</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Barlow:ital,wght@0,500;0,600;0,700;0,800;1,500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/dashboard.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="side">
+        <img
+          class="side-logo"
+          src="/brand/allied-fastenings.png"
+          alt="Allied Fastenings"
+          width="300"
+          height="69"
+        />
+        <nav class="nav" id="nav">
+          <a href="#/overview" data-route="overview">Overview</a>
+          <a href="#/inventory" data-route="inventory">Inventory</a>
+          <a href="#/products" data-route="products">Products &amp; BOM</a>
+          <a href="#/purchasing" data-route="purchasing">Purchasing</a>
+          <a href="#/data" data-route="data">Data &amp; Sync</a>
+        </nav>
+        <div class="side-foot">
+          <div class="sync-chip" id="sync-chip">
+            <span class="dot" id="sync-dot"></span>
+            <span id="sync-chip-text">Checking data…</span>
+          </div>
+          <a class="side-link" href="/">Connection console</a>
+          <p class="side-note">Read-only MYOB. No data is ever written back.</p>
+        </div>
+      </aside>
+
+      <main class="main" id="main">
+        <p class="loading">Loading…</p>
+      </main>
+    </div>
+
+    <div class="overlay" id="key-overlay" hidden>
+      <form class="key-card" id="key-form">
+        <h2>Dashboard access</h2>
+        <p>Enter the Allied dashboard access key to continue.</p>
+        <input type="password" id="key-input" placeholder="Access key" autocomplete="off" />
+        <button class="btn primary" type="submit">Unlock</button>
+        <p class="key-error" id="key-error" hidden>That key was not accepted.</p>
+      </form>
+    </div>
+
+    <script type="module" src="/dashboard.js"></script>
+  </body>
+</html>
