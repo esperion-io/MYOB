@@ -405,6 +405,11 @@ tr.rowlink:hover { background: var(--brand-soft); }
   z-index: 50;
 }
 
+/* The display rule above would otherwise defeat the HTML hidden attribute. */
+.overlay[hidden] {
+  display: none;
+}
+
 .key-card {
   background: #fff;
   border: 1px solid var(--line);
