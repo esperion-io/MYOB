@@ -50,10 +50,17 @@ function buildHeaders(accessToken: string): HeadersInit {
   return headers;
 }
 
+/**
+ * HARD READ-ONLY GUARANTEE: every request to the MYOB Business API goes
+ * through this function, and the HTTP method is pinned to GET. There is no
+ * code path in this application that can create, update, or delete MYOB data.
+ * (The only non-GET call to MYOB anywhere is the OAuth token exchange in
+ * auth.ts, which talks to secure.myob.com to maintain login — not to the
+ * business data API.)
+ */
 async function myobFetch<T>(
   connection: CompanyConnection,
   path: string,
-  init?: RequestInit,
 ): Promise<T> {
   const fresh = await ensureFreshTokens(connection);
   const url = path.startsWith("http")
@@ -61,11 +68,8 @@ async function myobFetch<T>(
     : `${config.myob.apiBaseUrl.replace(/\/$/, "")}/${fresh.businessId}/${path.replace(/^\//, "")}`;
 
   const response = await fetch(url, {
-    ...init,
-    headers: {
-      ...buildHeaders(fresh.tokens.accessToken),
-      ...(init?.headers ?? {}),
-    },
+    method: "GET",
+    headers: buildHeaders(fresh.tokens.accessToken),
   });
 
   const text = await response.text();
