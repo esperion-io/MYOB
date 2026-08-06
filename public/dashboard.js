@@ -87,8 +87,23 @@ function coverFmt(cover, basis) {
 
 /* ---------- data access ---------- */
 
+let memoryKey = "";
+
 function accessKey() {
-  return localStorage.getItem("afDashboardKey") || "";
+  try {
+    return localStorage.getItem("afDashboardKey") || memoryKey;
+  } catch {
+    return memoryKey;
+  }
+}
+
+function saveKey(value) {
+  memoryKey = value;
+  try {
+    localStorage.setItem("afDashboardKey", value);
+  } catch {
+    // Private browsing / blocked storage: memoryKey keeps the session working.
+  }
 }
 
 async function fetchJson(url, options = {}) {
@@ -109,14 +124,15 @@ async function fetchJson(url, options = {}) {
 
 keyForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  localStorage.setItem("afDashboardKey", keyInput.value.trim());
+  saveKey(keyInput.value.trim());
   try {
     await fetchJson("/api/insights/sync/status");
     keyOverlay.hidden = true;
     keyError.hidden = true;
     route();
     pollSyncChip();
-  } catch {
+  } catch (err) {
+    keyError.textContent = `Not accepted: ${err.message}`;
     keyError.hidden = false;
   }
 });
@@ -985,6 +1001,14 @@ function summariseStats(stats) {
 }
 
 /* ---------- boot ---------- */
+
+// Allow unlocking via URL: /dashboard?key=XXXX (key is stored, then removed
+// from the address bar so it isn't left visible or bookmarked by accident).
+const urlKey = new URLSearchParams(location.search).get("key");
+if (urlKey) {
+  saveKey(urlKey.trim());
+  history.replaceState({}, "", location.pathname + location.hash);
+}
 
 route();
 pollSyncChip();
