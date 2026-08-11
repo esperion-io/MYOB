@@ -75,8 +75,24 @@ async function loadDbStore(): Promise<ConnectionStore> {
   const result = await getPool().query<ConnectionRow>(
     `SELECT * FROM connections ORDER BY connected_at ASC`,
   );
-  const connections = result.rows.map(rowToConnection);
-  const active = result.rows.find((r) => r.is_active);
+  // Decrypt per-row so a single unreadable token (e.g. after a
+  // TOKEN_ENCRYPTION_KEY change) degrades to "that connection is skipped"
+  // instead of throwing and taking down every endpoint that loads the store.
+  const connections: CompanyConnection[] = [];
+  for (const row of result.rows) {
+    try {
+      connections.push(rowToConnection(row));
+    } catch (err) {
+      console.warn(
+        `Skipping connection ${row.business_id}: token could not be decrypted ` +
+          `(TOKEN_ENCRYPTION_KEY may have changed since it was stored) — ${
+            (err as Error).message
+          }`,
+      );
+    }
+  }
+  const usable = new Set(connections.map((c) => c.businessId));
+  const active = result.rows.find((r) => r.is_active && usable.has(r.business_id));
   return {
     connections,
     activeBusinessId: active?.business_id ?? connections[0]?.businessId,
