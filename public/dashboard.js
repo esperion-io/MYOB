@@ -17,6 +17,7 @@ const FLAG_LABELS = {
   no_supplier: ["No supplier", "warn"],
   slow_mover: ["Slow mover", "idle"],
   understated_demand: ["Pack pull not counted", "brand"],
+  min_above_demand: ["Min level above demand", "warn"],
 };
 
 const invState = { q: "", filter: "all", region: "", sort: "risk", page: 1 };
@@ -301,6 +302,7 @@ async function renderOverview() {
       <div class="kpi link" data-filter="suggested"><span class="k-label">Suggested orders</span><span class="k-value">${qty(k.suggestedOrders)}</span></div>
       <div class="kpi link ${k.negativeStock ? "alert" : ""}" data-filter="negative"><span class="k-label">Negative stock</span><span class="k-value">${qty(k.negativeStock)}</span></div>
       <div class="kpi link" data-filter="parents"><span class="k-label">Assembled products</span><span class="k-value">${qty(k.trackedParents)}</span></div>
+      <div class="kpi link" data-filter="excess" title="Stock beyond ${data.excessCoverWeeks} weeks of cover, where it is worth something"><span class="k-label">Excess stock value</span><span class="k-value">${money(k.excessValue)}</span></div>
       <div class="kpi"><span class="k-label">Relationships</span><span class="k-value">${qty((rel.derived ?? 0) + (rel.user ?? 0))}</span></div>
     </div>
 
@@ -350,6 +352,33 @@ async function renderOverview() {
         </table></div>
       </section>
     </div>
+
+    <section class="panel">
+      <h2>Largest stock adjustments — last 30 days</h2>
+      <p class="hint">Write-offs, stocktake corrections and reversals ranked by value. These are MYOB movements that
+      change stock without a sale, purchase or build, so they are worth a second look when a number looks wrong.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th>Doc</th><th>Date</th><th class="num">Qty ±</th><th class="num">Value</th><th>Memo</th></tr></thead>
+        <tbody>
+          ${
+            (data.adjustments || []).length
+              ? data.adjustments
+                  .map(
+                    (a) => `<tr class="rowlink" data-uid="${esc(a.uid)}">
+                      <td><strong>${esc(a.item_number ?? "—")}</strong><br /><span class="muted">${esc((a.item_name ?? "").slice(0, 40))}</span></td>
+                      <td>${esc(a.number ?? "—")}</td>
+                      <td>${dateFmt(a.date)}</td>
+                      <td class="num ${a.qty < 0 ? "neg" : ""}">${a.qty > 0 ? "+" : ""}${qty(a.qty)}</td>
+                      <td class="num">${money(a.value)}</td>
+                      <td class="muted">${esc((a.line_memo ?? a.doc_memo ?? "").slice(0, 40))}</td>
+                    </tr>`,
+                  )
+                  .join("")
+              : '<tr><td colspan="6" class="muted">No stock adjustments in the last 30 days.</td></tr>'
+          }
+        </tbody>
+      </table></div>
+    </section>
 
     <section class="panel">
       <h2>Supply by supplier region</h2>
@@ -411,6 +440,7 @@ async function renderInventory() {
         <option value="low_cover">Cover &lt; 4 weeks</option>
         <option value="components">Used in assemblies</option>
         <option value="understated">Pack pull not counted</option>
+        <option value="excess">Excess stock</option>
         <option value="parents">Assembled products</option>
         <option value="negative">Negative stock</option>
         <option value="no_supplier">No supplier set</option>
@@ -589,7 +619,15 @@ function expandPanelHtml(i) {
     ${kvRow("MYOB available (incl. on order)", qty(i.qtyAvailable), "muted-row")}
     ${kvRow("Min level", qty(i.minLevel))}
     ${kvRow("Avg cost", money(i.averageCost))}
-    ${kvRow("Stock value", money(stockValue))}`;
+    ${kvRow("Stock value", money(stockValue))}
+    ${
+      i.excess
+        ? kvRow(
+            "Excess beyond target cover",
+            `<span class="potential-val">${qty(i.excess.units)} units · ${money(i.excess.value)}</span>`,
+          )
+        : ""
+    }`;
 
   const demand = `
     <h3>Demand &amp; cover</h3>
@@ -894,6 +932,15 @@ async function renderItem(uid) {
                     <li>Less free stock ${qty(s.rationale.freeStock)} and incoming ${qty(s.rationale.incoming)}</li>
                     ${s.rationale.reorderMultiple ? `<li>Rounded to MYOB reorder multiple of ${qty(s.rationale.reorderMultiple)}</li>` : ""}
                   </ul>
+                  ${
+                    i.excess
+                      ? `<p style="margin:0.5rem 0 0"><strong>Note:</strong> this item also holds
+                         ${money(i.excess.value)} of stock beyond target cover. The order is suggested only because
+                         MYOB's minimum level (${qty(i.minLevel)}) sits well above what demand justifies
+                         (${i.demand.weekly.toFixed(1)}/week, ${i.coverWeeks}w cover) — worth reviewing the minimum
+                         itself before ordering.</p>`
+                      : ""
+                  }
                   Decision support only — nothing is sent to MYOB.
                 </div>
               </section>`
@@ -1527,6 +1574,20 @@ async function renderData() {
         <dt>Purchasing suggestions</dt>
         <dd>Weekly demand × target cover + minimum level − free stock − incoming, rounded to the MYOB reorder multiple.
         Advisory only.</dd>
+        <dt>Excess stock</dt>
+        <dd>Free stock beyond the excess threshold (default 26 weeks of cover), valued at average cost and only
+        counted when the item has real demand and the excess is worth at least $250 — so a slow mover with a
+        handful of cheap washers doesn't drown out genuine overstock. It is the counterpart to shortage risk:
+        stock Allied could stop reordering.</dd>
+        <dt>"Min level above demand"</dt>
+        <dd>An item can be flagged as excess (demand-based) and still suggest an order, because the suggestion
+        respects MYOB's minimum level. When both happen, the minimum is far above what demand justifies. Both
+        numbers are correct and neither is suppressed — the disagreement is shown so Allied can review the
+        minimum level itself, which is usually the real cause of the overstock.</dd>
+        <dt>Stock adjustments</dt>
+        <dd>MYOB inventory adjustments change stock without a sale, purchase or build (write-offs, stocktake
+        corrections, reversals). They are never treated as demand; the Overview lists the largest of the last
+        30 days by value so unusual movements get investigated rather than silently absorbed.</dd>
         <dt>Potential demand from packs (inferred — never in totals)</dt>
         <dd>When a pack, kit or dressing set sells more units in 90 days than were built or bought in the same
         period, the difference came out of finished stock made earlier. Rebuilding those units would pull its

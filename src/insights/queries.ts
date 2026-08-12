@@ -244,6 +244,11 @@ export interface ItemComputed {
     understatesMeasured: boolean;
   };
   coverWeeks: number | null;
+  /**
+   * Stock beyond the target cover, when it is material. Value tied up that
+   * Allied could stop reordering — the counterpart to shortage risk.
+   */
+  excess: { units: number; value: number; coverWeeks: number } | null;
   flags: string[];
   risk: { score: number; factors: { label: string; points: number }[] };
   suggestion: {
@@ -339,6 +344,23 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     factors.reduce((s, f) => s + f.points, 0),
   );
 
+  // Excess: stock beyond the target cover. Only meaningful with real demand
+  // and material value, so slow movers with a handful of cheap parts don't
+  // crowd out genuine overstock.
+  const excessThreshold = config.insights.excessCoverWeeks;
+  let excess: ItemComputed["excess"] = null;
+  if (weekly > 0 && coverWeeks != null && coverWeeks > excessThreshold) {
+    const units = Math.max((freeStock ?? 0) - weekly * excessThreshold, 0);
+    const value = units * (avgCost ?? 0);
+    if (units > 0 && value >= config.insights.excessMinValue) {
+      excess = {
+        units: Number(units.toFixed(1)),
+        value: Number(value.toFixed(2)),
+        coverWeeks,
+      };
+    }
+  }
+
   // Purchasing suggestion: cover target + min level, net of free stock and
   // incoming POs. Free stock excludes on-order so incoming is subtracted once.
   let suggestion: ItemComputed["suggestion"] = null;
@@ -365,6 +387,12 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
       };
     }
   }
+
+  // Excess (demand-based) and a suggestion (driven by MYOB's minimum level)
+  // can both be true when the minimum is far above what demand justifies.
+  // Both numbers are right; the contradiction itself is the insight, so it is
+  // flagged rather than resolved by suppressing one of them.
+  if (excess && suggestion) flags.push("min_above_demand");
 
   return {
     uid: String(row.uid),
@@ -424,6 +452,7 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
       understatesMeasured,
     },
     coverWeeks: coverWeeks == null ? null : Number(coverWeeks.toFixed(1)),
+    excess,
     flags,
     risk: { score, factors },
     suggestion,
@@ -507,6 +536,9 @@ export async function listItems(params: ListParams) {
     case "understated":
       rows = rows.filter((r) => r.flags.includes("understated_demand"));
       break;
+    case "excess":
+      rows = rows.filter((r) => r.excess != null);
+      break;
   }
 
   const sorters: Record<string, (a: ItemComputed, b: ItemComputed) => number> = {
@@ -545,13 +577,15 @@ export async function overview() {
   const suggested = items.filter((i) => i.suggestion != null);
   const stockValue = items.reduce((s, i) => s + (i.currentValue ?? 0), 0);
   const parents = items.filter((i) => i.componentCount > 0);
+  const excessItems = items.filter((i) => i.excess != null);
+  const excessValue = excessItems.reduce((s, i) => s + (i.excess?.value ?? 0), 0);
 
   const attention = [...items]
     .sort((a, b) => b.risk.score - a.risk.score)
     .filter((i) => i.risk.score > 0)
     .slice(0, 15);
 
-  const [constraints, relationships, freshness, openPoRegions] = await Promise.all([
+  const [constraints, relationships, freshness, openPoRegions, adjustments] = await Promise.all([
     // Blocking counts every product that depends on the component at any
     // depth, so a bolt short inside a pack also blocks the sets using it.
     pool.query(`
@@ -591,6 +625,20 @@ export async function overview() {
       LEFT JOIN platform_supplier_meta m ON m.supplier_uid = o.supplier_uid
       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
       GROUP BY s.country, m.region
+    `),
+    // Largest stock adjustments in the last 30 days by absolute value — the
+    // write-offs, stocktake corrections and reversals worth a second look.
+    pool.query(`
+      SELECT a.number, a.date, a.memo AS doc_memo, al.memo AS line_memo,
+             al.qty::float8 AS qty,
+             i.uid, i.number AS item_number, i.name AS item_name,
+             (ABS(al.qty) * COALESCE(NULLIF(al.unit_cost, 0), i.average_cost, 0))::float8 AS value
+      FROM myob_adjustment_lines al
+      JOIN myob_adjustments a ON a.uid = al.adjustment_uid
+      JOIN myob_items i ON i.uid = al.item_uid
+      WHERE a.date >= NOW() - INTERVAL '30 days' AND al.qty <> 0
+      ORDER BY value DESC
+      LIMIT 10
     `),
   ]);
 
@@ -633,13 +681,17 @@ export async function overview() {
       negativeStock: negative.length,
       suggestedOrders: suggested.length,
       trackedParents: parents.length,
+      excessItems: excessItems.length,
+      excessValue,
     },
     relationships: relationships.rows,
     attention,
     constraints: constraints.rows,
     regions,
+    adjustments: adjustments.rows,
     freshness: freshness.rows[0] ?? null,
     targetCoverWeeks: config.insights.targetCoverWeeks,
+    excessCoverWeeks: config.insights.excessCoverWeeks,
   };
 }
 

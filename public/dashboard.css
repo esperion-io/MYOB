@@ -371,6 +371,7 @@ tr.rowlink:hover { background: var(--brand-soft); }
 .src-legend .sw.platform { background: var(--brand); }
 .src-legend .sw.inferred { background: var(--brand-soft); border: 1px dashed var(--brand); }
 .potential-val { color: var(--brand-deep); }
+td.num.neg { color: var(--fail); }
 
 /* demand bars */
 

@@ -167,6 +167,12 @@ MYOB Business API  --(read-only GETs)-->  sync engine  -->  Postgres mirror
    history window; a few minutes for Allied's dataset).
 3. Afterwards use **Incremental sync** (or set `SYNC_INTERVAL_HOURS`).
 
+### Optional tuning
+
+`TARGET_COVER_WEEKS` (default 8) drives purchasing suggestions;
+`EXCESS_COVER_WEEKS` (26) and `EXCESS_MIN_VALUE` (250) decide what counts as
+overstock; `SYNC_WINDOW_DAYS` (365) bounds transactional history.
+
 ### Known limitations (also shown in-app)
 
 - History limited to the sync window; deleted MYOB documents disappear only on

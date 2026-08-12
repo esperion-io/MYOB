@@ -174,7 +174,7 @@ Dressing set → bolt pack → bolts is navigable today but not computed.
 **Acceptance:** for a dressing set containing a bolt pack, Allied sees both the
 pack-limited and bolts-limited answer and which base component binds first.
 
-## Phase 7 — Attention extras: unusual movements & excess stock
+## Phase 7 — Attention extras: unusual movements & excess stock ✅ DONE
 
 - **Unusual adjustments panel (Overview):** largest inventory adjustments in
   the last 30 days by absolute value (qty × avg cost), linked to the item —
@@ -189,6 +189,21 @@ pack-limited and bolts-limited answer and which base component binds first.
 
 **Acceptance:** Overview surfaces the big write-offs/write-ups and the
 overstocked value, each one click from its evidence.
+
+**Shipped 13 Aug 2026.** Excess = free stock beyond `EXCESS_COVER_WEEKS`
+(default 26) valued at average cost, only where demand is real and the excess
+is worth ≥ `EXCESS_MIN_VALUE` (default $250): **163 items, NZ$339,698** — 38%
+of stock value. Overview gains an excess KPI, an Inventory filter, and a
+largest-adjustments-30-days panel that immediately surfaced offsetting
+±4,000 pairs on one item.
+
+Testing found a trust bug: 9 items were flagged excess *and* suggested for
+reorder. Both figures were internally right — the suggestions come from MYOB
+minimum levels sitting far above demand (BN20220G: 0.5/week, 1,040 weeks
+cover, min level 750). Rather than suppress either number, the conflict is now
+flagged "Min level above demand", explained inline on the suggestion, and
+documented in the glossary — pointing Allied at the stale minimums that cause
+the overstock.
 
 ---
 

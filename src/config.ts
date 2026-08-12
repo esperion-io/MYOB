@@ -51,6 +51,10 @@ export const config = {
     targetCoverWeeks: Number(process.env.TARGET_COVER_WEEKS || 8),
     /** Optional auto-refresh interval (hours). 0 disables. */
     syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS || 0),
+    /** Cover beyond which stock counts as excess. */
+    excessCoverWeeks: Number(process.env.EXCESS_COVER_WEEKS || 26),
+    /** Ignore excess worth less than this (NZD) to avoid noise. */
+    excessMinValue: Number(process.env.EXCESS_MIN_VALUE || 250),
     /** Optional shared access key protecting dashboard APIs. */
     dashboardAccessKey: optional("DASHBOARD_ACCESS_KEY"),
   },
