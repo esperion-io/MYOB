@@ -66,6 +66,11 @@ const DDL: string[] = [
     is_active BOOLEAN,
     synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`,
+  // Address details added for supplier-region analysis (from Contact/Supplier).
+  `ALTER TABLE myob_suppliers ADD COLUMN IF NOT EXISTS city TEXT`,
+  `ALTER TABLE myob_suppliers ADD COLUMN IF NOT EXISTS country TEXT`,
+  `ALTER TABLE myob_suppliers ADD COLUMN IF NOT EXISTS phone TEXT`,
+  `ALTER TABLE myob_suppliers ADD COLUMN IF NOT EXISTS email TEXT`,
 
   `CREATE TABLE IF NOT EXISTS myob_sale_invoices (
     uid TEXT PRIMARY KEY,
@@ -212,6 +217,18 @@ const DDL: string[] = [
     confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (parent_uid, component_uid, source)
+  )`,
+
+  // Allied-managed supplier attributes (region label, lead time, notes).
+  // Platform data only — never written to MYOB. A row exists only once a
+  // user edits something; region falls back to an auto label derived from
+  // the MYOB address country.
+  `CREATE TABLE IF NOT EXISTS platform_supplier_meta (
+    supplier_uid TEXT PRIMARY KEY,
+    region TEXT,
+    lead_time_days DOUBLE PRECISION,
+    notes TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`,
 
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,

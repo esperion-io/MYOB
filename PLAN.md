@@ -58,7 +58,7 @@ three-column panel (Position / Demand & cover / Why & action) from the list
 payload; lazy 12-month chart + last-5 movements per row, cached; item number
 links to the full page; multiple rows can stay open.
 
-## Phase 3 — Suppliers: regions (NZ vs China vs other) + a place to manage them
+## Phase 3 — Suppliers: regions (NZ vs China vs other) + a place to manage them ✅ DONE
 
 **Today there is no supplier surface** — suppliers sync as (uid, name, active)
 and only appear as group labels on the Purchasing page. This phase adds one.
@@ -89,6 +89,14 @@ and only appear as group labels on the Purchasing page. This phase adds one.
 **Acceptance:** Allied can answer "what share of our stock value and incoming
 supply comes from China vs NZ?" from the Overview, and correct any mislabelled
 supplier themselves in under a minute.
+
+**Shipped 12 Aug 2026**, with one addition discovered from Allied's real data:
+the MYOB "primary supplier" field is unused on Allied's items (0 of 3,100 set),
+so an item's supplier is now the MYOB primary where set, otherwise the
+**dominant supplier inferred from purchase-bill history** — always labelled
+"inferred" in the UI and CSV. This also turned the Purchasing page from one
+giant "no supplier" group into 28 real supplier groups, and the Suppliers page
+counts items supplied under the same rule.
 
 ## Phase 4 — Close the BOM coverage gap (207 parents known vs ~hundreds real)
 

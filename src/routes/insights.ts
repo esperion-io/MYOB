@@ -14,6 +14,8 @@ import {
   purchasingCsv,
   relationships,
   removeUserBom,
+  setSupplierMeta,
+  suppliersList,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 
@@ -105,6 +107,7 @@ insightsRouter.get("/items", async (req, res) => {
       await listItems({
         q: typeof req.query.q === "string" ? req.query.q : undefined,
         filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
+        region: typeof req.query.region === "string" ? req.query.region : undefined,
         sort: typeof req.query.sort === "string" ? req.query.sort : undefined,
         page: Number(req.query.page) || 1,
         pageSize: Number(req.query.pageSize) || 50,
@@ -183,6 +186,42 @@ insightsRouter.get("/data", async (_req, res) => {
     res.json(await dataStatus());
   } catch (err) {
     send500(res, err);
+  }
+});
+
+// ---- Suppliers (MYOB facts + platform region/lead-time/notes labels) ----
+
+insightsRouter.get("/suppliers", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(
+      await suppliersList({
+        q: typeof req.query.q === "string" ? req.query.q : undefined,
+      }),
+    );
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.post("/suppliers/meta", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { supplierUid, region, leadTimeDays, notes } = req.body ?? {};
+    if (!supplierUid) {
+      res.status(400).json({ error: "supplierUid is required." });
+      return;
+    }
+    await setSupplierMeta(String(supplierUid), {
+      region: region === undefined ? undefined : region === null ? "" : String(region),
+      leadTimeDays:
+        leadTimeDays === undefined ? undefined : leadTimeDays === null ? null : Number(leadTimeDays),
+      notes: notes === undefined ? undefined : notes === null ? null : String(notes),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
   }
 });
 

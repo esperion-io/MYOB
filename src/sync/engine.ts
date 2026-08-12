@@ -142,15 +142,25 @@ const ENTITIES: EntitySpec[] = [
       insertRows(
         client,
         "myob_suppliers",
-        ["uid", "display_id", "name", "is_active"],
-        items.map((s) => [
-          str(s.UID),
-          str(s.DisplayID),
-          str(s.CompanyName) ?? [str(s.FirstName), str(s.LastName)].filter(Boolean).join(" ") ?? null,
-          bool(s.IsActive),
-        ]),
+        ["uid", "display_id", "name", "is_active", "city", "country", "phone", "email"],
+        items.map((s) => {
+          const addresses = Array.isArray(s.Addresses) ? (s.Addresses as Raw[]) : [];
+          const addr = addresses[0] ?? {};
+          return [
+            str(s.UID),
+            str(s.DisplayID),
+            str(s.CompanyName) ?? [str(s.FirstName), str(s.LastName)].filter(Boolean).join(" ") ?? null,
+            bool(s.IsActive),
+            str(addr.City),
+            str(addr.Country),
+            str(addr.Phone1),
+            str(addr.Email),
+          ];
+        }),
         `ON CONFLICT (uid) DO UPDATE SET display_id = EXCLUDED.display_id,
-          name = EXCLUDED.name, is_active = EXCLUDED.is_active, synced_at = NOW()`,
+          name = EXCLUDED.name, is_active = EXCLUDED.is_active,
+          city = EXCLUDED.city, country = EXCLUDED.country,
+          phone = EXCLUDED.phone, email = EXCLUDED.email, synced_at = NOW()`,
       ),
   },
   {

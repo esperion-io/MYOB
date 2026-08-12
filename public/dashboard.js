@@ -18,8 +18,21 @@ const FLAG_LABELS = {
   slow_mover: ["Slow mover", "idle"],
 };
 
-const invState = { q: "", filter: "all", sort: "risk", page: 1 };
+const invState = { q: "", filter: "all", region: "", sort: "risk", page: 1 };
 const prodState = { q: "", page: 1 };
+const supState = { q: "" };
+
+const REGION_TONE = { NZ: "ok", Australia: "warn", China: "brand" };
+
+/** Supplier region chip. Region labels are platform data (auto from the MYOB
+ * address country, or set by Allied staff), never MYOB fields. */
+function regionChip(region, source) {
+  if (!region) return "";
+  const tone = REGION_TONE[region] ?? "idle";
+  const title = source === "user" ? "Region set by Allied staff" : "Region derived from MYOB address country";
+  const mark = source === "user" ? "" : " ·auto";
+  return `<span class="badge ${tone}" title="${title}">${esc(region)}${mark}</span>`;
+}
 let syncPollTimer = null;
 
 /* ---------- helpers ---------- */
@@ -234,6 +247,7 @@ function route() {
     inventory: renderInventory,
     item: () => renderItem(arg),
     products: renderProducts,
+    suppliers: renderSuppliers,
     purchasing: renderPurchasing,
     data: renderData,
   };
@@ -333,7 +347,35 @@ async function renderOverview() {
           </tbody>
         </table></div>
       </section>
-    </div>`;
+    </div>
+
+    <section class="panel">
+      <h2>Supply by supplier region</h2>
+      <p class="hint">Region labels are platform data: auto from the supplier's MYOB address country, or set by
+      Allied on the <a href="#/suppliers">Suppliers</a> page. Stock value groups items by supplier
+      (MYOB primary where set, otherwise inferred from purchase history); incoming groups open purchase
+      orders by the ordering supplier.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Region</th><th class="num">SKUs</th><th class="num">Stock value</th><th class="num">% of value</th><th class="num">Open PO value</th><th class="num">Open POs</th></tr></thead>
+        <tbody>
+          ${(() => {
+            const totalValue = (data.regions || []).reduce((s, r) => s + r.stockValue, 0) || 1;
+            return (data.regions || [])
+              .map(
+                (r) => `<tr>
+                  <td><span class="badge ${REGION_TONE[r.region] ?? "idle"}">${esc(r.region)}</span></td>
+                  <td class="num">${qty(r.skus)}</td>
+                  <td class="num">${money(r.stockValue)}</td>
+                  <td class="num">${((r.stockValue / totalValue) * 100).toFixed(1)}%</td>
+                  <td class="num">${money(r.openPoValue)}</td>
+                  <td class="num">${qty(r.openPoOrders)}</td>
+                </tr>`,
+              )
+              .join("");
+          })()}
+        </tbody>
+      </table></div>
+    </section>`;
 
   main.querySelectorAll("tr.rowlink").forEach((tr) =>
     tr.addEventListener("click", () => (location.hash = `#/item/${tr.dataset.uid}`)),
@@ -371,6 +413,14 @@ async function renderInventory() {
         <option value="no_supplier">No supplier set</option>
         <option value="inactive_stock">Inactive with stock</option>
       </select>
+      <select id="inv-region">
+        <option value="">All regions</option>
+        <option value="NZ">Region: NZ</option>
+        <option value="Australia">Region: Australia</option>
+        <option value="China">Region: China</option>
+        <option value="Overseas — other">Region: Overseas — other</option>
+        <option value="none">Region: unlabelled</option>
+      </select>
       <select id="inv-sort">
         <option value="risk">Sort: risk</option>
         <option value="cover">Sort: lowest cover</option>
@@ -385,8 +435,10 @@ async function renderInventory() {
 
   const q = document.getElementById("inv-q");
   const filter = document.getElementById("inv-filter");
+  const region = document.getElementById("inv-region");
   const sort = document.getElementById("inv-sort");
   filter.value = invState.filter;
+  region.value = invState.region;
   sort.value = invState.sort;
 
   let debounce;
@@ -400,6 +452,11 @@ async function renderInventory() {
   });
   filter.addEventListener("change", () => {
     invState.filter = filter.value;
+    invState.page = 1;
+    loadInventoryTable();
+  });
+  region.addEventListener("change", () => {
+    invState.region = region.value;
     invState.page = 1;
     loadInventoryTable();
   });
@@ -424,6 +481,7 @@ async function loadInventoryTable() {
   const params = new URLSearchParams({
     q: invState.q,
     filter: invState.filter,
+    region: invState.region,
     sort: invState.sort,
     page: String(invState.page),
   });
@@ -561,7 +619,10 @@ function expandPanelHtml(i) {
           </div>`
         : ""
     }
-    ${kvRow("Primary supplier", esc(i.supplierName ?? "—"))}
+    ${kvRow(
+      i.supplierSource === "inferred" ? "Supplier (inferred from purchases)" : "Primary supplier (MYOB)",
+      `${regionChip(i.supplierRegion, i.supplierRegionSource)} ${esc(i.supplierName ?? "—")}`,
+    )}
     ${i.supplierItemNumber ? kvRow("Supplier item no", esc(i.supplierItemNumber)) : ""}`;
 
   return `
@@ -957,6 +1018,134 @@ async function loadProductsTable() {
   });
 }
 
+/* ---------- suppliers ---------- */
+
+async function renderSuppliers() {
+  main.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Suppliers</h1>
+        <p class="page-sub">MYOB supplier facts with Allied-managed labels: region, lead time, notes.
+        Labels live in this platform only — never written to MYOB — and drive the region split on
+        Overview, Inventory and Purchasing.</p>
+      </div>
+    </div>
+    <div class="toolbar">
+      <input type="search" id="sup-q" placeholder="Search name, city, country, region…" value="${esc(supState.q)}" />
+    </div>
+    <div id="sup-table"><p class="loading">Loading suppliers…</p></div>`;
+
+  const q = document.getElementById("sup-q");
+  let debounce;
+  q.addEventListener("input", () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      supState.q = q.value;
+      loadSuppliersTable();
+    }, 300);
+  });
+
+  await loadSuppliersTable();
+}
+
+async function saveSupplierMeta(uid, patch, statusEl) {
+  try {
+    await fetchJson("/api/insights/suppliers/meta", {
+      method: "POST",
+      body: JSON.stringify({ supplierUid: uid, ...patch }),
+    });
+    if (statusEl) {
+      statusEl.textContent = "saved";
+      setTimeout(() => (statusEl.textContent = ""), 1500);
+    }
+  } catch (err) {
+    alert(`Could not save: ${err.message}`);
+  }
+}
+
+async function loadSuppliersTable() {
+  const container = document.getElementById("sup-table");
+  if (!container) return;
+  container.innerHTML = '<p class="loading">Loading suppliers…</p>';
+  const params = new URLSearchParams({ q: supState.q });
+  const data = await fetchJson(`/api/insights/suppliers?${params}`);
+
+  const regionOptions = (s) =>
+    [
+      `<option value="">Auto: ${esc(autoLabel(s))}</option>`,
+      ...data.regions.map(
+        (r) => `<option value="${esc(r)}" ${s.region_override === r ? "selected" : ""}>${esc(r)}</option>`,
+      ),
+    ].join("");
+
+  function autoLabel(s) {
+    return s.auto_region ? `${s.auto_region}${s.country ? ` (${s.country})` : ""}` : "unlabelled";
+  }
+
+  container.innerHTML = `
+    <div class="table-wrap"><table>
+      <thead><tr>
+        <th>Supplier</th><th>Region (Allied label)</th><th class="num">Items</th>
+        <th class="num">Bought 365d</th><th class="num">Open PO value</th>
+        <th>Lead time</th><th>Notes</th><th></th>
+      </tr></thead>
+      <tbody>
+        ${
+          data.suppliers.length
+            ? data.suppliers
+                .map(
+                  (s) => `<tr data-uid="${esc(s.uid)}">
+                    <td>
+                      <strong>${esc(s.name ?? "—")}</strong>
+                      ${s.is_active === false ? '<span class="badge warn">Inactive</span>' : ""}
+                      <br /><span class="muted">${esc([s.city, s.country].filter(Boolean).join(", ") || "No address country in MYOB")}</span>
+                    </td>
+                    <td>
+                      ${regionChip(s.region, s.region_source)}
+                      <select class="sup-region">${regionOptions(s)}</select>
+                    </td>
+                    <td class="num" title="Items supplied: MYOB primary supplier or inferred from purchase history${s.primary_items ? ` (${s.primary_items} set as MYOB primary)` : ""}">${qty(s.supplied_items)}</td>
+                    <td class="num">${money(s.purchase_value_365)}<br /><span class="muted">${qty(s.bills_365)} bill(s)</span></td>
+                    <td class="num">${money(s.open_po_value)}<br /><span class="muted">${qty(s.open_po_count)} open</span></td>
+                    <td>
+                      <input class="sup-lead" type="number" min="1" max="365" step="1"
+                        placeholder="${s.promised_days != null ? `~${Math.round(s.promised_days)}d promised` : "—"}"
+                        value="${s.lead_time_days ?? ""}" title="Allied-set lead time in days${
+                          s.promised_days != null
+                            ? `. Placeholder = median promised lead from ${s.lead_po_count} PO(s)`
+                            : ""
+                        }" />
+                    </td>
+                    <td><input class="sup-notes" type="text" maxlength="500" placeholder="Notes…" value="${esc(s.notes ?? "")}" /></td>
+                    <td class="muted sup-status"></td>
+                  </tr>`,
+                )
+                .join("")
+            : '<tr><td colspan="8" class="muted">No suppliers synced yet.</td></tr>'
+        }
+      </tbody>
+    </table></div>
+    <p class="hint">${qty(data.total)} suppliers · region auto-labels come from the MYOB address country — pick a region to
+    override, or "Auto" to fall back. Lead time placeholder shows the median promised lead from MYOB purchase orders;
+    typing a value records Allied's own figure.</p>`;
+
+  container.querySelectorAll("tr[data-uid]").forEach((tr) => {
+    const uid = tr.dataset.uid;
+    const status = tr.querySelector(".sup-status");
+    tr.querySelector(".sup-region")?.addEventListener("change", async (e) => {
+      await saveSupplierMeta(uid, { region: e.target.value }, status);
+      loadSuppliersTable();
+    });
+    tr.querySelector(".sup-lead")?.addEventListener("change", (e) => {
+      const v = e.target.value.trim();
+      saveSupplierMeta(uid, { leadTimeDays: v === "" ? null : Number(v) }, status);
+    });
+    tr.querySelector(".sup-notes")?.addEventListener("change", (e) => {
+      saveSupplierMeta(uid, { notes: e.target.value }, status);
+    });
+  });
+}
+
 /* ---------- purchasing ---------- */
 
 async function renderPurchasing() {
@@ -969,7 +1158,8 @@ async function renderPurchasing() {
       <div>
         <h1>Purchasing</h1>
         <p class="page-sub">${qty(data.totalItems)} items suggested or below minimum · target cover ${data.targetCoverWeeks} weeks ·
-        grouped by MYOB primary supplier. Suggestions are decision support — nothing is written to MYOB.</p>
+        grouped by supplier (MYOB primary where set, otherwise inferred from purchase history).
+        Suggestions are decision support — nothing is written to MYOB.</p>
       </div>
       <div class="head-actions">
         <a class="btn primary" href="${csvUrl}" download>Export CSV</a>
@@ -980,7 +1170,7 @@ async function renderPurchasing() {
         ? data.suppliers
             .map(
               (g) => `<section class="panel">
-              <h2>${esc(g.supplier)} <span class="muted" style="text-transform:none;font-weight:500">· ${qty(g.itemCount)} item(s) · est ${money(g.estimatedCost)}</span></h2>
+              <h2>${esc(g.supplier)} ${regionChip(g.region, g.regionSource)} <span class="muted" style="text-transform:none;font-weight:500">· ${qty(g.itemCount)} item(s) · est ${money(g.estimatedCost)}</span></h2>
               <div class="table-wrap"><table>
                 <thead><tr>
                   <th>Risk</th><th>Item</th><th class="num">Free stock</th><th class="num">Incoming</th>
@@ -1075,7 +1265,7 @@ async function renderData() {
             <tr><td>Negative stock (needs investigation in MYOB)</td><td class="num">${qty(d.dataQuality.negativeStock)}</td></tr>
             <tr><td>Stock on hand with zero average cost</td><td class="num">${qty(d.dataQuality.stockNoCost)}</td></tr>
             <tr><td>Inactive items still holding stock</td><td class="num">${qty(d.dataQuality.inactiveWithStock)}</td></tr>
-            <tr><td>Items with demand but no primary supplier</td><td class="num">${qty(d.dataQuality.demandNoSupplier)}</td></tr>
+            <tr><td>Items with demand but no known supplier (no MYOB primary, no purchase history)</td><td class="num">${qty(d.dataQuality.demandNoSupplier)}</td></tr>
           </tbody>
         </table></div>
       </section>
@@ -1129,6 +1319,13 @@ async function renderData() {
         <dt>Purchasing suggestions</dt>
         <dd>Weekly demand × target cover + minimum level − free stock − incoming, rounded to the MYOB reorder multiple.
         Advisory only.</dd>
+        <dt>Suppliers, regions &amp; lead times</dt>
+        <dd>An item's supplier is its MYOB primary supplier where set; Allied's file rarely sets one, so the
+        platform otherwise infers the dominant supplier from purchase-bill history (always labelled "inferred").
+        Region labels are platform data: derived automatically from the supplier's MYOB address country
+        (NZ / Australia / China / Overseas — other) and overridable on the Suppliers page. Lead times shown as
+        "promised" are the median of MYOB purchase-order date → promised date; Allied-entered lead times are
+        platform data and take precedence.</dd>
         <dt>Known limitations</dt>
         <dd>Transactional history is limited to the sync window (${d.settings.syncWindowDays} days). Per-location stock split is not
         exposed by the item master. Documents deleted in MYOB after syncing are only removed by a full sync. Supplier lead

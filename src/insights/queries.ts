@@ -24,6 +24,27 @@ import { ensureInsightsSchema } from "../sync/schema.js";
  *   "incoming" from open purchase orders.
  */
 
+/**
+ * Supplier regions are PLATFORM labels, not MYOB data. The label is derived
+ * automatically from the supplier's MYOB address country and can be
+ * overridden per supplier by Allied staff (platform_supplier_meta.region).
+ * Fixed set keeps the split meaningful: the question Allied asks is
+ * "NZ vs China (vs other) — where is our stock coming from?".
+ */
+export const SUPPLIER_REGIONS = ["NZ", "Australia", "China", "Overseas — other"] as const;
+export type SupplierRegion = (typeof SUPPLIER_REGIONS)[number];
+
+export function autoRegion(country: string | null | undefined): SupplierRegion | null {
+  if (!country) return null;
+  const c = country.trim().toLowerCase();
+  if (!c) return null;
+  if (["new zealand", "nz", "aotearoa", "new zealand (aotearoa)"].includes(c)) return "NZ";
+  if (["australia", "au", "aus"].includes(c)) return "Australia";
+  if (["china", "cn", "prc", "people's republic of china", "china (mainland)"].includes(c))
+    return "China";
+  return "Overseas — other";
+}
+
 const DEMAND_CTE = `
   direct_demand AS (
     SELECT l.item_uid,
@@ -63,6 +84,15 @@ const DEMAND_CTE = `
            COUNT(DISTINCT component_uid)::int AS component_count
     FROM platform_bom
     GROUP BY parent_uid
+  ),
+  dominant_supplier AS (
+    SELECT DISTINCT ON (l.item_uid)
+           l.item_uid, b.supplier_uid, b.supplier_name
+    FROM myob_purchase_bill_lines l
+    JOIN myob_purchase_bills b ON b.uid = l.bill_uid
+    WHERE l.item_uid IS NOT NULL AND b.supplier_uid IS NOT NULL
+    GROUP BY l.item_uid, b.supplier_uid, b.supplier_name
+    ORDER BY l.item_uid, SUM(COALESCE(l.total, 0)) DESC
   )
 `;
 
@@ -74,6 +104,10 @@ const ITEM_SELECT = `
          it.min_level, it.reorder_qty,
          it.primary_supplier_uid, it.primary_supplier_name, it.supplier_item_number,
          it.synced_at,
+         ds.supplier_uid AS inferred_supplier_uid,
+         ds.supplier_name AS inferred_supplier_name,
+         sup.country AS supplier_country,
+         sm.region AS supplier_region_override,
          COALESCE(dd.direct_90, 0) AS direct_90,
          COALESCE(dd.direct_365, 0) AS direct_365,
          COALESCE(cd.comp_90, 0) AS comp_90,
@@ -87,6 +121,9 @@ const ITEM_SELECT = `
   LEFT JOIN incoming inc ON inc.item_uid = it.uid
   LEFT JOIN bom_usage u ON u.item_uid = it.uid
   LEFT JOIN bom_parents p ON p.item_uid = it.uid
+  LEFT JOIN dominant_supplier ds ON ds.item_uid = it.uid
+  LEFT JOIN myob_suppliers sup ON sup.uid = COALESCE(it.primary_supplier_uid, ds.supplier_uid)
+  LEFT JOIN platform_supplier_meta sm ON sm.supplier_uid = COALESCE(it.primary_supplier_uid, ds.supplier_uid)
 `;
 
 export interface ItemComputed {
@@ -109,9 +146,15 @@ export interface ItemComputed {
   baseSellingPrice: number | null;
   minLevel: number | null;
   reorderQty: number | null;
+  /** Effective supplier: MYOB primary supplier when set, else the dominant
+   * supplier inferred from purchase-bill history (see supplierSource). */
   supplierUid: string | null;
   supplierName: string | null;
+  supplierSource: "myob" | "inferred" | null;
   supplierItemNumber: string | null;
+  /** Platform label: user override, else auto from MYOB address country. */
+  supplierRegion: string | null;
+  supplierRegionSource: "user" | "auto" | null;
   syncedAt: string | null;
   demand: {
     direct90: number;
@@ -174,7 +217,10 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
   if ((onHand ?? 0) < 0) flags.push("negative_stock");
   if ((onHand ?? 0) > 0 && (avgCost ?? 0) === 0) flags.push("stock_no_cost");
   if (isActive === false && (onHand ?? 0) > 0) flags.push("inactive_with_stock");
-  if (weekly > 0 && !row.primary_supplier_uid) flags.push("no_supplier");
+  // Effective supplier: MYOB primary when set, else inferred from purchases.
+  const supplierUid =
+    (row.primary_supplier_uid as string) ?? (row.inferred_supplier_uid as string) ?? null;
+  if (weekly > 0 && !supplierUid) flags.push("no_supplier");
   if (basis === "365d") flags.push("slow_mover");
 
   const factors: { label: string; points: number }[] = [];
@@ -250,9 +296,25 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     baseSellingPrice: n(row.base_selling_price),
     minLevel,
     reorderQty: n(row.reorder_qty),
-    supplierUid: (row.primary_supplier_uid as string) ?? null,
-    supplierName: (row.primary_supplier_name as string) ?? null,
+    supplierUid,
+    supplierName:
+      (row.primary_supplier_name as string) ??
+      (row.inferred_supplier_name as string) ??
+      null,
+    supplierSource: row.primary_supplier_uid
+      ? "myob"
+      : row.inferred_supplier_uid
+        ? "inferred"
+        : null,
     supplierItemNumber: (row.supplier_item_number as string) ?? null,
+    supplierRegion:
+      (row.supplier_region_override as string) ??
+      autoRegion(row.supplier_country as string | null),
+    supplierRegionSource: row.supplier_region_override
+      ? "user"
+      : autoRegion(row.supplier_country as string | null)
+        ? "auto"
+        : null,
     syncedAt: row.synced_at ? new Date(row.synced_at as string).toISOString() : null,
     demand: {
       direct90,
@@ -292,6 +354,7 @@ export function invalidateItemsCache(): void {
 export interface ListParams {
   q?: string;
   filter?: string;
+  region?: string;
   sort?: string;
   page?: number;
   pageSize?: number;
@@ -308,6 +371,13 @@ export async function listItems(params: ListParams) {
         .toLowerCase()
         .includes(q),
     );
+  }
+
+  if (params.region) {
+    rows =
+      params.region === "none"
+        ? rows.filter((r) => r.supplierRegion == null)
+        : rows.filter((r) => r.supplierRegion === params.region);
   }
 
   switch (params.filter) {
@@ -382,7 +452,7 @@ export async function overview() {
     .filter((i) => i.risk.score > 0)
     .slice(0, 15);
 
-  const [constraints, relationships, freshness] = await Promise.all([
+  const [constraints, relationships, freshness, openPoRegions] = await Promise.all([
     pool.query(`
       SELECT b.component_uid AS uid, i.number, i.name,
              (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
@@ -401,7 +471,44 @@ export async function overview() {
       SELECT MIN(last_synced_at) AS oldest, MAX(last_synced_at) AS newest
       FROM sync_state
     `),
+    pool.query(`
+      SELECT s.country, m.region AS override,
+             COALESCE(SUM(o.total), 0)::float8 AS value, COUNT(*)::int AS orders
+      FROM myob_purchase_orders o
+      LEFT JOIN myob_suppliers s ON s.uid = o.supplier_uid
+      LEFT JOIN platform_supplier_meta m ON m.supplier_uid = o.supplier_uid
+      WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
+      GROUP BY s.country, m.region
+    `),
   ]);
+
+  // Stock value by supplier region (items' primary supplier) + open-PO value
+  // by the ordering supplier's region. Region labels are platform data.
+  const regionRows = new Map<
+    string,
+    { region: string; skus: number; stockValue: number; openPoValue: number; openPoOrders: number }
+  >();
+  const regionRow = (label: string) => {
+    if (!regionRows.has(label))
+      regionRows.set(label, { region: label, skus: 0, stockValue: 0, openPoValue: 0, openPoOrders: 0 });
+    return regionRows.get(label)!;
+  };
+  for (const i of items) {
+    const label = i.supplierRegion ?? (i.supplierUid ? "Unlabelled" : "No supplier");
+    const r = regionRow(label);
+    r.skus += 1;
+    r.stockValue += i.currentValue ?? 0;
+  }
+  for (const row of openPoRegions.rows) {
+    const label =
+      (row.override as string) ??
+      autoRegion(row.country as string | null) ??
+      "Unlabelled";
+    const r = regionRow(label);
+    r.openPoValue += Number(row.value) || 0;
+    r.openPoOrders += Number(row.orders) || 0;
+  }
+  const regions = [...regionRows.values()].sort((a, b) => b.stockValue - a.stockValue);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -418,6 +525,7 @@ export async function overview() {
     relationships: relationships.rows,
     attention,
     constraints: constraints.rows,
+    regions,
     freshness: freshness.rows[0] ?? null,
     targetCoverWeeks: config.insights.targetCoverWeeks,
   };
@@ -614,10 +722,19 @@ export async function purchasing() {
     .filter((i) => i.suggestion != null || i.flags.includes("below_min"))
     .sort((a, b) => b.risk.score - a.risk.score);
 
-  const groups = new Map<string, { supplier: string; items: ItemComputed[] }>();
+  const groups = new Map<
+    string,
+    { supplier: string; region: string | null; regionSource: string | null; items: ItemComputed[] }
+  >();
   for (const item of rows) {
-    const key = item.supplierName ?? "No primary supplier in MYOB";
-    if (!groups.has(key)) groups.set(key, { supplier: key, items: [] });
+    const key = item.supplierName ?? "No known supplier";
+    if (!groups.has(key))
+      groups.set(key, {
+        supplier: key,
+        region: item.supplierRegion,
+        regionSource: item.supplierRegionSource,
+        items: [],
+      });
     groups.get(key)!.items.push(item);
   }
 
@@ -627,6 +744,8 @@ export async function purchasing() {
     totalItems: rows.length,
     suppliers: [...groups.values()].map((g) => ({
       supplier: g.supplier,
+      region: g.region,
+      regionSource: g.regionSource,
       itemCount: g.items.length,
       estimatedCost: g.items.reduce(
         (s, i) => s + (i.suggestion?.qty ?? 0) * (i.averageCost ?? 0),
@@ -644,7 +763,7 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
   };
   const lines = [
     [
-      "Supplier", "Item number", "Item name", "Supplier item no",
+      "Supplier", "Supplier source", "Item number", "Item name", "Supplier item no",
       "On hand", "Committed", "Free stock", "On order (incoming)", "Min level",
       "Weekly demand", "Demand basis", "Cover (weeks)",
       "Suggested order qty", "Est cost", "Risk score", "Flags",
@@ -654,7 +773,9 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
     for (const i of g.items) {
       lines.push(
         [
-          esc(g.supplier), esc(i.number), esc(i.name), esc(i.supplierItemNumber),
+          esc(g.supplier),
+          i.supplierSource === "inferred" ? "inferred from purchases" : i.supplierSource === "myob" ? "MYOB primary" : "",
+          esc(i.number), esc(i.name), esc(i.supplierItemNumber),
           i.qtyOnHand ?? "", i.qtyCommitted ?? "", i.qtyFreeStock ?? "", i.incomingQty,
           i.minLevel ?? "", i.demand.weekly, i.demand.basis,
           i.coverWeeks ?? "", i.suggestion?.qty ?? 0,
@@ -708,6 +829,123 @@ export async function dataStatus() {
       syncIntervalHours: config.insights.syncIntervalHours,
     },
   };
+}
+
+/**
+ * Suppliers with purchasing context and Allied-managed attributes.
+ * MYOB facts (name, address, activity) + platform labels (region, lead time,
+ * notes) + derived promised lead time (median PO date → promised date).
+ */
+export async function suppliersList(params: { q?: string }) {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT s.uid, s.name, s.display_id, s.is_active, s.city, s.country,
+           s.phone, s.email, s.synced_at,
+           m.region AS region_override, m.lead_time_days, m.notes,
+           m.updated_at AS meta_updated_at,
+           (SELECT COUNT(*)::int FROM myob_items i WHERE i.primary_supplier_uid = s.uid) AS primary_items,
+           (SELECT COALESCE(SUM(b.total), 0)::float8 FROM myob_purchase_bills b
+             WHERE b.supplier_uid = s.uid AND b.date >= NOW() - INTERVAL '365 days') AS purchase_value_365,
+           (SELECT COUNT(*)::int FROM myob_purchase_bills b
+             WHERE b.supplier_uid = s.uid AND b.date >= NOW() - INTERVAL '365 days') AS bills_365,
+           po.open_value AS open_po_value, po.open_count AS open_po_count,
+           lead.promised_days, lead.lead_po_count
+    FROM myob_suppliers s
+    LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(o.total), 0)::float8 AS open_value, COUNT(*)::int AS open_count
+      FROM myob_purchase_orders o
+      WHERE o.supplier_uid = s.uid AND UPPER(COALESCE(o.status, '')) = 'OPEN'
+    ) po ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (
+               ORDER BY EXTRACT(EPOCH FROM (o.promised_date - o.date)) / 86400.0
+             )::float8 AS promised_days,
+             COUNT(*)::int AS lead_po_count
+      FROM myob_purchase_orders o
+      WHERE o.supplier_uid = s.uid
+        AND o.date IS NOT NULL AND o.promised_date IS NOT NULL
+        AND o.promised_date > o.date
+    ) lead ON TRUE
+    ORDER BY purchase_value_365 DESC NULLS LAST, s.name
+  `);
+
+  // Items supplied per supplier under the effective rule (MYOB primary when
+  // set, else dominant supplier inferred from purchase bills).
+  const items = await computedItems();
+  const suppliedCounts = new Map<string, number>();
+  for (const i of items) {
+    if (i.supplierUid)
+      suppliedCounts.set(i.supplierUid, (suppliedCounts.get(i.supplierUid) ?? 0) + 1);
+  }
+
+  let rows = result.rows.map((r) => ({
+    ...r,
+    supplied_items: suppliedCounts.get(r.uid as string) ?? 0,
+    auto_region: autoRegion(r.country as string | null),
+    region: (r.region_override as string) ?? autoRegion(r.country as string | null),
+    region_source: r.region_override
+      ? "user"
+      : autoRegion(r.country as string | null)
+        ? "auto"
+        : null,
+  }));
+  const q = params.q?.trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((r) =>
+      `${r.name ?? ""} ${r.display_id ?? ""} ${r.city ?? ""} ${r.country ?? ""} ${r.region ?? ""}`
+        .toLowerCase()
+        .includes(q),
+    );
+  }
+  return {
+    total: rows.length,
+    regions: SUPPLIER_REGIONS,
+    suppliers: rows,
+  };
+}
+
+export async function setSupplierMeta(
+  supplierUid: string,
+  patch: { region?: string | null; leadTimeDays?: number | null; notes?: string | null },
+): Promise<void> {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const exists = await pool.query(`SELECT 1 FROM myob_suppliers WHERE uid = $1`, [supplierUid]);
+  if (!exists.rows.length) throw new Error("Supplier not found in synced data.");
+
+  if (patch.region != null && patch.region !== "" &&
+      !SUPPLIER_REGIONS.includes(patch.region as SupplierRegion)) {
+    throw new Error(`Region must be one of: ${SUPPLIER_REGIONS.join(", ")} (or empty for auto).`);
+  }
+  const region = patch.region === "" ? null : (patch.region ?? undefined);
+  if (patch.leadTimeDays != null && !(patch.leadTimeDays > 0 && patch.leadTimeDays <= 365)) {
+    throw new Error("leadTimeDays must be between 1 and 365, or null to clear.");
+  }
+  const notes =
+    patch.notes === undefined ? undefined : (patch.notes?.trim().slice(0, 500) || null);
+
+  // COALESCE-based partial update: only fields present in the patch change.
+  await pool.query(
+    `INSERT INTO platform_supplier_meta (supplier_uid, region, lead_time_days, notes, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (supplier_uid) DO UPDATE SET
+       region = CASE WHEN $5 THEN $2 ELSE platform_supplier_meta.region END,
+       lead_time_days = CASE WHEN $6 THEN $3 ELSE platform_supplier_meta.lead_time_days END,
+       notes = CASE WHEN $7 THEN $4 ELSE platform_supplier_meta.notes END,
+       updated_at = NOW()`,
+    [
+      supplierUid,
+      region ?? null,
+      patch.leadTimeDays ?? null,
+      notes ?? null,
+      patch.region !== undefined,
+      patch.leadTimeDays !== undefined,
+      patch.notes !== undefined,
+    ],
+  );
+  invalidateItemsCache();
 }
 
 export async function addUserBom(

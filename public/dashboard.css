@@ -393,6 +393,21 @@ tr.rowlink:hover { background: var(--brand-soft); }
 
 .explain ul { margin: 0.35rem 0 0; padding-left: 1.1rem; }
 
+/* ---------- suppliers page inline editing ---------- */
+
+.sup-region, .sup-lead, .sup-notes {
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink-deep);
+}
+.sup-region { display: block; margin-top: 0.25rem; max-width: 170px; }
+.sup-lead { width: 110px; }
+.sup-notes { width: 100%; min-width: 140px; }
+.sup-status { font-size: 0.66rem; white-space: nowrap; }
+
 /* ---------- expandable inventory rows ---------- */
 
 th.caret-h { width: 1.3rem; }
