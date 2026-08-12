@@ -28,7 +28,7 @@ counted components still on the water. 48 demand-bearing items were affected;
 
 ---
 
-## Phase 2 — Inventory rows expand in place (client request)
+## Phase 2 — Inventory rows expand in place (client request) ✅ DONE
 
 **Goal:** review many items quickly without leaving the Inventory table.
 
@@ -52,6 +52,11 @@ counted components still on the water. 48 demand-bearing items were affected;
 
 **Acceptance:** a buyer can review 20 flagged items in one sitting without
 navigating away; expanding a row never triggers more than one request.
+
+**Shipped 12 Aug 2026:** chevron column + click-to-expand rows; instant
+three-column panel (Position / Demand & cover / Why & action) from the list
+payload; lazy 12-month chart + last-5 movements per row, cached; item number
+links to the full page; multiple rows can stay open.
 
 ## Phase 3 — Suppliers: regions (NZ vs China vs other) + a place to manage them
 

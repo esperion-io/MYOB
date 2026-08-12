@@ -360,6 +360,7 @@ export async function listItems(params: ListParams) {
     total: rows.length,
     page,
     pageSize,
+    targetCoverWeeks: config.insights.targetCoverWeeks,
     items: rows.slice(start, start + pageSize),
   };
 }

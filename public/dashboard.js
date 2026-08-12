@@ -85,6 +85,43 @@ function coverFmt(cover, basis) {
   return `${cover}w${suffix}`;
 }
 
+const MOVEMENT_KIND = {
+  sale: ["Sale", "fail"],
+  purchase: ["Purchase", "ok"],
+  build: ["Build", "brand"],
+  adjustment: ["Adjustment", "warn"],
+};
+
+/** 12 trailing months of direct + component demand as stacked bar columns. */
+function demandBarsHtml(monthlyDemand, barHeight = 100) {
+  const months = [];
+  for (let m = 11; m >= 0; m--) {
+    const date = new Date();
+    date.setMonth(date.getMonth() - m, 1);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    const row = (monthlyDemand || []).find((r) => String(r.month).slice(0, 7) === key);
+    months.push({
+      label: date.toLocaleDateString(undefined, { month: "narrow" }),
+      direct: Number(row?.direct ?? 0),
+      component: Number(row?.component ?? 0),
+    });
+  }
+  const max = Math.max(1, ...months.map((m) => m.direct + m.component));
+  return months
+    .map((m) => {
+      const dh = Math.round((m.direct / max) * barHeight);
+      const ch = Math.round((m.component / max) * barHeight);
+      return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end">
+        <div class="bar-col" title="Direct ${m.direct.toFixed(0)} · Component ${m.component.toFixed(0)}">
+          <div class="seg-comp" style="height:${ch}px"></div>
+          <div class="seg-direct" style="height:${dh}px"></div>
+        </div>
+        <div class="bar-label">${m.label}</div>
+      </div>`;
+    })
+    .join("");
+}
+
 /* ---------- data access ---------- */
 
 let memoryKey = "";
@@ -375,6 +412,11 @@ async function renderInventory() {
   await loadInventoryTable();
 }
 
+/** Items on the current inventory page, for instant row expansion. */
+let invItems = new Map();
+let invTargetCover = null;
+const itemDetailCache = new Map();
+
 async function loadInventoryTable() {
   const container = document.getElementById("inv-table");
   if (!container) return;
@@ -386,11 +428,14 @@ async function loadInventoryTable() {
     page: String(invState.page),
   });
   const data = await fetchJson(`/api/insights/items?${params}`);
+  invItems = new Map(data.items.map((i) => [i.uid, i]));
+  invTargetCover = data.targetCoverWeeks ?? null;
 
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
   container.innerHTML = `
     <div class="table-wrap"><table>
       <thead><tr>
+        <th class="caret-h"></th>
         <th>Risk</th><th>Item</th><th class="num">On hand</th><th class="num">Committed</th>
         <th class="num">Free stock</th><th class="num">Incoming</th><th class="num">Weekly demand</th>
         <th>Cover</th><th class="num">Used in</th><th>Flags</th>
@@ -400,9 +445,10 @@ async function loadInventoryTable() {
           data.items.length
             ? data.items
                 .map(
-                  (i) => `<tr class="rowlink" data-uid="${esc(i.uid)}">
+                  (i) => `<tr class="rowlink inv-row" data-uid="${esc(i.uid)}">
+                    <td class="caret">▸</td>
                     <td>${riskPill(i.risk.score)}</td>
-                    <td><strong>${esc(i.number ?? "—")}</strong><br /><span class="muted">${esc((i.name ?? "").slice(0, 60))}</span></td>
+                    <td><a href="#/item/${esc(i.uid)}"><strong>${esc(i.number ?? "—")}</strong></a><br /><span class="muted">${esc((i.name ?? "").slice(0, 60))}</span></td>
                     <td class="num">${qty(i.qtyOnHand)}</td>
                     <td class="num">${qty(i.qtyCommitted)}</td>
                     <td class="num"><strong>${qty(i.qtyFreeStock)}</strong></td>
@@ -414,18 +460,21 @@ async function loadInventoryTable() {
                   </tr>`,
                 )
                 .join("")
-            : '<tr><td colspan="10" class="muted">No items match.</td></tr>'
+            : '<tr><td colspan="11" class="muted">No items match.</td></tr>'
         }
       </tbody>
     </table></div>
     <div class="pager">
       <button class="btn small" id="prev" ${data.page <= 1 ? "disabled" : ""}>&larr; Prev</button>
-      <span>Page ${data.page} of ${pages} · ${qty(data.total)} items</span>
+      <span>Page ${data.page} of ${pages} · ${qty(data.total)} items · click a row to expand</span>
       <button class="btn small" id="next" ${data.page >= pages ? "disabled" : ""}>Next &rarr;</button>
     </div>`;
 
-  container.querySelectorAll("tr.rowlink").forEach((tr) =>
-    tr.addEventListener("click", () => (location.hash = `#/item/${tr.dataset.uid}`)),
+  container.querySelectorAll("tr.inv-row").forEach((tr) =>
+    tr.addEventListener("click", (e) => {
+      if (e.target.closest("a")) return; // item-number link still navigates
+      toggleExpandRow(tr);
+    }),
   );
   container.querySelector("#prev")?.addEventListener("click", () => {
     invState.page -= 1;
@@ -435,6 +484,139 @@ async function loadInventoryTable() {
     invState.page += 1;
     loadInventoryTable();
   });
+}
+
+function toggleExpandRow(tr) {
+  const next = tr.nextElementSibling;
+  if (next?.classList.contains("expand-row")) {
+    next.remove();
+    tr.classList.remove("expanded");
+    tr.querySelector(".caret").textContent = "▸";
+    return;
+  }
+  const item = invItems.get(tr.dataset.uid);
+  if (!item) return;
+  tr.insertAdjacentHTML(
+    "afterend",
+    `<tr class="expand-row"><td colspan="11">${expandPanelHtml(item)}</td></tr>`,
+  );
+  tr.classList.add("expanded");
+  tr.querySelector(".caret").textContent = "▾";
+  loadExpandExtras(item.uid, tr.nextElementSibling.querySelector(".expand-extra"));
+}
+
+function kvRow(label, value, cls = "") {
+  return `<div class="kv ${cls}"><span>${label}</span><span>${value}</span></div>`;
+}
+
+/** Inline detail panel, rendered instantly from the items-list payload. */
+function expandPanelHtml(i) {
+  const s = i.suggestion;
+  const stockValue =
+    i.currentValue != null
+      ? i.currentValue
+      : i.averageCost != null && i.qtyOnHand != null
+        ? i.averageCost * i.qtyOnHand
+        : null;
+
+  const position = `
+    <h3>Position</h3>
+    ${kvRow("On hand", qty(i.qtyOnHand))}
+    ${kvRow("Committed", qty(i.qtyCommitted))}
+    ${kvRow("Free stock (on hand − committed)", `<strong>${qty(i.qtyFreeStock)}</strong>`)}
+    ${kvRow("Incoming (open POs)", qty(i.incomingQty))}
+    ${kvRow("MYOB available (incl. on order)", qty(i.qtyAvailable), "muted-row")}
+    ${kvRow("Min level", qty(i.minLevel))}
+    ${kvRow("Avg cost", money(i.averageCost))}
+    ${kvRow("Stock value", money(stockValue))}`;
+
+  const demand = `
+    <h3>Demand &amp; cover</h3>
+    ${kvRow("Weekly demand", `${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"} <span class="muted">(${i.demand.basis === "none" ? "no activity" : i.demand.basis + " basis"})</span>`)}
+    ${kvRow(`Cover${invTargetCover ? ` (target ${invTargetCover}w)` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
+    ${kvRow("Direct sales 90d / 365d", `${qty(i.demand.direct90)} / ${qty(i.demand.direct365)}`)}
+    ${kvRow("Via builds 90d / 365d", `${qty(i.demand.component90)} / ${qty(i.demand.component365)}`)}
+    ${kvRow("Used in finished products", i.parentCount || "—")}
+    ${kvRow("Components (if assembled)", i.componentCount || "—")}`;
+
+  const action = `
+    <h3>Why &amp; action</h3>
+    <p class="expand-risk">${riskPill(i.risk.score)} ${flagChips(i.flags)}</p>
+    ${
+      i.risk.factors.length
+        ? `<ul class="expand-factors">${i.risk.factors
+            .map((f) => `<li>${esc(f.label)} <span class="muted">(+${f.points})</span></li>`)
+            .join("")}</ul>`
+        : '<p class="muted">No risk factors triggered.</p>'
+    }
+    ${
+      s
+        ? `<div class="explain">
+            <strong>Suggest ordering ~${qty(s.qty)} units.</strong>
+            <ul>
+              <li>${s.rationale.weeklyDemand}/wk × ${s.rationale.targetCoverWeeks}w target + min ${qty(s.rationale.minLevel)}</li>
+              <li>less free stock ${qty(s.rationale.freeStock)} and incoming ${qty(s.rationale.incoming)}</li>
+              ${s.rationale.reorderMultiple ? `<li>rounded to reorder multiple of ${qty(s.rationale.reorderMultiple)}</li>` : ""}
+            </ul>
+          </div>`
+        : ""
+    }
+    ${kvRow("Primary supplier", esc(i.supplierName ?? "—"))}
+    ${i.supplierItemNumber ? kvRow("Supplier item no", esc(i.supplierItemNumber)) : ""}`;
+
+  return `
+    <div class="expand-panel">
+      <div class="expand-grid">
+        <div>${position}</div>
+        <div>${demand}</div>
+        <div>${action}</div>
+      </div>
+      <div class="expand-extra"><p class="loading">Loading 12-month demand and recent movements…</p></div>
+      <p class="expand-foot"><a href="#/item/${esc(i.uid)}">Open full item page &rarr;</a></p>
+    </div>`;
+}
+
+/** Lazily add the demand chart + latest movements from the item detail API. */
+async function loadExpandExtras(uid, el) {
+  if (!el) return;
+  try {
+    let detail = itemDetailCache.get(uid);
+    if (!detail) {
+      detail = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}`);
+      itemDetailCache.set(uid, detail);
+    }
+    const moves = (detail.movements || []).slice(0, 5);
+    el.innerHTML = `
+      <div class="expand-extra-grid">
+        <div>
+          <h3>Demand — last 12 months</h3>
+          <div class="bars small">${demandBarsHtml(detail.monthlyDemand, 48)}</div>
+        </div>
+        <div>
+          <h3>Latest movements (MYOB evidence)</h3>
+          ${
+            moves.length
+              ? `<div class="table-wrap"><table>
+                  <tbody>${moves
+                    .map((m) => {
+                      const [label, tone] = MOVEMENT_KIND[m.kind] ?? [m.kind, "idle"];
+                      return `<tr>
+                        <td><span class="badge ${tone}">${esc(label)}</span></td>
+                        <td>${esc(m.doc ?? "—")}</td>
+                        <td>${dateFmt(m.date)}</td>
+                        <td class="num">${m.delta > 0 ? "+" : ""}${qty(m.delta)}</td>
+                        <td class="muted">${esc((m.counterparty ?? m.description ?? "").slice(0, 40))}</td>
+                      </tr>`;
+                    })
+                    .join("")}</tbody>
+                </table></div>`
+              : '<p class="muted">No movements in the synced window.</p>'
+          }
+        </div>
+      </div>`;
+  } catch (err) {
+    el.innerHTML = `<p class="muted">Could not load activity: ${esc(err.message)}</p>`;
+  }
 }
 
 /* ---------- item detail ---------- */
@@ -450,27 +632,6 @@ async function renderItem(uid) {
   const d = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}`);
   const i = d.item;
   const s = i.suggestion;
-
-  const months = [];
-  for (let m = 11; m >= 0; m--) {
-    const date = new Date();
-    date.setMonth(date.getMonth() - m, 1);
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-    const row = (d.monthlyDemand || []).find((r) => String(r.month).slice(0, 7) === key);
-    months.push({
-      label: date.toLocaleDateString(undefined, { month: "narrow" }),
-      direct: Number(row?.direct ?? 0),
-      component: Number(row?.component ?? 0),
-    });
-  }
-  const maxMonth = Math.max(1, ...months.map((m) => m.direct + m.component));
-
-  const movementKind = {
-    sale: ["Sale", "fail"],
-    purchase: ["Purchase", "ok"],
-    build: ["Build", "brand"],
-    adjustment: ["Adjustment", "warn"],
-  };
 
   main.innerHTML = `
     <div class="item-head">
@@ -504,21 +665,7 @@ async function renderItem(uid) {
         <section class="panel">
           <h2>Demand — last 12 months</h2>
           <p class="hint">Dark = direct sales (invoice lines). Orange = consumed by builds of finished products. These are separate MYOB movements — never double counted.</p>
-          <div class="bars">
-            ${months
-              .map((m) => {
-                const dh = Math.round((m.direct / maxMonth) * 100);
-                const ch = Math.round((m.component / maxMonth) * 100);
-                return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end">
-                  <div class="bar-col" title="Direct ${m.direct.toFixed(0)} · Component ${m.component.toFixed(0)}">
-                    <div class="seg-comp" style="height:${ch}px"></div>
-                    <div class="seg-direct" style="height:${dh}px"></div>
-                  </div>
-                  <div class="bar-label">${m.label}</div>
-                </div>`;
-              })
-              .join("")}
-          </div>
+          <div class="bars">${demandBarsHtml(d.monthlyDemand)}</div>
           <p class="hint" style="margin-top:0.6rem">
             90-day: ${qty(i.demand.direct90)} direct + ${qty(i.demand.component90)} via builds ·
             365-day: ${qty(i.demand.direct365)} direct + ${qty(i.demand.component365)} via builds ·
@@ -535,7 +682,7 @@ async function renderItem(uid) {
                 d.movements.length
                   ? d.movements
                       .map((m) => {
-                        const [label, tone] = movementKind[m.kind] ?? [m.kind, "idle"];
+                        const [label, tone] = MOVEMENT_KIND[m.kind] ?? [m.kind, "idle"];
                         return `<tr>
                           <td><span class="badge ${tone}">${esc(label)}</span></td>
                           <td>${esc(m.doc ?? "—")}</td>
