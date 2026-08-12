@@ -85,6 +85,46 @@ const DEMAND_CTE = `
     FROM effective_bom
     GROUP BY parent_uid
   ),
+  built_output AS (
+    SELECT bl.item_uid,
+           COALESCE(SUM(bl.qty) FILTER (WHERE b.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS built_90
+    FROM myob_build_lines bl
+    JOIN myob_builds b ON b.uid = bl.build_uid
+    WHERE bl.qty > 0 AND bl.item_uid IS NOT NULL
+      AND b.date >= NOW() - INTERVAL '365 days'
+    GROUP BY bl.item_uid
+  ),
+  purchased_qty AS (
+    SELECT l.item_uid,
+           COALESCE(SUM(l.qty) FILTER (WHERE b.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS bought_90
+    FROM myob_purchase_bill_lines l
+    JOIN myob_purchase_bills b ON b.uid = l.bill_uid
+    WHERE l.item_uid IS NOT NULL AND b.date >= NOW() - INTERVAL '365 days'
+    GROUP BY l.item_uid
+  ),
+  -- Parent units sold in the last 90 days that were NOT built or bought in
+  -- the same window: they left the door out of finished stock made earlier.
+  -- Replacing them by building would pull components that MYOB has not
+  -- recorded yet, so this is POTENTIAL demand. It is reported separately and
+  -- never added to measured demand, cover, suggestions or the risk score.
+  parent_unexplained AS (
+    SELECT b.parent_uid, b.component_uid, b.qty_per,
+           GREATEST(
+             COALESCE(dd.direct_90, 0) - COALESCE(bo.built_90, 0) - COALESCE(pq.bought_90, 0),
+             0
+           ) AS units
+    FROM effective_bom b
+    LEFT JOIN direct_demand dd ON dd.item_uid = b.parent_uid
+    LEFT JOIN built_output bo ON bo.item_uid = b.parent_uid
+    LEFT JOIN purchased_qty pq ON pq.item_uid = b.parent_uid
+  ),
+  potential_demand AS (
+    SELECT component_uid AS item_uid,
+           SUM(units * qty_per)::float8 AS potential_90,
+           COUNT(*) FILTER (WHERE units > 0)::int AS potential_parents
+    FROM parent_unexplained
+    GROUP BY component_uid
+  ),
   dominant_supplier AS (
     SELECT DISTINCT ON (l.item_uid)
            l.item_uid, b.supplier_uid, b.supplier_name
@@ -114,13 +154,16 @@ const ITEM_SELECT = `
          COALESCE(cd.comp_365, 0) AS comp_365,
          COALESCE(inc.qty, 0) AS incoming_qty,
          COALESCE(u.parent_count, 0) AS parent_count,
-         COALESCE(p.component_count, 0) AS component_count
+         COALESCE(p.component_count, 0) AS component_count,
+         COALESCE(pot.potential_90, 0) AS potential_90,
+         COALESCE(pot.potential_parents, 0) AS potential_parents
   FROM myob_items it
   LEFT JOIN direct_demand dd ON dd.item_uid = it.uid
   LEFT JOIN component_demand cd ON cd.item_uid = it.uid
   LEFT JOIN incoming inc ON inc.item_uid = it.uid
   LEFT JOIN bom_usage u ON u.item_uid = it.uid
   LEFT JOIN bom_parents p ON p.item_uid = it.uid
+  LEFT JOIN potential_demand pot ON pot.item_uid = it.uid
   LEFT JOIN dominant_supplier ds ON ds.item_uid = it.uid
   LEFT JOIN myob_suppliers sup ON sup.uid = COALESCE(it.primary_supplier_uid, ds.supplier_uid)
   LEFT JOIN platform_supplier_meta sm ON sm.supplier_uid = COALESCE(it.primary_supplier_uid, ds.supplier_uid)
@@ -167,6 +210,17 @@ export interface ItemComputed {
   incomingQty: number;
   parentCount: number;
   componentCount: number;
+  /**
+   * Component pull implied by packs/kits that sold more than were built or
+   * bought in the last 90 days. Inferred, never measured — reported alongside
+   * demand but deliberately excluded from weekly, cover, suggestion and risk.
+   */
+  potential: {
+    qty90: number;
+    weekly: number;
+    parentCount: number;
+    understatesMeasured: boolean;
+  };
   coverWeeks: number | null;
   flags: string[];
   risk: { score: number; factors: { label: string; points: number }[] };
@@ -205,6 +259,12 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
   const parentCount = n(row.parent_count) ?? 0;
   const isActive = row.is_active as boolean | null;
 
+  // Inferred pack-driven pull. Material when it would move the picture:
+  // there is no measured demand at all, or it adds at least a quarter again.
+  const potential90 = n(row.potential_90) ?? 0;
+  const understatesMeasured =
+    potential90 > 0 && (total90 <= 0 || potential90 >= total90 * 0.25);
+
   // MYOB's qty_available includes on-order stock; analysis uses free stock.
   const freeStock = onHand == null ? null : onHand - (committed ?? 0);
 
@@ -222,6 +282,7 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     (row.primary_supplier_uid as string) ?? (row.inferred_supplier_uid as string) ?? null;
   if (weekly > 0 && !supplierUid) flags.push("no_supplier");
   if (basis === "365d") flags.push("slow_mover");
+  if (understatesMeasured) flags.push("understated_demand");
 
   const factors: { label: string; points: number }[] = [];
   if (flags.includes("below_min"))
@@ -327,6 +388,12 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     incomingQty,
     parentCount,
     componentCount: n(row.component_count) ?? 0,
+    potential: {
+      qty90: Number(potential90.toFixed(1)),
+      weekly: Number((potential90 / (90 / 7)).toFixed(3)),
+      parentCount: n(row.potential_parents) ?? 0,
+      understatesMeasured,
+    },
     coverWeeks: coverWeeks == null ? null : Number(coverWeeks.toFixed(1)),
     flags,
     risk: { score, factors },
@@ -407,6 +474,9 @@ export async function listItems(params: ListParams) {
       break;
     case "suggested":
       rows = rows.filter((r) => r.suggestion != null);
+      break;
+    case "understated":
+      rows = rows.filter((r) => r.flags.includes("understated_demand"));
       break;
   }
 
@@ -581,7 +651,7 @@ export async function itemDetail(uid: string) {
   if (!itemResult.rows.length) return null;
   const item = computeItem(itemResult.rows[0]);
 
-  const [monthly, movements, commitments, incoming, purchases, rels, freshness] =
+  const [monthly, movements, commitments, incoming, purchases, rels, freshness, potentialParents] =
     await Promise.all([
       pool.query(
         `SELECT month, SUM(direct)::float8 AS direct, SUM(component)::float8 AS component FROM (
@@ -640,6 +710,41 @@ export async function itemDetail(uid: string) {
       ),
       relationshipRows(uid),
       pool.query(`SELECT entity, last_synced_at FROM sync_state ORDER BY entity`),
+      // Which packs/kits drive this component's potential demand, and the
+      // sold/built/bought arithmetic behind each one.
+      pool.query(
+        `WITH sold AS (
+           SELECT l.item_uid, SUM(l.qty)::float8 AS qty
+           FROM myob_sale_invoice_lines l JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
+           WHERE i.date >= NOW() - INTERVAL '90 days' AND l.item_uid IS NOT NULL
+           GROUP BY l.item_uid
+         ), built AS (
+           SELECT bl.item_uid, SUM(bl.qty)::float8 AS qty
+           FROM myob_build_lines bl JOIN myob_builds b ON b.uid = bl.build_uid
+           WHERE bl.qty > 0 AND b.date >= NOW() - INTERVAL '90 days' AND bl.item_uid IS NOT NULL
+           GROUP BY bl.item_uid
+         ), bought AS (
+           SELECT l.item_uid, SUM(l.qty)::float8 AS qty
+           FROM myob_purchase_bill_lines l JOIN myob_purchase_bills b ON b.uid = l.bill_uid
+           WHERE b.date >= NOW() - INTERVAL '90 days' AND l.item_uid IS NOT NULL
+           GROUP BY l.item_uid
+         )
+         SELECT eb.parent_uid AS uid, i.number, i.name, eb.qty_per::float8 AS qty_per,
+                COALESCE(s.qty, 0) AS sold_90,
+                COALESCE(bt.qty, 0) AS built_90,
+                COALESCE(bo.qty, 0) AS bought_90,
+                GREATEST(COALESCE(s.qty,0) - COALESCE(bt.qty,0) - COALESCE(bo.qty,0), 0) AS unexplained_units,
+                GREATEST(COALESCE(s.qty,0) - COALESCE(bt.qty,0) - COALESCE(bo.qty,0), 0) * eb.qty_per AS potential_qty
+         FROM effective_bom eb
+         JOIN myob_items i ON i.uid = eb.parent_uid
+         LEFT JOIN sold s ON s.item_uid = eb.parent_uid
+         LEFT JOIN built bt ON bt.item_uid = eb.parent_uid
+         LEFT JOIN bought bo ON bo.item_uid = eb.parent_uid
+         WHERE eb.component_uid = $1
+           AND GREATEST(COALESCE(s.qty,0) - COALESCE(bt.qty,0) - COALESCE(bo.qty,0), 0) > 0
+         ORDER BY potential_qty DESC`,
+        [uid],
+      ),
     ]);
 
   // Buildability of this item from direct components (single level), using
@@ -671,6 +776,7 @@ export async function itemDetail(uid: string) {
     components: rels.components,
     whereUsed: rels.whereUsed,
     buildability,
+    potentialParents: potentialParents.rows,
     freshness: freshness.rows,
   };
 }
@@ -769,6 +875,7 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
       "Supplier", "Supplier source", "Item number", "Item name", "Supplier item no",
       "On hand", "Committed", "Free stock", "On order (incoming)", "Min level",
       "Weekly demand", "Demand basis", "Cover (weeks)",
+      "Potential pack demand 90d (not in totals)",
       "Suggested order qty", "Est cost", "Risk score", "Flags",
     ].join(","),
   ];
@@ -781,7 +888,8 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
           esc(i.number), esc(i.name), esc(i.supplierItemNumber),
           i.qtyOnHand ?? "", i.qtyCommitted ?? "", i.qtyFreeStock ?? "", i.incomingQty,
           i.minLevel ?? "", i.demand.weekly, i.demand.basis,
-          i.coverWeeks ?? "", i.suggestion?.qty ?? 0,
+          i.coverWeeks ?? "", i.potential.qty90 || "",
+          i.suggestion?.qty ?? 0,
           ((i.suggestion?.qty ?? 0) * (i.averageCost ?? 0)).toFixed(2),
           i.risk.score, esc(i.flags.join(" ")),
         ].join(","),
@@ -821,6 +929,7 @@ export async function dataStatus() {
     stockNoCost: items.filter((i) => i.flags.includes("stock_no_cost")).length,
     inactiveWithStock: items.filter((i) => i.flags.includes("inactive_with_stock")).length,
     demandNoSupplier: items.filter((i) => i.flags.includes("no_supplier")).length,
+    understatedDemand: items.filter((i) => i.flags.includes("understated_demand")).length,
   };
 
   return {

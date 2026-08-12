@@ -123,7 +123,7 @@ recipes are invisible (currently 557 relationships / 207 parents, 0 user rows).
 session, and the platform shows how much composition knowledge is still
 missing rather than pretending completeness.
 
-## Phase 5 — Honest demand for never-built parents
+## Phase 5 — Honest demand for never-built parents ✅ DONE
 
 For parents that have a BOM but no builds in the window (typically third-party
 or pre-packed products), component demand driven by parent sales is invisible.
@@ -141,6 +141,22 @@ effect may already appear as adjustments), so:
 **Acceptance:** no double counting anywhere, but a buyer looking at a washer
 used in overseas-packed kits can see the kit-driven pull that MYOB movements
 don't show.
+
+**Shipped 13 Aug 2026**, with the definition sharpened once the data was
+checked. "Never built" was too narrow — the derived BOM only exists for
+products that *are* built. The measurable gap is per-window: a parent's units
+**sold in 90 days minus units built minus units bought** in the same window
+came out of finished stock made earlier, so rebuilding them pulls components
+MYOB has not recorded. Potential pull = Σ (unexplained parent units × qty per)
+over the effective BOM.
+
+Live result: 57 components carry potential pull, **11 with no measured demand
+at all**; 27 are flagged where it is material (no measured demand, or adds
+≥25%). Shown as a dashed "inferred" tile and legend swatch on the item page, a
+full parent-by-parent panel with the sold/built/bought arithmetic, a line in
+the expanded inventory row, a "Pack pull not counted" flag + filter, a
+Data & Sync count, and a CSV column — never added to weekly demand, cover,
+suggestions or the risk score.
 
 ## Phase 6 — Multi-level relationships and buildability
 

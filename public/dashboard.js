@@ -16,6 +16,7 @@ const FLAG_LABELS = {
   inactive_with_stock: ["Inactive w/ stock", "warn"],
   no_supplier: ["No supplier", "warn"],
   slow_mover: ["Slow mover", "idle"],
+  understated_demand: ["Pack pull not counted", "brand"],
 };
 
 const invState = { q: "", filter: "all", region: "", sort: "risk", page: 1 };
@@ -408,6 +409,7 @@ async function renderInventory() {
         <option value="below_min">Below min level</option>
         <option value="low_cover">Cover &lt; 4 weeks</option>
         <option value="components">Used in assemblies</option>
+        <option value="understated">Pack pull not counted</option>
         <option value="parents">Assembled products</option>
         <option value="negative">Negative stock</option>
         <option value="no_supplier">No supplier set</option>
@@ -594,6 +596,14 @@ function expandPanelHtml(i) {
     ${kvRow(`Cover${invTargetCover ? ` (target ${invTargetCover}w)` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
     ${kvRow("Direct sales 90d / 365d", `${qty(i.demand.direct90)} / ${qty(i.demand.direct365)}`)}
     ${kvRow("Via builds 90d / 365d", `${qty(i.demand.component90)} / ${qty(i.demand.component365)}`)}
+    ${
+      i.potential.qty90 > 0
+        ? kvRow(
+            `Potential from packs 90d <span class="muted">(not in totals)</span>`,
+            `<span class="potential-val" title="Packs/kits that sold more than were built or bought in 90 days, × qty per. Inferred, not a MYOB movement.">+${qty(i.potential.qty90)} <span class="muted">· ${i.potential.parentCount} product(s)</span></span>`,
+          )
+        : ""
+    }
     ${kvRow("Used in finished products", i.parentCount || "—")}
     ${kvRow("Components (if assembled)", i.componentCount || "—")}`;
 
@@ -717,9 +727,15 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${i.coverWeeks == null ? "—" : `${i.coverWeeks}w`}</span></div>
       <div class="fact src-platform"><span class="f-label">Open PO incoming</span><span class="f-value">${qty(i.incomingQty)}</span></div>
       <div class="fact src-platform"><span class="f-label">Used in products</span><span class="f-value">${i.parentCount}</span></div>
+      ${
+        i.potential.qty90 > 0
+          ? `<div class="fact src-inferred"><span class="f-label">Potential pack pull 90d</span><span class="f-value">+${qty(i.potential.qty90)}</span></div>`
+          : ""
+      }
     </div>
-    <p class="src-legend"><span class="sw myob"></span>MYOB fact &nbsp; <span class="sw platform"></span>Platform analysis (synced ${ago(i.syncedAt)}) ·
-      MYOB "Available" includes stock on order; free stock = on hand − committed</p>
+    <p class="src-legend"><span class="sw myob"></span>MYOB fact &nbsp; <span class="sw platform"></span>Platform analysis
+      ${i.potential.qty90 > 0 ? '&nbsp; <span class="sw inferred"></span>Inferred (not a MYOB movement)' : ""}
+      (synced ${ago(i.syncedAt)}) · MYOB "Available" includes stock on order; free stock = on hand − committed</p>
 
     <div class="two-col" style="margin-top:1.1rem">
       <div>
@@ -733,6 +749,41 @@ async function renderItem(uid) {
             rate basis: ${i.demand.basis}
           </p>
         </section>
+
+        ${
+          (d.potentialParents || []).length
+            ? `<section class="panel">
+                <h2>Potential demand from packs <span class="badge brand">not counted in totals</span></h2>
+                <p class="hint">These finished products sold more units in the last 90 days than were built or bought
+                in the same period — the difference came out of stock made earlier. If Allied rebuilds them, this
+                component gets pulled by the quantities below. MYOB has not recorded these movements, so this is an
+                inference: it is shown separately and never added to weekly demand, cover, suggestions or risk.</p>
+                <div class="table-wrap"><table>
+                  <thead><tr><th>Finished product</th><th class="num">Sold 90d</th><th class="num">Built</th>
+                  <th class="num">Bought</th><th class="num">Unexplained</th><th class="num">Qty per</th>
+                  <th class="num">Potential pull</th></tr></thead>
+                  <tbody>
+                    ${d.potentialParents
+                      .map(
+                        (p) => `<tr>
+                          <td>${itemLink(p.uid, p.number ?? "—")}<br /><span class="muted">${esc((p.name ?? "").slice(0, 40))}</span></td>
+                          <td class="num">${qty(p.sold_90)}</td>
+                          <td class="num">${qty(p.built_90)}</td>
+                          <td class="num">${qty(p.bought_90)}</td>
+                          <td class="num">${qty(p.unexplained_units)}</td>
+                          <td class="num">${qty(p.qty_per)}</td>
+                          <td class="num"><strong>+${qty(p.potential_qty)}</strong></td>
+                        </tr>`,
+                      )
+                      .join("")}
+                  </tbody>
+                </table></div>
+                <p class="hint" style="margin-top:0.6rem">Total potential pull:
+                <strong>+${qty(i.potential.qty90)}</strong> over 90 days (~${i.potential.weekly.toFixed(1)}/week)
+                versus measured weekly demand of ${i.demand.weekly.toFixed(1)}.</p>
+              </section>`
+            : ""
+        }
 
         <section class="panel">
           <h2>Recent movements (MYOB evidence)</h2>
@@ -1266,6 +1317,7 @@ async function renderData() {
             <tr><td>Stock on hand with zero average cost</td><td class="num">${qty(d.dataQuality.stockNoCost)}</td></tr>
             <tr><td>Inactive items still holding stock</td><td class="num">${qty(d.dataQuality.inactiveWithStock)}</td></tr>
             <tr><td>Items with demand but no known supplier (no MYOB primary, no purchase history)</td><td class="num">${qty(d.dataQuality.demandNoSupplier)}</td></tr>
+            <tr><td>Components whose measured demand understates pack-driven pull</td><td class="num">${qty(d.dataQuality.understatedDemand)}</td></tr>
           </tbody>
         </table></div>
       </section>
@@ -1319,6 +1371,14 @@ async function renderData() {
         <dt>Purchasing suggestions</dt>
         <dd>Weekly demand × target cover + minimum level − free stock − incoming, rounded to the MYOB reorder multiple.
         Advisory only.</dd>
+        <dt>Potential demand from packs (inferred — never in totals)</dt>
+        <dd>When a pack, kit or dressing set sells more units in 90 days than were built or bought in the same
+        period, the difference came out of finished stock made earlier. Rebuilding those units would pull its
+        components, but MYOB has recorded no such movement — so the platform reports that pull separately as
+        "potential" and never adds it to weekly demand, cover, purchasing suggestions or the risk score.
+        Components flagged "Pack pull not counted" either have no measured demand at all or would gain at least
+        a quarter again; the item page lists the exact products and arithmetic behind the figure. Coverage is
+        limited to products whose composition is known, so it grows as BOM coverage improves.</dd>
         <dt>Suppliers, regions &amp; lead times</dt>
         <dd>An item's supplier is its MYOB primary supplier where set; Allied's file rarely sets one, so the
         platform otherwise infers the dominant supplier from purchase-bill history (always labelled "inferred").

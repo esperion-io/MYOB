@@ -362,11 +362,15 @@ tr.rowlink:hover { background: var(--brand-soft); }
 
 .fact.src-myob { border-top: 2px solid var(--ink-deep); }
 .fact.src-platform { border-top: 2px solid var(--brand); }
+/* Inferred: not a MYOB movement and not counted in any total. */
+.fact.src-inferred { border-top: 2px dashed var(--brand); background: var(--brand-soft); }
 
 .src-legend { font-size: 0.66rem; color: var(--muted); margin: 0.5rem 0 0; }
 .src-legend .sw { display: inline-block; width: 0.7rem; height: 0.55rem; margin-right: 0.25rem; vertical-align: baseline; }
 .src-legend .sw.myob { background: var(--ink-deep); }
 .src-legend .sw.platform { background: var(--brand); }
+.src-legend .sw.inferred { background: var(--brand-soft); border: 1px dashed var(--brand); }
+.potential-val { color: var(--brand-deep); }
 
 /* demand bars */
 
