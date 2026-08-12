@@ -134,6 +134,11 @@ MYOB Business API  --(read-only GETs)-->  sync engine  -->  Postgres mirror
 2. **Position quantities are MYOB facts.** On hand / committed / on order /
    available come from the item master and are never recomputed. Our
    transaction mirror is the *evidence* layer that explains them.
+   MYOB's `QuantityAvailable` *includes* on-order stock (verified against
+   Allied's file: available = on hand − committed + on order for every item
+   with an open PO), so analysis never uses it: cover, buildability and
+   purchase suggestions use **free stock = on hand − committed**, with open-PO
+   incoming subtracted separately — incoming supply is counted exactly once.
 3. **Demand = direct sales + build consumption.** Item-layout invoice lines
    (credit notes net off automatically) plus components consumed by Inventory
    Build transactions. These are distinct MYOB movements, so no double

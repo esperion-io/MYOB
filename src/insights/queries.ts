@@ -16,6 +16,12 @@ import { ensureInsightsSchema } from "../sync/schema.js";
  * - Transfers and inventory adjustments are never treated as demand.
  * - Weekly demand uses the trailing 90 days; if an item had no activity in 90
  *   days but did in 365, the 365-day rate is used (flagged "slow").
+ * - MYOB's QuantityAvailable INCLUDES stock on order (verified against
+ *   Allied's file: available = on hand - committed + on order for every item
+ *   with an open PO). It is shown as a MYOB fact but never used in analysis.
+ *   Cover, buildability and purchasing suggestions use free stock
+ *   (on hand - committed) so incoming supply is only counted once, as
+ *   "incoming" from open purchase orders.
  */
 
 const DEMAND_CTE = `
@@ -96,6 +102,8 @@ export interface ItemComputed {
   qtyCommitted: number | null;
   qtyOnOrder: number | null;
   qtyAvailable: number | null;
+  /** on hand - committed. MYOB's "available" also adds on-order stock. */
+  qtyFreeStock: number | null;
   averageCost: number | null;
   currentValue: number | null;
   baseSellingPrice: number | null;
@@ -147,17 +155,21 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
 
   const available = n(row.qty_available);
   const onHand = n(row.qty_on_hand);
+  const committed = n(row.qty_committed);
   const minLevel = n(row.min_level);
   const avgCost = n(row.average_cost);
   const incomingQty = n(row.incoming_qty) ?? 0;
   const parentCount = n(row.parent_count) ?? 0;
   const isActive = row.is_active as boolean | null;
 
+  // MYOB's qty_available includes on-order stock; analysis uses free stock.
+  const freeStock = onHand == null ? null : onHand - (committed ?? 0);
+
   const coverWeeks =
-    weekly > 0 && available != null ? Math.max(available, 0) / weekly : null;
+    weekly > 0 && freeStock != null ? Math.max(freeStock, 0) / weekly : null;
 
   const flags: string[] = [];
-  if (minLevel != null && minLevel > 0 && (available ?? 0) < minLevel)
+  if (minLevel != null && minLevel > 0 && (freeStock ?? 0) < minLevel)
     flags.push("below_min");
   if ((onHand ?? 0) < 0) flags.push("negative_stock");
   if ((onHand ?? 0) > 0 && (avgCost ?? 0) === 0) flags.push("stock_no_cost");
@@ -192,12 +204,13 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     factors.reduce((s, f) => s + f.points, 0),
   );
 
-  // Purchasing suggestion: cover target + min level, net of stock + incoming.
+  // Purchasing suggestion: cover target + min level, net of free stock and
+  // incoming POs. Free stock excludes on-order so incoming is subtracted once.
   let suggestion: ItemComputed["suggestion"] = null;
   if (weekly > 0 || flags.includes("below_min")) {
     const target = config.insights.targetCoverWeeks;
     const raw =
-      weekly * target + Math.max(minLevel ?? 0, 0) - (available ?? 0) - incomingQty;
+      weekly * target + Math.max(minLevel ?? 0, 0) - (freeStock ?? 0) - incomingQty;
     if (raw > 0) {
       const multiple = n(row.reorder_qty);
       const qty =
@@ -209,7 +222,7 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
           demandBasis: basis,
           targetCoverWeeks: target,
           minLevel: minLevel ?? 0,
-          available: available ?? 0,
+          freeStock: freeStock ?? 0,
           incoming: incomingQty,
           rawNeed: Number(raw.toFixed(1)),
           reorderMultiple: multiple ?? null,
@@ -228,9 +241,10 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     isBought: row.is_bought as boolean | null,
     isSold: row.is_sold as boolean | null,
     qtyOnHand: onHand,
-    qtyCommitted: n(row.qty_committed),
+    qtyCommitted: committed,
     qtyOnOrder: n(row.qty_on_order),
     qtyAvailable: available,
+    qtyFreeStock: freeStock,
     averageCost: avgCost,
     currentValue: n(row.current_value),
     baseSellingPrice: n(row.base_selling_price),
@@ -330,7 +344,7 @@ export async function listItems(params: ListParams) {
     risk: (a, b) => b.risk.score - a.risk.score,
     number: (a, b) => (a.number ?? "").localeCompare(b.number ?? ""),
     name: (a, b) => (a.name ?? "").localeCompare(b.name ?? ""),
-    available: (a, b) => (a.qtyAvailable ?? 0) - (b.qtyAvailable ?? 0),
+    available: (a, b) => (a.qtyFreeStock ?? 0) - (b.qtyFreeStock ?? 0),
     cover: (a, b) => (a.coverWeeks ?? 1e9) - (b.coverWeeks ?? 1e9),
     weekly: (a, b) => b.demand.weekly - a.demand.weekly,
     value: (a, b) => (b.currentValue ?? 0) - (a.currentValue ?? 0),
@@ -370,12 +384,12 @@ export async function overview() {
   const [constraints, relationships, freshness] = await Promise.all([
     pool.query(`
       SELECT b.component_uid AS uid, i.number, i.name,
-             i.qty_available::float8 AS qty_available,
+             (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
              COUNT(DISTINCT b.parent_uid)::int AS blocked_parents
       FROM platform_bom b
       JOIN myob_items i ON i.uid = b.component_uid
-      WHERE COALESCE(i.qty_available, 0) < b.qty_per
-      GROUP BY b.component_uid, i.number, i.name, i.qty_available
+      WHERE COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0) < b.qty_per
+      GROUP BY b.component_uid, i.number, i.name, i.qty_on_hand, i.qty_committed
       ORDER BY blocked_parents DESC
       LIMIT 8
     `),
@@ -414,7 +428,8 @@ async function relationshipRows(uid: string) {
     pool.query(
       `SELECT b.component_uid AS uid, b.qty_per::float8 AS qty_per, b.source,
               b.build_count, b.confidence::float8 AS confidence, b.last_observed,
-              i.number, i.name, i.qty_available::float8 AS qty_available,
+              i.number, i.name,
+              (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
               (SELECT COUNT(*)::int FROM platform_bom x WHERE x.parent_uid = b.component_uid) AS sub_components
        FROM platform_bom b
        JOIN myob_items i ON i.uid = b.component_uid
@@ -425,7 +440,8 @@ async function relationshipRows(uid: string) {
     pool.query(
       `SELECT b.parent_uid AS uid, b.qty_per::float8 AS qty_per, b.source,
               b.build_count, b.confidence::float8 AS confidence,
-              i.number, i.name, i.qty_available::float8 AS qty_available,
+              i.number, i.name,
+              (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
               (SELECT COUNT(*)::int FROM platform_bom x WHERE x.component_uid = b.parent_uid) AS used_higher
        FROM platform_bom b
        JOIN myob_items i ON i.uid = b.parent_uid
@@ -514,7 +530,8 @@ export async function itemDetail(uid: string) {
       pool.query(`SELECT entity, last_synced_at FROM sync_state ORDER BY entity`),
     ]);
 
-  // Buildability of this item from direct components (single level).
+  // Buildability of this item from direct components (single level), using
+  // free component stock (on hand - committed) — incoming POs don't count.
   type Constraint = { uid: string; number: string | null; name: string | null };
   let buildability: { maxUnits: number | null; constraint: Constraint | null } | null =
     null;
@@ -523,7 +540,7 @@ export async function itemDetail(uid: string) {
     let constraint: Constraint | null = null;
     for (const c of rels.components) {
       if (!c.qty_per || c.qty_per <= 0) continue;
-      const possible = Math.floor(Math.max(c.qty_available ?? 0, 0) / c.qty_per);
+      const possible = Math.floor(Math.max(c.stock_free ?? 0, 0) / c.qty_per);
       if (maxUnits == null || possible < maxUnits) {
         maxUnits = possible;
         constraint = { uid: c.uid, number: c.number, name: c.name };
@@ -553,14 +570,15 @@ export async function productsList(params: { q?: string; page?: number }) {
     WITH parent_build AS (
       SELECT b.parent_uid,
              COUNT(*)::int AS component_count,
-             MIN(FLOOR(GREATEST(COALESCE(ci.qty_available,0),0) / NULLIF(b.qty_per,0)))::float8 AS buildable,
+             MIN(FLOOR(GREATEST(COALESCE(ci.qty_on_hand,0) - COALESCE(ci.qty_committed,0), 0) / NULLIF(b.qty_per,0)))::float8 AS buildable,
              BOOL_OR(b.source = 'user') AS has_user_rows,
              MIN(b.confidence)::float8 AS min_confidence
       FROM platform_bom b
       JOIN myob_items ci ON ci.uid = b.component_uid
       GROUP BY b.parent_uid
     )
-    SELECT p.*, i.number, i.name, i.qty_available::float8 AS qty_available,
+    SELECT p.*, i.number, i.name,
+           (COALESCE(i.qty_on_hand,0) - COALESCE(i.qty_committed,0))::float8 AS stock_free,
            i.qty_committed::float8 AS qty_committed, i.is_active,
            (SELECT COALESCE(SUM(l.qty),0)::float8
               FROM myob_sale_invoice_lines l
@@ -626,7 +644,7 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
   const lines = [
     [
       "Supplier", "Item number", "Item name", "Supplier item no",
-      "Available", "Committed", "On order (incoming)", "Min level",
+      "On hand", "Committed", "Free stock", "On order (incoming)", "Min level",
       "Weekly demand", "Demand basis", "Cover (weeks)",
       "Suggested order qty", "Est cost", "Risk score", "Flags",
     ].join(","),
@@ -636,7 +654,7 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
       lines.push(
         [
           esc(g.supplier), esc(i.number), esc(i.name), esc(i.supplierItemNumber),
-          i.qtyAvailable ?? "", i.qtyCommitted ?? "", i.incomingQty,
+          i.qtyOnHand ?? "", i.qtyCommitted ?? "", i.qtyFreeStock ?? "", i.incomingQty,
           i.minLevel ?? "", i.demand.weekly, i.demand.basis,
           i.coverWeeks ?? "", i.suggestion?.qty ?? 0,
           ((i.suggestion?.qty ?? 0) * (i.averageCost ?? 0)).toFixed(2),

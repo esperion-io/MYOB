@@ -257,14 +257,14 @@ async function renderOverview() {
         <h2>Needs attention</h2>
         <p class="hint">Ranked by risk: cover vs demand, MYOB minimums, dependency breadth, data quality. Click for evidence.</p>
         <div class="table-wrap"><table>
-          <thead><tr><th>Risk</th><th>Item</th><th class="num">Avail</th><th>Cover</th><th>Why</th></tr></thead>
+          <thead><tr><th>Risk</th><th>Item</th><th class="num">Free stock</th><th>Cover</th><th>Why</th></tr></thead>
           <tbody>
             ${data.attention
               .map(
                 (i) => `<tr class="rowlink" data-uid="${esc(i.uid)}">
                   <td>${riskPill(i.risk.score)}</td>
                   <td><strong>${esc(i.number ?? "—")}</strong><br /><span class="muted">${esc(i.name ?? "")}</span></td>
-                  <td class="num">${qty(i.qtyAvailable)}</td>
+                  <td class="num">${qty(i.qtyFreeStock)}</td>
                   <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
                   <td>${flagChips(i.flags)}</td>
                 </tr>`,
@@ -276,9 +276,9 @@ async function renderOverview() {
 
       <section class="panel">
         <h2>Components blocking assemblies</h2>
-        <p class="hint">Components with less stock than one build requires, ranked by how many finished products they block.</p>
+        <p class="hint">Components with less free stock (on hand − committed) than one build requires, ranked by how many finished products they block.</p>
         <div class="table-wrap"><table>
-          <thead><tr><th>Component</th><th class="num">Avail</th><th class="num">Blocks</th></tr></thead>
+          <thead><tr><th>Component</th><th class="num">Free stock</th><th class="num">Blocks</th></tr></thead>
           <tbody>
             ${
               data.constraints.length
@@ -286,7 +286,7 @@ async function renderOverview() {
                     .map(
                       (c) => `<tr class="rowlink" data-uid="${esc(c.uid)}">
                         <td><strong>${esc(c.number ?? "—")}</strong><br /><span class="muted">${esc(c.name ?? "")}</span></td>
-                        <td class="num">${qty(c.qty_available)}</td>
+                        <td class="num">${qty(c.stock_free)}</td>
                         <td class="num">${qty(c.blocked_parents)}</td>
                       </tr>`,
                     )
@@ -341,7 +341,7 @@ async function renderInventory() {
         <option value="value">Sort: stock value</option>
         <option value="used_in">Sort: used in most products</option>
         <option value="number">Sort: item number</option>
-        <option value="available">Sort: available</option>
+        <option value="available">Sort: free stock</option>
       </select>
     </div>
     <div id="inv-table"><p class="loading">Loading items…</p></div>`;
@@ -392,7 +392,7 @@ async function loadInventoryTable() {
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Risk</th><th>Item</th><th class="num">On hand</th><th class="num">Committed</th>
-        <th class="num">Incoming</th><th class="num">Available</th><th class="num">Weekly demand</th>
+        <th class="num">Free stock</th><th class="num">Incoming</th><th class="num">Weekly demand</th>
         <th>Cover</th><th class="num">Used in</th><th>Flags</th>
       </tr></thead>
       <tbody>
@@ -405,8 +405,8 @@ async function loadInventoryTable() {
                     <td><strong>${esc(i.number ?? "—")}</strong><br /><span class="muted">${esc((i.name ?? "").slice(0, 60))}</span></td>
                     <td class="num">${qty(i.qtyOnHand)}</td>
                     <td class="num">${qty(i.qtyCommitted)}</td>
+                    <td class="num"><strong>${qty(i.qtyFreeStock)}</strong></td>
                     <td class="num">${qty(i.incomingQty)}</td>
-                    <td class="num"><strong>${qty(i.qtyAvailable)}</strong></td>
                     <td class="num">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "—"}</td>
                     <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
                     <td class="num">${i.parentCount || "—"}</td>
@@ -490,12 +490,14 @@ async function renderItem(uid) {
       <div class="fact src-myob"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
       <div class="fact src-myob"><span class="f-label">Min level</span><span class="f-value">${qty(i.minLevel)}</span></div>
       <div class="fact src-myob"><span class="f-label">Avg cost</span><span class="f-value">${money(i.averageCost)}</span></div>
+      <div class="fact src-platform"><span class="f-label">Free stock</span><span class="f-value">${qty(i.qtyFreeStock)}</span></div>
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
       <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${i.coverWeeks == null ? "—" : `${i.coverWeeks}w`}</span></div>
       <div class="fact src-platform"><span class="f-label">Open PO incoming</span><span class="f-value">${qty(i.incomingQty)}</span></div>
       <div class="fact src-platform"><span class="f-label">Used in products</span><span class="f-value">${i.parentCount}</span></div>
     </div>
-    <p class="src-legend"><span class="sw myob"></span>MYOB fact &nbsp; <span class="sw platform"></span>Platform analysis (synced ${ago(i.syncedAt)})</p>
+    <p class="src-legend"><span class="sw myob"></span>MYOB fact &nbsp; <span class="sw platform"></span>Platform analysis (synced ${ago(i.syncedAt)}) ·
+      MYOB "Available" includes stock on order; free stock = on hand − committed</p>
 
     <div class="two-col" style="margin-top:1.1rem">
       <div>
@@ -579,7 +581,7 @@ async function renderItem(uid) {
                   <ul>
                     <li>Weekly demand ${s.rationale.weeklyDemand} (${s.rationale.demandBasis} basis)</li>
                     <li>Target cover ${s.rationale.targetCoverWeeks} weeks + min level ${qty(s.rationale.minLevel)}</li>
-                    <li>Less available ${qty(s.rationale.available)} and incoming ${qty(s.rationale.incoming)}</li>
+                    <li>Less free stock ${qty(s.rationale.freeStock)} and incoming ${qty(s.rationale.incoming)}</li>
                     ${s.rationale.reorderMultiple ? `<li>Rounded to MYOB reorder multiple of ${qty(s.rationale.reorderMultiple)}</li>` : ""}
                   </ul>
                   Decision support only — nothing is sent to MYOB.
@@ -615,14 +617,14 @@ async function renderItem(uid) {
                     : ""
                 }
                 <div class="table-wrap"><table>
-                <thead><tr><th>Component</th><th class="num">Qty per</th><th class="num">Avail</th><th class="num">Builds</th><th>Source</th></tr></thead>
+                <thead><tr><th>Component</th><th class="num">Qty per</th><th class="num">Free stock</th><th class="num">Builds</th><th>Source</th></tr></thead>
                 <tbody>${d.components
                   .map(
                     (c) => `<tr>
                       <td>${itemLink(c.uid, `${c.number ?? "—"}`)}<br /><span class="muted">${esc((c.name ?? "").slice(0, 40))}</span></td>
                       <td class="num">${qty(c.qty_per)}</td>
-                      <td class="num">${qty(c.qty_available)}</td>
-                      <td class="num">${c.qty_per > 0 ? qty(Math.floor(Math.max(c.qty_available ?? 0, 0) / c.qty_per)) : "—"}</td>
+                      <td class="num">${qty(c.stock_free)}</td>
+                      <td class="num">${c.qty_per > 0 ? qty(Math.floor(Math.max(c.stock_free ?? 0, 0) / c.qty_per)) : "—"}</td>
                       <td>${sourceBadge(c.source, c.confidence, c.build_count)}</td>
                     </tr>`,
                   )
@@ -637,14 +639,14 @@ async function renderItem(uid) {
           ${
             d.whereUsed.length
               ? `<div class="table-wrap"><table>
-                <thead><tr><th>Product</th><th class="num">Qty per</th><th class="num">Product avail</th><th>Source</th></tr></thead>
+                <thead><tr><th>Product</th><th class="num">Qty per</th><th class="num">Product free stock</th><th>Source</th></tr></thead>
                 <tbody>${d.whereUsed
                   .map(
                     (p) => `<tr>
                       <td>${itemLink(p.uid, `${p.number ?? "—"}`)}<br /><span class="muted">${esc((p.name ?? "").slice(0, 40))}</span>
                         ${p.used_higher ? '<br /><span class="badge idle">also a component</span>' : ""}</td>
                       <td class="num">${qty(p.qty_per)}</td>
-                      <td class="num">${qty(p.qty_available)}</td>
+                      <td class="num">${qty(p.stock_free)}</td>
                       <td>${sourceBadge(p.source, p.confidence, p.build_count)}</td>
                     </tr>`,
                   )
@@ -763,7 +765,7 @@ async function loadProductsTable() {
   container.innerHTML = `
     <div class="table-wrap"><table>
       <thead><tr>
-        <th>Product</th><th class="num">Components</th><th class="num">Avail</th>
+        <th>Product</th><th class="num">Components</th><th class="num">Free stock</th>
         <th class="num">Sold 90d</th><th class="num">Buildable now</th><th>Confidence</th>
       </tr></thead>
       <tbody>
@@ -774,7 +776,7 @@ async function loadProductsTable() {
                   (p) => `<tr class="rowlink" data-uid="${esc(p.parent_uid)}">
                     <td><strong>${esc(p.number ?? "—")}</strong><br /><span class="muted">${esc((p.name ?? "").slice(0, 60))}</span></td>
                     <td class="num">${qty(p.component_count)}</td>
-                    <td class="num">${qty(p.qty_available)}</td>
+                    <td class="num">${qty(p.stock_free)}</td>
                     <td class="num">${qty(p.sold_90)}</td>
                     <td class="num">${p.buildable == null ? "—" : qty(p.buildable)}</td>
                     <td>${
@@ -834,7 +836,7 @@ async function renderPurchasing() {
               <h2>${esc(g.supplier)} <span class="muted" style="text-transform:none;font-weight:500">· ${qty(g.itemCount)} item(s) · est ${money(g.estimatedCost)}</span></h2>
               <div class="table-wrap"><table>
                 <thead><tr>
-                  <th>Risk</th><th>Item</th><th class="num">Avail</th><th class="num">Incoming</th>
+                  <th>Risk</th><th>Item</th><th class="num">Free stock</th><th class="num">Incoming</th>
                   <th class="num">Weekly</th><th>Cover</th><th class="num">Suggested qty</th><th class="num">Est cost</th><th>Flags</th>
                 </tr></thead>
                 <tbody>${g.items
@@ -843,7 +845,7 @@ async function renderPurchasing() {
                       <td>${riskPill(i.risk.score)}</td>
                       <td><strong>${esc(i.number ?? "—")}</strong><br /><span class="muted">${esc((i.name ?? "").slice(0, 50))}</span>
                         ${i.supplierItemNumber ? `<br /><span class="muted">Supplier ref: ${esc(i.supplierItemNumber)}</span>` : ""}</td>
-                      <td class="num">${qty(i.qtyAvailable)}</td>
+                      <td class="num">${qty(i.qtyFreeStock)}</td>
                       <td class="num">${qty(i.incomingQty)}</td>
                       <td class="num">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "—"}</td>
                       <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
@@ -959,7 +961,13 @@ async function renderData() {
       <h2>Definitions &amp; known limitations</h2>
       <dl class="glossary">
         <dt>Position quantities (on hand, committed, on order, available)</dt>
-        <dd>Taken directly from the MYOB item master and never recalculated by this platform.</dd>
+        <dd>Taken directly from the MYOB item master and never recalculated by this platform.
+        Note: MYOB's "available" includes stock on order (verified against Allied's file:
+        available = on hand − committed + on order), so it counts stock that has not arrived yet.</dd>
+        <dt>Free stock</dt>
+        <dd>On hand − committed: physical stock not promised to a customer. This is what cover,
+        buildability and purchasing suggestions use, so incoming purchase orders are only ever
+        counted once (as "incoming").</dd>
         <dt>Direct demand</dt>
         <dd>Item-layout sales invoice lines. Credit notes have negative quantities and reduce demand automatically.</dd>
         <dt>Component consumption</dt>
@@ -967,12 +975,12 @@ async function renderData() {
         Separate movements from sales, so combining them does not double count.</dd>
         <dt>Weekly demand / cover</dt>
         <dd>Trailing 90-day rate; items with no 90-day activity fall back to the 365-day rate and are flagged "slow mover".
-        Cover = available ÷ weekly demand.</dd>
+        Cover = free stock ÷ weekly demand.</dd>
         <dt>Derived relationships</dt>
         <dd>Observed from MYOB build transactions with a single finished item. Confidence grows with corroborating builds.
         MYOB's API does not expose Auto-Build definitions, so unobserved recipes must be added manually.</dd>
         <dt>Purchasing suggestions</dt>
-        <dd>Weekly demand × target cover + minimum level − available − incoming, rounded to the MYOB reorder multiple.
+        <dd>Weekly demand × target cover + minimum level − free stock − incoming, rounded to the MYOB reorder multiple.
         Advisory only.</dd>
         <dt>Known limitations</dt>
         <dd>Transactional history is limited to the sync window (${d.settings.syncWindowDays} days). Per-location stock split is not
