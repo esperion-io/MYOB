@@ -397,6 +397,21 @@ tr.rowlink:hover { background: var(--brand-soft); }
 
 .explain ul { margin: 0.35rem 0 0; padding-left: 1.1rem; }
 
+/* ---------- BOM bulk import ---------- */
+
+#bom-paste {
+  width: 100%;
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink-deep);
+  resize: vertical;
+}
+#bom-preview { margin-top: 0.8rem; }
+#bom-preview table { font-size: 0.72rem; }
+
 /* ---------- suppliers page inline editing ---------- */
 
 .sup-region, .sup-lead, .sup-notes {

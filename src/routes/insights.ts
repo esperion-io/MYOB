@@ -4,6 +4,8 @@ import { config } from "../config.js";
 import { hasDatabaseUrl } from "../db.js";
 import {
   addUserBom,
+  bomBlindspots,
+  bomImport,
   dataStatus,
   invalidateItemsCache,
   itemDetail,
@@ -240,6 +242,41 @@ insightsRouter.post("/bom", async (req, res) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     res.status(400).json({ error: message });
+  }
+});
+
+/**
+ * Bulk import of Allied-provided relationships. `commit: false` (the default)
+ * validates and returns exactly what a commit would do, row by row, so staff
+ * can review before anything is written. Platform data only.
+ */
+insightsRouter.post("/bom/import", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const body = req.body ?? {};
+    const rows = Array.isArray(body.rows) ? body.rows : null;
+    if (!rows) {
+      res.status(400).json({ error: "rows[] is required." });
+      return;
+    }
+    const parsed = rows.map((r: Record<string, unknown>) => ({
+      parent: String(r?.parent ?? ""),
+      component: String(r?.component ?? ""),
+      qtyPer: Number(r?.qtyPer),
+    }));
+    res.json(await bomImport(parsed, body.commit === true));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
+  }
+});
+
+insightsRouter.get("/bom/blindspots", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await bomBlindspots());
+  } catch (err) {
+    send500(res, err);
   }
 });
 

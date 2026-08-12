@@ -692,8 +692,18 @@ async function loadExpandExtras(uid, el) {
 
 /* ---------- item detail ---------- */
 
-function sourceBadge(source, confidence, buildCount) {
-  if (source === "user") return '<span class="badge brand">User-defined</span>';
+function sourceBadge(source, confidence, buildCount, shadowedQty, shadowedBuilds) {
+  if (source === "user") {
+    // A user row supersedes any derived observation for the same pair. Show
+    // the disagreement rather than hiding it.
+    const note =
+      shadowedQty != null
+        ? `<br /><span class="muted" title="MYOB builds observed a different quantity">overrides derived ${qty(shadowedQty)}${
+            shadowedBuilds ? ` (${shadowedBuilds} build${shadowedBuilds === 1 ? "" : "s"})` : ""
+          }</span>`
+        : "";
+    return `<span class="badge brand">Allied-entered</span>${note}`;
+  }
   const pct = Math.round((confidence ?? 0) * 100);
   return `<span class="badge idle" title="Derived from ${buildCount} MYOB build transaction(s)">Derived · ${pct}%</span>`;
 }
@@ -884,7 +894,7 @@ async function renderItem(uid) {
                       <td class="num">${qty(c.qty_per)}</td>
                       <td class="num">${qty(c.stock_free)}</td>
                       <td class="num">${c.qty_per > 0 ? qty(Math.floor(Math.max(c.stock_free ?? 0, 0) / c.qty_per)) : "—"}</td>
-                      <td>${sourceBadge(c.source, c.confidence, c.build_count)}</td>
+                      <td>${sourceBadge(c.source, c.confidence, c.build_count, c.shadowed_derived_qty, c.shadowed_build_count)}</td>
                     </tr>`,
                   )
                   .join("")}</tbody>
@@ -963,15 +973,23 @@ async function renderProducts() {
     <div id="prod-table"><p class="loading">Loading products…</p></div>
 
     <section class="panel">
-      <h2>Add a relationship (Allied-defined)</h2>
-      <p class="hint">Stored in this platform only — never written to MYOB. Use MYOB item numbers.</p>
-      <div class="toolbar">
-        <input type="text" id="bom-parent" placeholder="Parent item number" />
-        <input type="text" id="bom-component" placeholder="Component item number" />
-        <input type="number" id="bom-qty" placeholder="Qty per unit" min="0" step="any" style="width:110px" />
-        <button class="btn primary" id="bom-add">Add</button>
+      <h2>Add relationships (Allied-defined)</h2>
+      <p class="hint">Stored in this platform only — <strong>never written to MYOB</strong>. Paste rows from a
+      spreadsheet as <code>parent number, component number, qty per parent</code> (one per line; tabs or commas).
+      Nothing is saved until you review the check below and confirm.</p>
+      <textarea id="bom-paste" rows="5" placeholder="BP1665S16, B1665S16, 1&#10;BP1665S16, N16S16, 1&#10;BP1665S16, WR16506G, 2"></textarea>
+      <div class="toolbar" style="margin-top:0.6rem">
+        <button class="btn" id="bom-check">Check rows</button>
+        <button class="btn primary" id="bom-commit" disabled>Confirm import</button>
+        <span class="muted" id="bom-msg"></span>
       </div>
-      <p class="muted" id="bom-msg"></p>
+      <div id="bom-preview"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Products with no known composition <span class="badge idle">blind spot</span></h2>
+      <p class="hint" id="blind-hint">Loading…</p>
+      <div id="blind-table"></div>
     </section>`;
 
   const q = document.getElementById("prod-q");
@@ -985,32 +1003,116 @@ async function renderProducts() {
     }, 300);
   });
 
-  document.getElementById("bom-add").addEventListener("click", async () => {
-    const msg = document.getElementById("bom-msg");
-    msg.textContent = "";
-    try {
-      const parentNumber = document.getElementById("bom-parent").value.trim();
-      const componentNumber = document.getElementById("bom-component").value.trim();
-      const qtyPer = Number(document.getElementById("bom-qty").value);
-      const [parent, component] = await Promise.all([
-        fetchJson(`/api/insights/items?q=${encodeURIComponent(parentNumber)}&pageSize=10`),
-        fetchJson(`/api/insights/items?q=${encodeURIComponent(componentNumber)}&pageSize=10`),
-      ]);
-      const p = parent.items.find((x) => x.number === parentNumber) ?? parent.items[0];
-      const c = component.items.find((x) => x.number === componentNumber) ?? component.items[0];
-      if (!p || !c) throw new Error("Item numbers not found in synced data.");
-      await fetchJson("/api/insights/bom", {
-        method: "POST",
-        body: JSON.stringify({ parentUid: p.uid, componentUid: c.uid, qtyPer }),
-      });
-      msg.textContent = `Added: ${p.number} uses ${qty(qtyPer)} × ${c.number}.`;
-      loadProductsTable();
-    } catch (err) {
-      msg.textContent = err.message;
-    }
+  document.getElementById("bom-check").addEventListener("click", () => runBomImport(false));
+  document.getElementById("bom-commit").addEventListener("click", () => runBomImport(true));
+  document.getElementById("bom-paste").addEventListener("input", () => {
+    // Any edit invalidates the previous check.
+    document.getElementById("bom-commit").disabled = true;
   });
 
-  await loadProductsTable();
+  await Promise.all([loadProductsTable(), loadBlindspots()]);
+}
+
+/** parent, component, qty — one per line, comma or tab separated. */
+function parseBomPaste(text) {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/^(parent|#)/i.test(line))
+    .map((line) => {
+      const parts = line.split(/[\t,;]+/).map((p) => p.trim());
+      return { parent: parts[0] ?? "", component: parts[1] ?? "", qtyPer: Number(parts[2]) };
+    });
+}
+
+async function runBomImport(commit) {
+  const msg = document.getElementById("bom-msg");
+  const preview = document.getElementById("bom-preview");
+  const commitBtn = document.getElementById("bom-commit");
+  const rows = parseBomPaste(document.getElementById("bom-paste").value);
+  msg.textContent = "";
+
+  if (!rows.length) {
+    preview.innerHTML = '<p class="muted">Nothing to check — paste some rows first.</p>';
+    return;
+  }
+  if (commit && !confirm(`Save ${rows.length} relationship row(s) to the Allied platform? MYOB is not touched.`))
+    return;
+
+  try {
+    const result = await fetchJson("/api/insights/bom/import", {
+      method: "POST",
+      body: JSON.stringify({ rows, commit }),
+    });
+
+    const actionLabel = { new: "New", update: "Update", override_derived: "Overrides derived" };
+    preview.innerHTML = `
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Parent</th><th>Component</th><th class="num">Qty per</th><th>Result</th></tr></thead>
+        <tbody>
+          ${result.rows
+            .map(
+              (r) => `<tr>
+                <td class="muted">${r.idx + 1}</td>
+                <td>${esc(r.parent)}${r.parentName ? `<br /><span class="muted">${esc(r.parentName.slice(0, 32))}</span>` : ""}</td>
+                <td>${esc(r.component)}${r.componentName ? `<br /><span class="muted">${esc(r.componentName.slice(0, 32))}</span>` : ""}</td>
+                <td class="num">${Number.isFinite(r.qtyPer) ? qty(r.qtyPer) : "—"}</td>
+                <td>${
+                  r.status === "ok"
+                    ? `<span class="badge ${r.action === "override_derived" ? "warn" : "ok"}">${actionLabel[r.action] ?? "OK"}</span> <span class="muted">${esc(r.detail)}</span>`
+                    : `<span class="badge fail">Rejected</span> <span class="muted">${esc(r.detail)}</span>`
+                }</td>
+              </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table></div>`;
+
+    if (commit) {
+      msg.textContent = `Saved ${result.applied} row(s). ${result.errorCount} rejected.`;
+      commitBtn.disabled = true;
+      await Promise.all([loadProductsTable(), loadBlindspots()]);
+    } else {
+      msg.textContent = `${result.okCount} row(s) ready, ${result.errorCount} rejected. Nothing saved yet.`;
+      commitBtn.disabled = result.okCount === 0;
+    }
+  } catch (err) {
+    msg.textContent = err.message;
+    commitBtn.disabled = true;
+  }
+}
+
+async function loadBlindspots() {
+  const hint = document.getElementById("blind-hint");
+  const table = document.getElementById("blind-table");
+  if (!hint || !table) return;
+  try {
+    const data = await fetchJson("/api/insights/bom/blindspots");
+    hint.innerHTML = `${qty(data.total)} product(s) look assembled but have no known composition, so their
+      components show no pack-driven pull and no buildability. Ranked by 90-day sales — adding the top rows
+      above closes the most valuable gaps first. <span class="muted">Heuristic: ${esc(data.heuristic)}</span>`;
+    table.innerHTML = data.items.length
+      ? `<div class="table-wrap"><table>
+          <thead><tr><th>Product</th><th class="num">Sold 90d</th><th class="num">Sold 365d</th><th class="num">Free stock</th></tr></thead>
+          <tbody>${data.items
+            .slice(0, 25)
+            .map(
+              (b) => `<tr class="rowlink" data-uid="${esc(b.uid)}">
+                <td><strong>${esc(b.number ?? "—")}</strong><br /><span class="muted">${esc((b.name ?? "").slice(0, 60))}</span></td>
+                <td class="num">${qty(b.sold_90)}</td>
+                <td class="num">${qty(b.sold_365)}</td>
+                <td class="num">${qty(b.stock_free)}</td>
+              </tr>`,
+            )
+            .join("")}</tbody>
+        </table></div>`
+      : '<p class="muted">No obvious gaps — every product that looks assembled has a known composition.</p>';
+    table.querySelectorAll("tr.rowlink").forEach((tr) =>
+      tr.addEventListener("click", () => (location.hash = `#/item/${tr.dataset.uid}`)),
+    );
+  } catch (err) {
+    hint.textContent = `Could not load blind spots: ${err.message}`;
+  }
 }
 
 async function loadProductsTable() {
