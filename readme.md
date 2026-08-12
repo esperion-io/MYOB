@@ -151,6 +151,13 @@ MYOB Business API  --(read-only GETs)-->  sync engine  -->  Postgres mirror
 5. **Every number is traceable.** Item pages show the underlying invoices,
    bills, builds, adjustments, open orders and purchase history, plus the risk
    factor breakdown and the arithmetic behind any purchase suggestion.
+6. **Suppliers are resolved, regions are platform labels.** Allied's file sets
+   a MYOB primary supplier on 0 of 3,100 items, so an item's supplier is the
+   MYOB primary where set, otherwise the dominant supplier inferred from
+   purchase-bill history (always labelled "inferred"). Supplier regions
+   (NZ / Australia / China / Overseas — other) auto-derive from the MYOB
+   address country and are overridable on the Suppliers page; region, lead
+   time and notes live in `platform_supplier_meta`, never in MYOB.
 
 ### Operating it
 
