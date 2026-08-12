@@ -219,6 +219,17 @@ const DDL: string[] = [
     PRIMARY KEY (parent_uid, component_uid, source)
   )`,
 
+  // Effective BOM: one row per parent+component pair. Where Allied has
+  // entered a user row for a pair that was also derived from builds, the
+  // user row wins everywhere; the derived observation remains in
+  // platform_bom for comparison/display.
+  `CREATE OR REPLACE VIEW effective_bom AS
+   SELECT DISTINCT ON (parent_uid, component_uid)
+          parent_uid, component_uid, source, qty_per, build_count,
+          last_observed, confidence, updated_at
+   FROM platform_bom
+   ORDER BY parent_uid, component_uid, (source = 'user') DESC`,
+
   // Allied-managed supplier attributes (region label, lead time, notes).
   // Platform data only — never written to MYOB. A row exists only once a
   // user edits something; region falls back to an auto label derived from

@@ -76,13 +76,13 @@ const DEMAND_CTE = `
   bom_usage AS (
     SELECT component_uid AS item_uid,
            COUNT(DISTINCT parent_uid)::int AS parent_count
-    FROM platform_bom
+    FROM effective_bom
     GROUP BY component_uid
   ),
   bom_parents AS (
     SELECT parent_uid AS item_uid,
            COUNT(DISTINCT component_uid)::int AS component_count
-    FROM platform_bom
+    FROM effective_bom
     GROUP BY parent_uid
   ),
   dominant_supplier AS (
@@ -457,7 +457,7 @@ export async function overview() {
       SELECT b.component_uid AS uid, i.number, i.name,
              (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
              COUNT(DISTINCT b.parent_uid)::int AS blocked_parents
-      FROM platform_bom b
+      FROM effective_bom b
       JOIN myob_items i ON i.uid = b.component_uid
       WHERE COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0) < b.qty_per
       GROUP BY b.component_uid, i.number, i.name, i.qty_on_hand, i.qty_committed
@@ -537,11 +537,14 @@ async function relationshipRows(uid: string) {
     pool.query(
       `SELECT b.component_uid AS uid, b.qty_per::float8 AS qty_per, b.source,
               b.build_count, b.confidence::float8 AS confidence, b.last_observed,
+              d.qty_per::float8 AS shadowed_derived_qty, d.build_count AS shadowed_build_count,
               i.number, i.name,
               (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
-              (SELECT COUNT(*)::int FROM platform_bom x WHERE x.parent_uid = b.component_uid) AS sub_components
-       FROM platform_bom b
+              (SELECT COUNT(*)::int FROM effective_bom x WHERE x.parent_uid = b.component_uid) AS sub_components
+       FROM effective_bom b
        JOIN myob_items i ON i.uid = b.component_uid
+       LEFT JOIN platform_bom d ON d.parent_uid = b.parent_uid
+         AND d.component_uid = b.component_uid AND d.source = 'derived' AND b.source = 'user'
        WHERE b.parent_uid = $1
        ORDER BY b.qty_per DESC`,
       [uid],
@@ -551,8 +554,8 @@ async function relationshipRows(uid: string) {
               b.build_count, b.confidence::float8 AS confidence,
               i.number, i.name,
               (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
-              (SELECT COUNT(*)::int FROM platform_bom x WHERE x.component_uid = b.parent_uid) AS used_higher
-       FROM platform_bom b
+              (SELECT COUNT(*)::int FROM effective_bom x WHERE x.component_uid = b.parent_uid) AS used_higher
+       FROM effective_bom b
        JOIN myob_items i ON i.uid = b.parent_uid
        WHERE b.component_uid = $1
        ORDER BY b.qty_per DESC`,
@@ -682,7 +685,7 @@ export async function productsList(params: { q?: string; page?: number }) {
              MIN(FLOOR(GREATEST(COALESCE(ci.qty_on_hand,0) - COALESCE(ci.qty_committed,0), 0) / NULLIF(b.qty_per,0)))::float8 AS buildable,
              BOOL_OR(b.source = 'user') AS has_user_rows,
              MIN(b.confidence)::float8 AS min_confidence
-      FROM platform_bom b
+      FROM effective_bom b
       JOIN myob_items ci ON ci.uid = b.component_uid
       GROUP BY b.parent_uid
     )
@@ -806,7 +809,9 @@ export async function dataStatus() {
         (SELECT COUNT(*)::int FROM myob_suppliers) AS suppliers,
         (SELECT COUNT(*)::int FROM myob_locations) AS locations,
         (SELECT COUNT(*)::int FROM platform_bom WHERE source='derived') AS bom_derived,
-        (SELECT COUNT(*)::int FROM platform_bom WHERE source='user') AS bom_user
+        (SELECT COUNT(*)::int FROM platform_bom WHERE source='user') AS bom_user,
+        (SELECT COUNT(*)::int FROM effective_bom) AS bom_effective,
+        (SELECT COUNT(DISTINCT parent_uid)::int FROM effective_bom) AS bom_parents
     `),
   ]);
 
@@ -948,6 +953,26 @@ export async function setSupplierMeta(
   invalidateItemsCache();
 }
 
+/** True when adding parent→component would create a loop, i.e. the parent is
+ * already reachable from the component through the effective BOM. */
+async function wouldCreateCycle(
+  parentUid: string,
+  componentUid: string,
+): Promise<boolean> {
+  const result = await getPool().query(
+    `WITH RECURSIVE walk AS (
+       SELECT component_uid AS node, 1 AS depth FROM effective_bom WHERE parent_uid = $1
+       UNION ALL
+       SELECT b.component_uid, w.depth + 1
+       FROM effective_bom b JOIN walk w ON b.parent_uid = w.node
+       WHERE w.depth < 8
+     )
+     SELECT 1 FROM walk WHERE node = $2 LIMIT 1`,
+    [componentUid, parentUid],
+  );
+  return result.rows.length > 0;
+}
+
 export async function addUserBom(
   parentUid: string,
   componentUid: string,
@@ -963,6 +988,8 @@ export async function addUserBom(
   );
   if (Number(exists.rows[0].c) !== 2)
     throw new Error("Both items must exist in the synced item list.");
+  if (await wouldCreateCycle(parentUid, componentUid))
+    throw new Error("That relationship would create a loop (the component already contains the parent).");
   await pool.query(
     `INSERT INTO platform_bom (parent_uid, component_uid, source, qty_per, confidence, updated_at)
      VALUES ($1, $2, 'user', $3, 1.0, NOW())
@@ -983,4 +1010,235 @@ export async function removeUserBom(
     [parentUid, componentUid],
   );
   invalidateItemsCache();
+}
+
+// ---- Bulk BOM import (user rows only; preview before commit) ----
+
+export interface BomImportInputRow {
+  parent: string;
+  component: string;
+  qtyPer: number;
+}
+
+export interface BomImportRowResult {
+  idx: number;
+  parent: string;
+  component: string;
+  qtyPer: number;
+  status: "ok" | "error";
+  action: "new" | "update" | "override_derived" | null;
+  detail: string;
+  parentName?: string | null;
+  componentName?: string | null;
+}
+
+const BOM_IMPORT_MAX_ROWS = 2000;
+
+/**
+ * Validate (and optionally apply) a batch of user BOM rows.
+ * Never touches derived rows; committed rows land as source='user' and win
+ * over derived rows via the effective_bom view. Preview (commit=false)
+ * returns exactly what commit would do, row by row.
+ */
+export async function bomImport(
+  input: BomImportInputRow[],
+  commit: boolean,
+): Promise<{
+  commit: boolean;
+  applied: number;
+  okCount: number;
+  errorCount: number;
+  rows: BomImportRowResult[];
+}> {
+  await ensureInsightsSchema();
+  if (input.length > BOM_IMPORT_MAX_ROWS)
+    throw new Error(`Too many rows (max ${BOM_IMPORT_MAX_ROWS} per import).`);
+  const pool = getPool();
+
+  // Resolve item numbers case-insensitively in one query.
+  const numbers = [
+    ...new Set(
+      input.flatMap((r) => [r.parent?.trim().toUpperCase(), r.component?.trim().toUpperCase()])
+        .filter(Boolean),
+    ),
+  ];
+  const itemsResult = numbers.length
+    ? await pool.query(
+        `SELECT uid, number, name FROM myob_items WHERE UPPER(number) = ANY($1)`,
+        [numbers],
+      )
+    : { rows: [] as Record<string, unknown>[] };
+  const byNumber = new Map<string, { uid: string; number: string; name: string | null }[]>();
+  for (const r of itemsResult.rows) {
+    const key = String(r.number).toUpperCase();
+    if (!byNumber.has(key)) byNumber.set(key, []);
+    byNumber.get(key)!.push({ uid: String(r.uid), number: String(r.number), name: (r.name as string) ?? null });
+  }
+
+  // Existing rows for the referenced pairs (user + derived).
+  const existing = await pool.query(
+    `SELECT parent_uid, component_uid, source, qty_per::float8 AS qty_per, build_count
+     FROM platform_bom`,
+  );
+  const userRows = new Map<string, number>();
+  const derivedRows = new Map<string, { qty: number; builds: number }>();
+  for (const r of existing.rows) {
+    const key = `${r.parent_uid}|${r.component_uid}`;
+    if (r.source === "user") userRows.set(key, Number(r.qty_per));
+    else derivedRows.set(key, { qty: Number(r.qty_per), builds: Number(r.build_count) });
+  }
+
+  const results: BomImportRowResult[] = [];
+  const lastOccurrence = new Map<string, number>(); // pair key -> last row idx
+  const resolved: ({ parentUid: string; componentUid: string } | null)[] = [];
+
+  input.forEach((row, idx) => {
+    const parentKey = row.parent?.trim().toUpperCase() ?? "";
+    const componentKey = row.component?.trim().toUpperCase() ?? "";
+    const res: BomImportRowResult = {
+      idx,
+      parent: row.parent?.trim() ?? "",
+      component: row.component?.trim() ?? "",
+      qtyPer: row.qtyPer,
+      status: "error",
+      action: null,
+      detail: "",
+    };
+    results.push(res);
+    resolved.push(null);
+
+    const parents = byNumber.get(parentKey) ?? [];
+    const components = byNumber.get(componentKey) ?? [];
+    if (!parentKey || !componentKey) return void (res.detail = "Missing item number.");
+    if (!Number.isFinite(row.qtyPer) || row.qtyPer <= 0)
+      return void (res.detail = "Qty per unit must be a positive number.");
+    if (!parents.length) return void (res.detail = `Parent "${res.parent}" not found in synced items.`);
+    if (parents.length > 1) return void (res.detail = `Parent "${res.parent}" is ambiguous (${parents.length} items).`);
+    if (!components.length) return void (res.detail = `Component "${res.component}" not found in synced items.`);
+    if (components.length > 1) return void (res.detail = `Component "${res.component}" is ambiguous.`);
+    const parentUid = parents[0].uid;
+    const componentUid = components[0].uid;
+    res.parentName = parents[0].name;
+    res.componentName = components[0].name;
+    if (parentUid === componentUid) return void (res.detail = "An item cannot contain itself.");
+
+    const pairKey = `${parentUid}|${componentUid}`;
+    lastOccurrence.set(pairKey, idx);
+    resolved[idx] = { parentUid, componentUid };
+    res.status = "ok";
+  });
+
+  // Within-batch duplicates: last occurrence wins, earlier become errors.
+  results.forEach((res, idx) => {
+    const r = resolved[idx];
+    if (!r || res.status !== "ok") return;
+    const pairKey = `${r.parentUid}|${r.componentUid}`;
+    if (lastOccurrence.get(pairKey) !== idx) {
+      res.status = "error";
+      res.detail = `Duplicate of row ${lastOccurrence.get(pairKey)! + 1} (last occurrence wins).`;
+      resolved[idx] = null;
+    }
+  });
+
+  // Cycle check against existing effective BOM (memoised per pair).
+  for (let idx = 0; idx < results.length; idx++) {
+    const res = results[idx];
+    const r = resolved[idx];
+    if (!r || res.status !== "ok") continue;
+    if (await wouldCreateCycle(r.parentUid, r.componentUid)) {
+      res.status = "error";
+      res.detail = "Would create a loop: the component already contains this parent.";
+      resolved[idx] = null;
+      continue;
+    }
+    const pairKey = `${r.parentUid}|${r.componentUid}`;
+    if (userRows.has(pairKey)) {
+      res.action = "update";
+      const prev = userRows.get(pairKey)!;
+      res.detail =
+        prev === res.qtyPer
+          ? "Unchanged (same qty already entered)."
+          : `Updates existing Allied row (was ${prev}).`;
+    } else if (derivedRows.has(pairKey)) {
+      const d = derivedRows.get(pairKey)!;
+      res.action = "override_derived";
+      res.detail = `Overrides derived qty ${d.qty.toFixed(2)} (observed across ${d.builds} build${d.builds === 1 ? "" : "s"}).`;
+    } else {
+      res.action = "new";
+      res.detail = "New relationship.";
+    }
+  }
+
+  const okRows = results.filter((r) => r.status === "ok");
+  let applied = 0;
+  if (commit && okRows.length) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const res of okRows) {
+        const r = resolved[res.idx]!;
+        await client.query(
+          `INSERT INTO platform_bom (parent_uid, component_uid, source, qty_per, confidence, updated_at)
+           VALUES ($1, $2, 'user', $3, 1.0, NOW())
+           ON CONFLICT (parent_uid, component_uid, source)
+           DO UPDATE SET qty_per = EXCLUDED.qty_per, updated_at = NOW()`,
+          [r.parentUid, r.componentUid, res.qtyPer],
+        );
+        applied++;
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+    invalidateItemsCache();
+  }
+
+  return {
+    commit,
+    applied,
+    okCount: okRows.length,
+    errorCount: results.length - okRows.length,
+    rows: results,
+  };
+}
+
+/**
+ * Blind-spot worklist: items that sold in the last year, look like assembled
+ * products (name/number heuristic — labelled as such in the UI), and have no
+ * known composition in the effective BOM.
+ */
+export async function bomBlindspots() {
+  await ensureInsightsSchema();
+  const result = await getPool().query(`
+    WITH sold AS (
+      SELECT l.item_uid,
+             COALESCE(SUM(l.qty) FILTER (WHERE si.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS sold_90,
+             COALESCE(SUM(l.qty), 0)::float8 AS sold_365
+      FROM myob_sale_invoice_lines l
+      JOIN myob_sale_invoices si ON si.uid = l.invoice_uid
+      WHERE si.date >= NOW() - INTERVAL '365 days' AND l.item_uid IS NOT NULL
+      GROUP BY l.item_uid
+    )
+    SELECT i.uid, i.number, i.name,
+           (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
+           s.sold_90, s.sold_365,
+           COUNT(*) OVER ()::int AS total_count
+    FROM myob_items i
+    JOIN sold s ON s.item_uid = i.uid AND s.sold_365 > 0
+    WHERE i.is_active IS NOT FALSE
+      AND COALESCE(i.is_sold, TRUE)
+      AND NOT EXISTS (SELECT 1 FROM effective_bom b WHERE b.parent_uid = i.uid)
+      AND (i.name ~* '(pack|kit|dressing|assembl)' OR i.number ~* '^(BP|DS)')
+    ORDER BY s.sold_90 DESC, s.sold_365 DESC
+    LIMIT 100
+  `);
+  return {
+    heuristic:
+      "Active items sold in the last 365 days whose name contains pack/kit/dressing/assembly (or number starts BP/DS) and that have no known composition.",
+    total: result.rows.length ? Number(result.rows[0].total_count) : 0,
+    items: result.rows.map(({ total_count, ...r }) => r),
+  };
 }
