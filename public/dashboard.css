@@ -397,6 +397,15 @@ tr.rowlink:hover { background: var(--brand-soft); }
 
 .explain ul { margin: 0.35rem 0 0; padding-left: 1.1rem; }
 
+.sub-h {
+  margin: 1.1rem 0 0.3rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 /* ---------- BOM bulk import ---------- */
 
 #bom-paste {

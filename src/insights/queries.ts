@@ -79,6 +79,24 @@ const DEMAND_CTE = `
     FROM effective_bom
     GROUP BY component_uid
   ),
+  -- Products that depend on a component through any number of levels, e.g. a
+  -- bolt inside a bolt pack inside a dressing set. Depth-capped and
+  -- cycle-guarded; used for operational importance, not for quantities.
+  bom_usage_deep AS (
+    WITH RECURSIVE up AS (
+      SELECT component_uid AS item_uid, parent_uid, 1 AS depth,
+             ARRAY[component_uid, parent_uid] AS path
+      FROM effective_bom
+      UNION ALL
+      SELECT u.item_uid, b.parent_uid, u.depth + 1, u.path || b.parent_uid
+      FROM effective_bom b
+      JOIN up u ON b.component_uid = u.parent_uid
+      WHERE u.depth < 6 AND NOT b.parent_uid = ANY(u.path)
+    )
+    SELECT item_uid, COUNT(DISTINCT parent_uid)::int AS parent_count_deep
+    FROM up
+    GROUP BY item_uid
+  ),
   bom_parents AS (
     SELECT parent_uid AS item_uid,
            COUNT(DISTINCT component_uid)::int AS component_count
@@ -154,6 +172,7 @@ const ITEM_SELECT = `
          COALESCE(cd.comp_365, 0) AS comp_365,
          COALESCE(inc.qty, 0) AS incoming_qty,
          COALESCE(u.parent_count, 0) AS parent_count,
+         COALESCE(ud.parent_count_deep, 0) AS parent_count_deep,
          COALESCE(p.component_count, 0) AS component_count,
          COALESCE(pot.potential_90, 0) AS potential_90,
          COALESCE(pot.potential_parents, 0) AS potential_parents
@@ -162,6 +181,7 @@ const ITEM_SELECT = `
   LEFT JOIN component_demand cd ON cd.item_uid = it.uid
   LEFT JOIN incoming inc ON inc.item_uid = it.uid
   LEFT JOIN bom_usage u ON u.item_uid = it.uid
+  LEFT JOIN bom_usage_deep ud ON ud.item_uid = it.uid
   LEFT JOIN bom_parents p ON p.item_uid = it.uid
   LEFT JOIN potential_demand pot ON pot.item_uid = it.uid
   LEFT JOIN dominant_supplier ds ON ds.item_uid = it.uid
@@ -209,6 +229,8 @@ export interface ItemComputed {
   };
   incomingQty: number;
   parentCount: number;
+  /** Products depending on this item at any depth (bolt → pack → set). */
+  parentCountDeep: number;
   componentCount: number;
   /**
    * Component pull implied by packs/kits that sold more than were built or
@@ -293,10 +315,16 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     else if (coverWeeks < config.insights.targetCoverWeeks)
       factors.push({ label: `Cover ${coverWeeks.toFixed(1)}w (below target)`, points: 8 });
   }
-  if (parentCount > 0)
+  // Dependency breadth counts products that need this item at any depth, so a
+  // bolt inside a pack inside a dressing set scores its true reach.
+  const parentCountDeep = n(row.parent_count_deep) ?? 0;
+  if (parentCountDeep > 0)
     factors.push({
-      label: `Used in ${parentCount} finished product${parentCount === 1 ? "" : "s"}`,
-      points: Math.min(20, parentCount * 2),
+      label:
+        parentCountDeep > parentCount
+          ? `Used in ${parentCountDeep} finished products (${parentCount} directly, rest via sub-assemblies)`
+          : `Used in ${parentCountDeep} finished product${parentCountDeep === 1 ? "" : "s"}`,
+      points: Math.min(20, parentCountDeep * 2),
     });
   if (flags.includes("negative_stock"))
     factors.push({ label: "Negative stock (data quality)", points: 20 });
@@ -387,6 +415,7 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     },
     incomingQty,
     parentCount,
+    parentCountDeep: n(row.parent_count_deep) ?? 0,
     componentCount: n(row.component_count) ?? 0,
     potential: {
       qty90: Number(potential90.toFixed(1)),
@@ -523,14 +552,27 @@ export async function overview() {
     .slice(0, 15);
 
   const [constraints, relationships, freshness, openPoRegions] = await Promise.all([
+    // Blocking counts every product that depends on the component at any
+    // depth, so a bolt short inside a pack also blocks the sets using it.
     pool.query(`
-      SELECT b.component_uid AS uid, i.number, i.name,
+      WITH RECURSIVE up AS (
+        SELECT component_uid AS item_uid, parent_uid, qty_per, 1 AS depth,
+               ARRAY[component_uid, parent_uid] AS path
+        FROM effective_bom
+        UNION ALL
+        SELECT u.item_uid, b.parent_uid, u.qty_per, u.depth + 1, u.path || b.parent_uid
+        FROM effective_bom b
+        JOIN up u ON b.component_uid = u.parent_uid
+        WHERE u.depth < 6 AND NOT b.parent_uid = ANY(u.path)
+      )
+      SELECT u.item_uid AS uid, i.number, i.name,
              (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
-             COUNT(DISTINCT b.parent_uid)::int AS blocked_parents
-      FROM effective_bom b
-      JOIN myob_items i ON i.uid = b.component_uid
-      WHERE COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0) < b.qty_per
-      GROUP BY b.component_uid, i.number, i.name, i.qty_on_hand, i.qty_committed
+             COUNT(DISTINCT u.parent_uid)::int AS blocked_parents,
+             MAX(u.depth)::int AS max_depth
+      FROM up u
+      JOIN myob_items i ON i.uid = u.item_uid
+      WHERE COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0) < u.qty_per
+      GROUP BY u.item_uid, i.number, i.name, i.qty_on_hand, i.qty_committed
       ORDER BY blocked_parents DESC
       LIMIT 8
     `),
@@ -640,6 +682,106 @@ export async function relationships(uid: string) {
   return relationshipRows(uid);
 }
 
+/** Depth cap for BOM explosion; also the cycle guard for malformed data. */
+const BOM_MAX_DEPTH = 6;
+
+/**
+ * Explode a parent through sub-assemblies to its base components.
+ * Returns the tree (for display) and the flattened base requirement per unit,
+ * which is what "buildable if sub-assemblies are built first" rests on.
+ */
+async function explodeBom(uid: string): Promise<BomTreeRow[]> {
+  const result = await getPool().query(
+    `WITH RECURSIVE tree AS (
+       SELECT b.parent_uid, b.component_uid, b.qty_per::float8 AS qty_per,
+              b.qty_per::float8 AS qty_total, 1 AS depth,
+              ARRAY[b.parent_uid, b.component_uid] AS path
+       FROM effective_bom b
+       WHERE b.parent_uid = $1
+       UNION ALL
+       SELECT b.parent_uid, b.component_uid, b.qty_per::float8,
+              (t.qty_total * b.qty_per)::float8, t.depth + 1,
+              t.path || b.component_uid
+       FROM effective_bom b
+       JOIN tree t ON b.parent_uid = t.component_uid
+       WHERE t.depth < ${BOM_MAX_DEPTH}
+         AND NOT b.component_uid = ANY(t.path)
+     )
+     SELECT t.parent_uid, t.component_uid, t.qty_per, t.qty_total, t.depth,
+            i.number, i.name,
+            (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
+            EXISTS (SELECT 1 FROM effective_bom c WHERE c.parent_uid = t.component_uid) AS has_children
+     FROM tree t
+     JOIN myob_items i ON i.uid = t.component_uid
+     ORDER BY t.depth, t.qty_total DESC`,
+    [uid],
+  );
+  return result.rows;
+}
+
+interface BomTreeRow {
+  parent_uid: string;
+  component_uid: string;
+  number: string | null;
+  name: string | null;
+  qty_per: number;
+  qty_total: number;
+  stock_free: number | null;
+  has_children: boolean;
+  depth: number;
+}
+
+type BuildAnswer = {
+  maxUnits: number;
+  constraint: { uid: string; number: string | null; name: string | null } | null;
+} | null;
+
+/**
+ * Two buildability answers, both from free stock (on hand − committed):
+ *  - asIs: sub-assemblies counted only as finished units already on the shelf.
+ *  - withSubBuilds: a sub-assembly also contributes what could be made from
+ *    its own components, recursively — "what could we supply if we did the
+ *    work first?". Always >= asIs.
+ *
+ * Caveat surfaced in the UI: a base component shared by two branches is
+ * counted against each branch independently, so withSubBuilds is an upper
+ * bound where branches compete for the same part.
+ */
+function computeBuildability(rows: BomTreeRow[], rootUid: string) {
+  const children = new Map<string, BomTreeRow[]>();
+  for (const r of rows) {
+    const list = children.get(r.parent_uid);
+    if (list) list.push(r);
+    else children.set(r.parent_uid, [r]);
+  }
+
+  const answer = (uid: string, useSubBuilds: boolean, seen: Set<string>): BuildAnswer => {
+    const kids = children.get(uid);
+    if (!kids?.length || seen.has(uid)) return null;
+    const nextSeen = new Set(seen).add(uid);
+    let maxUnits: number | null = null;
+    let constraint: NonNullable<BuildAnswer>["constraint"] = null;
+    for (const k of kids) {
+      if (!(k.qty_per > 0)) continue;
+      const onShelf = Math.max(k.stock_free ?? 0, 0);
+      const extra = useSubBuilds
+        ? (answer(k.component_uid, true, nextSeen)?.maxUnits ?? 0)
+        : 0;
+      const possible = Math.floor((onShelf + extra) / k.qty_per);
+      if (maxUnits == null || possible < maxUnits) {
+        maxUnits = possible;
+        constraint = { uid: k.component_uid, number: k.number, name: k.name };
+      }
+    }
+    return maxUnits == null ? null : { maxUnits, constraint };
+  };
+
+  return {
+    asIs: answer(rootUid, false, new Set()),
+    withSubBuilds: answer(rootUid, true, new Set()),
+  };
+}
+
 export async function itemDetail(uid: string) {
   await ensureInsightsSchema();
   const pool = getPool();
@@ -747,24 +889,16 @@ export async function itemDetail(uid: string) {
       ),
     ]);
 
-  // Buildability of this item from direct components (single level), using
-  // free component stock (on hand - committed) — incoming POs don't count.
-  type Constraint = { uid: string; number: string | null; name: string | null };
-  let buildability: { maxUnits: number | null; constraint: Constraint | null } | null =
-    null;
-  if (rels.components.length) {
-    let maxUnits: number | null = null;
-    let constraint: Constraint | null = null;
-    for (const c of rels.components) {
-      if (!c.qty_per || c.qty_per <= 0) continue;
-      const possible = Math.floor(Math.max(c.stock_free ?? 0, 0) / c.qty_per);
-      if (maxUnits == null || possible < maxUnits) {
-        maxUnits = possible;
-        constraint = { uid: c.uid, number: c.number, name: c.name };
+  // Buildability from free stock, two ways: sub-assemblies as they sit today,
+  // or exploded to base components assuming sub-assemblies get built first.
+  const tree = rels.components.length ? await explodeBom(uid) : [];
+  const buildability = rels.components.length
+    ? {
+        ...computeBuildability(tree, uid),
+        maxDepth: tree.reduce((m, r) => Math.max(m, Number(r.depth)), 0),
+        multiLevel: tree.some((r) => Number(r.depth) > 1),
       }
-    }
-    buildability = { maxUnits, constraint };
-  }
+    : null;
 
   return {
     item,
@@ -774,6 +908,7 @@ export async function itemDetail(uid: string) {
     incoming: incoming.rows,
     purchases: purchases.rows,
     components: rels.components,
+    componentTree: tree,
     whereUsed: rels.whereUsed,
     buildability,
     potentialParents: potentialParents.rows,

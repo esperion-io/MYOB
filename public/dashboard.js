@@ -328,7 +328,8 @@ async function renderOverview() {
 
       <section class="panel">
         <h2>Components blocking assemblies</h2>
-        <p class="hint">Components with less free stock (on hand − committed) than one build requires, ranked by how many finished products they block.</p>
+        <p class="hint">Components with less free stock (on hand − committed) than one build requires, ranked by how many
+        finished products they block — counting products that depend on them through sub-assemblies too.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Component</th><th class="num">Free stock</th><th class="num">Blocks</th></tr></thead>
           <tbody>
@@ -339,7 +340,7 @@ async function renderOverview() {
                       (c) => `<tr class="rowlink" data-uid="${esc(c.uid)}">
                         <td><strong>${esc(c.number ?? "—")}</strong><br /><span class="muted">${esc(c.name ?? "")}</span></td>
                         <td class="num">${qty(c.stock_free)}</td>
-                        <td class="num">${qty(c.blocked_parents)}</td>
+                        <td class="num">${qty(c.blocked_parents)}${c.max_depth > 1 ? '<br /><span class="muted" style="font-size:0.62rem">incl. via sub-assy</span>' : ""}</td>
                       </tr>`,
                     )
                     .join("")
@@ -604,7 +605,12 @@ function expandPanelHtml(i) {
           )
         : ""
     }
-    ${kvRow("Used in finished products", i.parentCount || "—")}
+    ${kvRow(
+      "Used in finished products",
+      i.parentCountDeep > i.parentCount
+        ? `${i.parentCountDeep} <span class="muted">(${i.parentCount} direct + via sub-assemblies)</span>`
+        : i.parentCount || "—",
+    )}
     ${kvRow("Components (if assembled)", i.componentCount || "—")}`;
 
   const action = `
@@ -708,6 +714,41 @@ function sourceBadge(source, confidence, buildCount, shadowedQty, shadowedBuilds
   return `<span class="badge idle" title="Derived from ${buildCount} MYOB build transaction(s)">Derived · ${pct}%</span>`;
 }
 
+/** Buildability: from stock as it sits, and including building sub-assemblies. */
+function buildabilityHtml(b) {
+  if (!b) return "";
+  const line = (label, r, note) => {
+    if (!r) return "";
+    const constraint = r.constraint
+      ? ` — first limited by ${itemLink(r.constraint.uid, r.constraint.number ?? "—")}`
+      : "";
+    return `<li><strong>${label}: ${qty(r.maxUnits)} unit(s)</strong>${constraint}<br /><span class="muted">${note}</span></li>`;
+  };
+  if (!b.multiLevel) {
+    return `<p class="hint">Buildable now from free component stock:
+      <strong>${b.asIs == null ? "unknown" : qty(b.asIs.maxUnits)} unit(s)</strong>${
+        b.asIs?.constraint
+          ? ` — first limited by ${itemLink(b.asIs.constraint.uid, b.asIs.constraint.number ?? "—")}`
+          : ""
+      }</p>`;
+  }
+  const unlocked = (b.withSubBuilds?.maxUnits ?? 0) - (b.asIs?.maxUnits ?? 0);
+  return `<div class="explain">
+      <strong>Buildable now — two answers, because this product contains sub-assemblies:</strong>
+      <ul>
+        ${line("From stock as it sits", b.asIs, "Counts sub-assemblies only as finished units already on the shelf.")}
+        ${line("Including building sub-assemblies first", b.withSubBuilds, "Adds what each sub-assembly could be made from, using its own components.")}
+      </ul>
+      ${
+        unlocked > 0
+          ? `Doing the sub-assembly work first unlocks <strong>${qty(unlocked)} more unit(s)</strong>.`
+          : "Building sub-assemblies first would not unlock any more units."
+      }
+      <br /><span class="muted">Both use free stock (on hand − committed) and ignore incoming purchase orders.
+      Where two branches need the same base part, the second figure counts it for each branch, so treat it as an upper bound.</span>
+    </div>`;
+}
+
 async function renderItem(uid) {
   main.innerHTML = '<p class="loading">Loading item…</p>';
   const d = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}`);
@@ -736,7 +777,7 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
       <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${i.coverWeeks == null ? "—" : `${i.coverWeeks}w`}</span></div>
       <div class="fact src-platform"><span class="f-label">Open PO incoming</span><span class="f-value">${qty(i.incomingQty)}</span></div>
-      <div class="fact src-platform"><span class="f-label">Used in products</span><span class="f-value">${i.parentCount}</span></div>
+      <div class="fact src-platform" title="${i.parentCountDeep > i.parentCount ? `${i.parentCount} directly, ${i.parentCountDeep - i.parentCount} more via sub-assemblies` : "Direct parents"}"><span class="f-label">Used in products</span><span class="f-value">${i.parentCountDeep || i.parentCount}${i.parentCountDeep > i.parentCount ? `<span class="muted" style="font-size:0.7rem"> (${i.parentCount} direct)</span>` : ""}</span></div>
       ${
         i.potential.qty90 > 0
           ? `<div class="fact src-inferred"><span class="f-label">Potential pack pull 90d</span><span class="f-value">+${qty(i.potential.qty90)}</span></div>`
@@ -874,17 +915,7 @@ async function renderItem(uid) {
           <h2>Components (this product uses)</h2>
           ${
             d.components.length
-              ? `${
-                  d.buildability
-                    ? `<p class="hint">Buildable now from component stock: <strong>${
-                        d.buildability.maxUnits == null ? "unknown" : qty(d.buildability.maxUnits)
-                      } unit(s)</strong>${
-                        d.buildability.constraint
-                          ? ` — constrained by ${esc(d.buildability.constraint.number ?? "")}`
-                          : ""
-                      }</p>`
-                    : ""
-                }
+              ? `${buildabilityHtml(d.buildability)}
                 <div class="table-wrap"><table>
                 <thead><tr><th>Component</th><th class="num">Qty per</th><th class="num">Free stock</th><th class="num">Builds</th><th>Source</th></tr></thead>
                 <tbody>${d.components
@@ -898,7 +929,30 @@ async function renderItem(uid) {
                     </tr>`,
                   )
                   .join("")}</tbody>
-              </table></div>`
+              </table></div>
+              ${
+                d.buildability?.multiLevel
+                  ? `<h3 class="sub-h">Full structure (${d.buildability.maxDepth} levels)</h3>
+                     <p class="hint">Quantities are per one ${esc(i.number ?? "unit")}, multiplied down through each level.</p>
+                     <div class="table-wrap"><table>
+                       <thead><tr><th>Component</th><th class="num">Qty per parent</th><th class="num">Qty per ${esc(i.number ?? "unit")}</th><th class="num">Free stock</th></tr></thead>
+                       <tbody>${d.componentTree
+                         .map(
+                           (t) => `<tr>
+                             <td style="padding-left:${0.5 + (t.depth - 1) * 1.1}rem">
+                               ${t.depth > 1 ? '<span class="muted">└ </span>' : ""}${itemLink(t.component_uid, t.number ?? "—")}
+                               ${t.has_children ? '<span class="badge idle">sub-assembly</span>' : ""}
+                               <br /><span class="muted" style="padding-left:${t.depth > 1 ? 1 : 0}rem">${esc((t.name ?? "").slice(0, 38))}</span>
+                             </td>
+                             <td class="num">${qty(t.qty_per)}</td>
+                             <td class="num"><strong>${qty(t.qty_total)}</strong></td>
+                             <td class="num">${qty(t.stock_free)}</td>
+                           </tr>`,
+                         )
+                         .join("")}</tbody>
+                     </table></div>`
+                  : ""
+              }`
               : '<p class="muted">No component relationships observed for this item.</p>'
           }
         </section>
