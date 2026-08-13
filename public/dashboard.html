@@ -35,6 +35,7 @@
             <span class="dot" id="sync-dot"></span>
             <span id="sync-chip-text">Checking data…</span>
           </div>
+          <button class="side-link help-btn" id="help-open" type="button">What do these terms mean?</button>
           <a class="side-link" href="/">Connection console</a>
           <p class="side-note">Read-only MYOB. No data is ever written back.</p>
         </div>
@@ -44,6 +45,18 @@
         <p class="loading">Loading…</p>
       </main>
     </div>
+
+    <aside class="drawer" id="help-drawer" hidden aria-label="Glossary">
+      <div class="drawer-head">
+        <h2>What the numbers mean</h2>
+        <button class="btn small" id="help-close" type="button">Close</button>
+      </div>
+      <p class="drawer-note">
+        Everything here is either a fact read from MYOB or a calculation this platform makes on top of it —
+        each screen labels which. MYOB itself is never written to.
+      </p>
+      <div id="help-body"></div>
+    </aside>
 
     <div class="overlay" id="key-overlay" hidden>
       <form class="key-card" id="key-form">

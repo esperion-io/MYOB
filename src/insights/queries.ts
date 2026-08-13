@@ -519,9 +519,40 @@ export interface ListParams {
   filter?: string;
   region?: string;
   sort?: string;
+  dir?: string;
   page?: number;
   pageSize?: number;
 }
+
+/**
+ * Sortable columns. Values are extracted once per row; `null` always sorts
+ * last regardless of direction, so "no demand" items never masquerade as the
+ * best or worst of a list.
+ */
+const SORT_VALUES: Record<string, (i: ItemComputed) => number | string | null> = {
+  risk: (i) => i.risk.score,
+  number: (i) => i.number ?? "",
+  name: (i) => i.name ?? "",
+  on_hand: (i) => i.qtyOnHand,
+  committed: (i) => i.qtyCommitted,
+  available: (i) => i.qtyFreeStock,
+  incoming: (i) => i.incomingQty,
+  cover: (i) => i.coverWeeks,
+  weekly: (i) => i.demand.weekly,
+  value: (i) => i.currentValue,
+  excess: (i) => i.excess?.value ?? null,
+  potential: (i) => (i.potential.qty90 > 0 ? i.potential.qty90 : null),
+  used_in: (i) => Math.max(i.parentCountDeep, i.parentCount),
+};
+
+/** Direction that is most useful when a column is first chosen. */
+const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
+  number: "asc",
+  name: "asc",
+  cover: "asc",
+  available: "asc",
+  on_hand: "asc",
+};
 
 export async function listItems(params: ListParams) {
   const all = await computedItems();
@@ -577,19 +608,43 @@ export async function listItems(params: ListParams) {
     case "excess":
       rows = rows.filter((r) => r.excess != null);
       break;
+    case "slow_mover":
+      rows = rows.filter((r) => r.flags.includes("slow_mover"));
+      break;
+    case "stock_no_cost":
+      rows = rows.filter((r) => r.flags.includes("stock_no_cost"));
+      break;
+    case "min_above_demand":
+      rows = rows.filter((r) => r.flags.includes("min_above_demand"));
+      break;
+    // Money sitting in stock that is barely selling — the combination is what
+    // makes it worth acting on, so it gets its own view.
+    case "dead_stock":
+      rows = rows.filter((r) => r.excess != null && r.flags.includes("slow_mover"));
+      break;
+    case "committed":
+      rows = rows.filter((r) => (r.qtyCommitted ?? 0) > 0);
+      break;
   }
 
-  const sorters: Record<string, (a: ItemComputed, b: ItemComputed) => number> = {
-    risk: (a, b) => b.risk.score - a.risk.score,
-    number: (a, b) => (a.number ?? "").localeCompare(b.number ?? ""),
-    name: (a, b) => (a.name ?? "").localeCompare(b.name ?? ""),
-    available: (a, b) => (a.qtyFreeStock ?? 0) - (b.qtyFreeStock ?? 0),
-    cover: (a, b) => (a.coverWeeks ?? 1e9) - (b.coverWeeks ?? 1e9),
-    weekly: (a, b) => b.demand.weekly - a.demand.weekly,
-    value: (a, b) => (b.currentValue ?? 0) - (a.currentValue ?? 0),
-    used_in: (a, b) => b.parentCount - a.parentCount,
-  };
-  rows = [...rows].sort(sorters[params.sort ?? "risk"] ?? sorters.risk);
+  const sortKey = params.sort && SORT_VALUES[params.sort] ? params.sort : "risk";
+  const dir =
+    params.dir === "asc" || params.dir === "desc"
+      ? params.dir
+      : (SORT_DEFAULT_DIR[sortKey] ?? "desc");
+  const value = SORT_VALUES[sortKey];
+  rows = [...rows].sort((a, b) => {
+    const va = value(a);
+    const vb = value(b);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1; // missing values always last
+    if (vb == null) return -1;
+    const c =
+      typeof va === "string" && typeof vb === "string"
+        ? va.localeCompare(vb)
+        : Number(va) - Number(vb);
+    return dir === "asc" ? c : -c;
+  });
 
   const pageSize = Math.min(Math.max(params.pageSize ?? 50, 10), 200);
   const page = Math.max(params.page ?? 1, 1);
@@ -599,6 +654,8 @@ export async function listItems(params: ListParams) {
     total: rows.length,
     page,
     pageSize,
+    sort: sortKey,
+    dir,
     targetCoverWeeks: config.insights.targetCoverWeeks,
     items: rows.slice(start, start + pageSize),
   };

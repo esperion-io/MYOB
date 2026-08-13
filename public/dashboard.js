@@ -9,6 +9,95 @@ const keyForm = document.getElementById("key-form");
 const keyInput = document.getElementById("key-input");
 const keyError = document.getElementById("key-error");
 
+/**
+ * One glossary for the whole app. `short` powers hover tooltips on columns and
+ * tags; `long` fills the help drawer and the Data & Sync definitions list, so
+ * the wording can never drift between them.
+ */
+const TERMS = {
+  free_stock: {
+    label: "Free stock",
+    short: "On hand minus committed — physical stock not already promised to a customer.",
+    long: "On hand − committed. This is what cover, buildability and purchase suggestions use, so stock promised to a customer is never counted as if it were spare.",
+  },
+  myob_available: {
+    label: 'MYOB "Available"',
+    short: "MYOB's own figure — it already includes stock on order, so it counts stock that hasn't arrived.",
+    long: "MYOB's item-master availability = on hand − committed + on order. Because it counts stock still on the water, the platform shows it as a fact but never uses it in analysis.",
+  },
+  committed: {
+    label: "Committed",
+    short: "Stock already promised to customers on open sales orders.",
+    long: "Quantity MYOB has reserved against open sales orders. Sorting by this shows what is most spoken for.",
+  },
+  incoming: {
+    label: "Incoming",
+    short: "Quantity still to arrive on open purchase orders.",
+    long: "Outstanding quantity on open purchase orders (ordered − received). Subtracted once when suggesting an order.",
+  },
+  weekly_demand: {
+    label: "Weekly demand",
+    short: "Average units used per week — direct sales plus components consumed by builds.",
+    long: "Trailing 90-day rate of direct sales plus components consumed by MYOB build transactions. If nothing moved in 90 days but did within the year, the 365-day rate is used and the item is tagged a slow mover.",
+  },
+  cover: {
+    label: "Cover",
+    short: "How many weeks the free stock lasts at the current demand rate.",
+    long: "Free stock ÷ weekly demand. Under 2 weeks is shown red, under 4 amber. Blank means no demand was recorded, so cover cannot be calculated.",
+  },
+  risk: {
+    label: "Risk score",
+    short: "0–100 priority score. Click any item to see exactly which factors produced it.",
+    long: "Adds points for low cover, being below the MYOB minimum, how many finished products depend on the item, data-quality problems and weekly consumption value. Every contributing factor and its points are listed on the item page.",
+  },
+  used_in: {
+    label: "Used in",
+    short: "How many finished products need this item, counting sub-assemblies.",
+    long: "Counts products that depend on this item at any depth — a bolt inside a pack inside a dressing set counts for all of them.",
+  },
+  excess: {
+    label: "Excess stock",
+    short: "Value of stock beyond the excess threshold of cover, where it is material.",
+    long: "Free stock beyond the excess threshold (default 26 weeks of cover) valued at average cost, counted only when the item has real demand and the excess is worth at least $250. The counterpart to shortage risk: stock Allied could stop reordering.",
+  },
+  potential: {
+    label: "Potential pack pull",
+    short: "Inferred component demand from packs sold but not rebuilt. Never included in the totals.",
+    long: "When a pack or kit sells more units in 90 days than were built or bought, the difference came out of stock made earlier. Rebuilding it would pull these components, but MYOB has recorded no such movement — so it is reported separately and never added to demand, cover, suggestions or risk.",
+  },
+  supplier_source: {
+    label: "Supplier source",
+    short: "Whether the supplier was set by Allied, taken from MYOB, or inferred from purchase history.",
+    long: "Allied-set (a preferred supplier recorded on the item) wins, then MYOB's primary supplier field, then the supplier who has billed the item most. Allied's file sets a MYOB primary on almost no items, so most are inferred until someone records one.",
+  },
+  region: {
+    label: "Region",
+    short: "Platform label for where a supplier is — auto from their MYOB address country, or set by Allied.",
+    long: "NZ / Australia / China / Overseas — other. Derived automatically from the supplier's MYOB address country and overridable on the Suppliers page. Marked ·auto when it came from the address rather than a person.",
+  },
+  bom_source: {
+    label: "Relationship source",
+    short: "Whether a product's recipe was observed from MYOB builds or entered by Allied.",
+    long: "Derived rows are observed from MYOB build transactions, with confidence growing as more builds agree. Allied-entered rows always win, and the derived quantity they override stays visible so disagreements are not hidden.",
+  },
+  buildable: {
+    label: "Buildable now",
+    short: "How many units could be made from free component stock.",
+    long: "Two answers where a product contains sub-assemblies: from stock as it sits, and including building those sub-assemblies first. Both ignore incoming purchase orders.",
+  },
+};
+
+const FLAG_HELP = {
+  below_min: "Free stock is under the minimum level set in MYOB for this item.",
+  negative_stock: "MYOB shows less than zero on hand — usually a sequencing or data-entry problem worth investigating.",
+  stock_no_cost: "Stock is on hand but its average cost is zero, so any value or excess figure understates reality.",
+  inactive_with_stock: "The item is marked inactive in MYOB but still holds stock.",
+  no_supplier: "The item has demand but no supplier recorded, in MYOB or here, and none in purchase history.",
+  slow_mover: "Nothing moved in the last 90 days, so the slower 365-day rate is used for demand and cover.",
+  understated_demand: "Packs containing this item sold without being rebuilt, so its measured demand understates the real pull.",
+  min_above_demand: "This item is both overstocked against demand and suggested for reorder, because the MYOB minimum level sits far above what demand justifies — worth reviewing the minimum itself.",
+};
+
 const FLAG_LABELS = {
   below_min: ["Below min", "fail"],
   negative_stock: ["Negative stock", "fail"],
@@ -20,7 +109,53 @@ const FLAG_LABELS = {
   min_above_demand: ["Min level above demand", "warn"],
 };
 
-const invState = { q: "", filter: "all", region: "", sort: "risk", page: 1 };
+const invState = { q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1 };
+
+/** One-click answers to the questions staff actually ask. */
+const INVENTORY_PRESETS = [
+  { id: "attention", label: "Needs attention", state: { filter: "attention", sort: "risk", dir: "desc" } },
+  { id: "reorder", label: "Reorder now", state: { filter: "suggested", sort: "cover", dir: "asc" } },
+  { id: "slow", label: "Slow movers", state: { filter: "slow_mover", sort: "value", dir: "desc" } },
+  { id: "dead", label: "Dead stock", state: { filter: "dead_stock", sort: "excess", dir: "desc" } },
+  { id: "committed", label: "Most committed", state: { filter: "committed", sort: "committed", dir: "desc" } },
+  { id: "china", label: "From China", state: { region: "China", sort: "value", dir: "desc" } },
+];
+
+const INVENTORY_FILTERS = [
+  ["all", "All items"],
+  ["attention", "Needs attention"],
+  ["suggested", "Suggested orders"],
+  ["below_min", "Below min level"],
+  ["low_cover", "Cover under 4 weeks"],
+  ["excess", "Excess stock"],
+  ["slow_mover", "Slow movers"],
+  ["dead_stock", "Dead stock (slow + excess)"],
+  ["committed", "Has committed stock"],
+  ["components", "Used in assemblies"],
+  ["parents", "Assembled products"],
+  ["understated", "Pack pull not counted"],
+  ["min_above_demand", "Min level above demand"],
+  ["negative", "Negative stock"],
+  ["stock_no_cost", "Stock with no cost"],
+  ["no_supplier", "No supplier set"],
+  ["inactive_stock", "Inactive with stock"],
+];
+
+const INVENTORY_SORTS = [
+  ["risk", "Risk"],
+  ["cover", "Cover"],
+  ["weekly", "Weekly demand"],
+  ["committed", "Committed"],
+  ["on_hand", "On hand"],
+  ["available", "Free stock"],
+  ["incoming", "Incoming"],
+  ["value", "Stock value"],
+  ["excess", "Excess value"],
+  ["potential", "Potential pack pull"],
+  ["used_in", "Used in most products"],
+  ["number", "Item number"],
+  ["name", "Item name"],
+];
 const prodState = { q: "", page: 1 };
 const supState = { q: "" };
 
@@ -100,9 +235,19 @@ function flagChips(flags) {
   return `<span class="chips">${flags
     .map((f) => {
       const [label, tone] = FLAG_LABELS[f] ?? [f, "idle"];
-      return `<span class="badge ${tone}">${esc(label)}</span>`;
+      const help = FLAG_HELP[f];
+      return `<span class="badge ${tone}${help ? " has-help" : ""}"${
+        help ? ` title="${esc(help)}"` : ""
+      }>${esc(label)}</span>`;
     })
     .join("")}</span>`;
+}
+
+/** Column header carrying its definition on hover. */
+function th(termKey, label, cls = "") {
+  const t = TERMS[termKey];
+  if (!t) return `<th class="${cls}">${esc(label ?? termKey)}</th>`;
+  return `<th class="${cls}"><span class="term" title="${esc(t.short)}">${esc(label ?? t.label)}</span></th>`;
 }
 
 function coverFmt(cover, basis) {
@@ -202,6 +347,45 @@ keyForm.addEventListener("submit", async (e) => {
   }
 });
 
+/* ---------- help drawer ---------- */
+
+const helpDrawer = document.getElementById("help-drawer");
+
+function renderHelp() {
+  const body = document.getElementById("help-body");
+  if (!body || body.dataset.filled) return;
+  body.innerHTML = `
+    <dl class="glossary">
+      ${Object.values(TERMS)
+        .map((t) => `<dt>${esc(t.label)}</dt><dd>${esc(t.long)}</dd>`)
+        .join("")}
+    </dl>
+    <h3 class="sub-h">Tags you'll see on items</h3>
+    <dl class="glossary">
+      ${Object.entries(FLAG_HELP)
+        .map(
+          ([key, help]) =>
+            `<dt><span class="badge ${(FLAG_LABELS[key] ?? ["", "idle"])[1]}">${esc(
+              (FLAG_LABELS[key] ?? [key])[0],
+            )}</span></dt><dd>${esc(help)}</dd>`,
+        )
+        .join("")}
+    </dl>
+    <p class="drawer-note">Hover any column heading or tag for the same explanation without opening this panel.</p>`;
+  body.dataset.filled = "1";
+}
+
+document.getElementById("help-open")?.addEventListener("click", () => {
+  renderHelp();
+  helpDrawer.hidden = false;
+});
+document.getElementById("help-close")?.addEventListener("click", () => {
+  helpDrawer.hidden = true;
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && helpDrawer && !helpDrawer.hidden) helpDrawer.hidden = true;
+});
+
 /* ---------- sync chip ---------- */
 
 async function pollSyncChip() {
@@ -251,9 +435,47 @@ async function startSync(mode, button) {
 
 /* ---------- router ---------- */
 
+let suppressRoute = false;
+
+/** Inventory view state lives in the URL so a list can be bookmarked or sent
+ * to a colleague and open exactly as it was. */
+function applyInventoryQuery(queryString) {
+  const p = new URLSearchParams(queryString);
+  if (!queryString) return;
+  invState.q = p.get("q") ?? "";
+  invState.filter = p.get("filter") ?? "all";
+  invState.region = p.get("region") ?? "";
+  invState.sort = p.get("sort") ?? "risk";
+  invState.dir = p.get("dir") ?? "";
+  invState.page = Number(p.get("page")) || 1;
+}
+
+function inventoryHash() {
+  const p = new URLSearchParams();
+  if (invState.q) p.set("q", invState.q);
+  if (invState.filter && invState.filter !== "all") p.set("filter", invState.filter);
+  if (invState.region) p.set("region", invState.region);
+  if (invState.sort && invState.sort !== "risk") p.set("sort", invState.sort);
+  if (invState.dir) p.set("dir", invState.dir);
+  if (invState.page > 1) p.set("page", String(invState.page));
+  const qs = p.toString();
+  return `#/inventory${qs ? `?${qs}` : ""}`;
+}
+
+/** Update the address bar without re-rendering the whole page. */
+function syncInventoryUrl() {
+  const next = inventoryHash();
+  if (location.hash === next) return;
+  suppressRoute = true;
+  history.replaceState({}, "", next);
+  setTimeout(() => (suppressRoute = false), 0);
+}
+
 function route() {
-  const hash = location.hash.replace(/^#\//, "") || "overview";
-  const [view, arg] = hash.split("/");
+  const raw = location.hash.replace(/^#\//, "") || "overview";
+  const [path, query] = raw.split("?");
+  const [view, arg] = path.split("/");
+  if (view === "inventory") applyInventoryQuery(query);
   for (const a of nav.querySelectorAll("a")) {
     a.classList.toggle("active", a.dataset.route === view);
   }
@@ -272,7 +494,10 @@ function route() {
   });
 }
 
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => {
+  if (suppressRoute) return;
+  route();
+});
 
 function itemLink(uid, label) {
   return `<a href="#/item/${esc(uid)}">${esc(label)}</a>`;
@@ -443,23 +668,19 @@ async function renderInventory() {
         <p class="page-sub">All synced SKUs with demand, cover and risk. Position quantities are MYOB facts.</p>
       </div>
     </div>
+    <div class="presets">
+      <span class="presets-label">Quick views</span>
+      ${INVENTORY_PRESETS.map(
+        (p) => `<button class="chip-btn" data-preset="${p.id}">${esc(p.label)}</button>`,
+      ).join("")}
+      <button class="chip-btn clear" id="inv-clear">Clear</button>
+    </div>
     <div class="toolbar">
       <input type="search" id="inv-q" placeholder="Search number, name, supplier…" value="${esc(invState.q)}" />
-      <select id="inv-filter">
-        <option value="all">All items</option>
-        <option value="attention">Needs attention</option>
-        <option value="suggested">Suggested orders</option>
-        <option value="below_min">Below min level</option>
-        <option value="low_cover">Cover &lt; 4 weeks</option>
-        <option value="components">Used in assemblies</option>
-        <option value="understated">Pack pull not counted</option>
-        <option value="excess">Excess stock</option>
-        <option value="parents">Assembled products</option>
-        <option value="negative">Negative stock</option>
-        <option value="no_supplier">No supplier set</option>
-        <option value="inactive_stock">Inactive with stock</option>
+      <select id="inv-filter" aria-label="Filter">
+        ${INVENTORY_FILTERS.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}
       </select>
-      <select id="inv-region">
+      <select id="inv-region" aria-label="Supplier region">
         <option value="">All regions</option>
         <option value="NZ">Region: NZ</option>
         <option value="Australia">Region: Australia</option>
@@ -467,15 +688,10 @@ async function renderInventory() {
         <option value="Overseas — other">Region: Overseas — other</option>
         <option value="none">Region: unlabelled</option>
       </select>
-      <select id="inv-sort">
-        <option value="risk">Sort: risk</option>
-        <option value="cover">Sort: lowest cover</option>
-        <option value="weekly">Sort: weekly demand</option>
-        <option value="value">Sort: stock value</option>
-        <option value="used_in">Sort: used in most products</option>
-        <option value="number">Sort: item number</option>
-        <option value="available">Sort: free stock</option>
+      <select id="inv-sort" aria-label="Sort by">
+        ${INVENTORY_SORTS.map(([v, l]) => `<option value="${v}">Sort: ${esc(l)}</option>`).join("")}
       </select>
+      <button class="btn small" id="inv-dir" title="Switch between highest-first and lowest-first"></button>
     </div>
     <div id="inv-table"><p class="loading">Loading items…</p></div>`;
 
@@ -486,6 +702,25 @@ async function renderInventory() {
   filter.value = invState.filter;
   region.value = invState.region;
   sort.value = invState.sort;
+
+  main.querySelectorAll("[data-preset]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const preset = INVENTORY_PRESETS.find((p) => p.id === btn.dataset.preset);
+      if (!preset) return;
+      // A preset sets only what it names; anything else returns to default.
+      Object.assign(invState, { q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1 }, preset.state);
+      renderInventory();
+    }),
+  );
+  document.getElementById("inv-clear").addEventListener("click", () => {
+    Object.assign(invState, { q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1 });
+    renderInventory();
+  });
+  document.getElementById("inv-dir").addEventListener("click", () => {
+    invState.dir = currentDir() === "desc" ? "asc" : "desc";
+    invState.page = 1;
+    loadInventoryTable();
+  });
 
   let debounce;
   q.addEventListener("input", () => {
@@ -506,6 +741,8 @@ async function renderInventory() {
     invState.page = 1;
     loadInventoryTable();
   });
+  // Changing column resets to that column's most useful direction.
+  sort.addEventListener("change", () => (invState.dir = ""));
   sort.addEventListener("change", () => {
     invState.sort = sort.value;
     invState.page = 1;
@@ -518,7 +755,25 @@ async function renderInventory() {
 /** Items on the current inventory page, for instant row expansion. */
 let invItems = new Map();
 let invTargetCover = null;
+let invLastDir = "desc";
 const itemDetailCache = new Map();
+
+function currentDir() {
+  return invState.dir || invLastDir;
+}
+
+/** Plain-English description of the list currently on screen. */
+function activeViewSummary(total) {
+  const bits = [];
+  const filterLabel = INVENTORY_FILTERS.find(([v]) => v === invState.filter)?.[1];
+  if (invState.filter && invState.filter !== "all" && filterLabel) bits.push(filterLabel.toLowerCase());
+  if (invState.region)
+    bits.push(invState.region === "none" ? "unlabelled region" : `from ${invState.region}`);
+  if (invState.q) bits.push(`matching “${invState.q}”`);
+  const sortLabel = INVENTORY_SORTS.find(([v]) => v === invState.sort)?.[1] ?? "risk";
+  const dirWord = currentDir() === "asc" ? "lowest first" : "highest first";
+  return `${qty(total)} ${bits.length ? bits.join(", ") : "items"} · sorted by ${sortLabel.toLowerCase()}, ${dirWord}`;
+}
 
 async function loadInventoryTable() {
   const container = document.getElementById("inv-table");
@@ -531,18 +786,31 @@ async function loadInventoryTable() {
     sort: invState.sort,
     page: String(invState.page),
   });
+  if (invState.dir) params.set("dir", invState.dir);
   const data = await fetchJson(`/api/insights/items?${params}`);
   invItems = new Map(data.items.map((i) => [i.uid, i]));
   invTargetCover = data.targetCoverWeeks ?? null;
+  invLastDir = data.dir ?? "desc";
+
+  const dirBtn = document.getElementById("inv-dir");
+  if (dirBtn) dirBtn.textContent = currentDir() === "asc" ? "↑ Lowest first" : "↓ Highest first";
+  syncInventoryUrl();
 
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
   container.innerHTML = `
+    <p class="view-summary">${esc(activeViewSummary(data.total))}</p>
     <div class="table-wrap"><table>
       <thead><tr>
         <th class="caret-h"></th>
-        <th>Risk</th><th>Item</th><th class="num">On hand</th><th class="num">Committed</th>
-        <th class="num">Free stock</th><th class="num">Incoming</th><th class="num">Weekly demand</th>
-        <th>Cover</th><th class="num">Used in</th><th>Flags</th>
+        ${th("risk", "Risk")}<th>Item</th>
+        <th class="num">On hand</th>
+        ${th("committed", "Committed", "num")}
+        ${th("free_stock", "Free stock", "num")}
+        ${th("incoming", "Incoming", "num")}
+        ${th("weekly_demand", "Weekly demand", "num")}
+        ${th("cover", "Cover")}
+        ${th("used_in", "Used in", "num")}
+        <th>Tags</th>
       </tr></thead>
       <tbody>
         ${
@@ -564,7 +832,7 @@ async function loadInventoryTable() {
                   </tr>`,
                 )
                 .join("")
-            : '<tr><td colspan="11" class="muted">No items match.</td></tr>'
+            : `<tr><td colspan="11" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
         }
       </tbody>
     </table></div>
@@ -573,6 +841,11 @@ async function loadInventoryTable() {
       <span>Page ${data.page} of ${pages} · ${qty(data.total)} items · click a row to expand</span>
       <button class="btn small" id="next" ${data.page >= pages ? "disabled" : ""}>Next &rarr;</button>
     </div>`;
+
+  container.querySelector("#inv-empty-clear")?.addEventListener("click", () => {
+    Object.assign(invState, { q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1 });
+    renderInventory();
+  });
 
   container.querySelectorAll("tr.inv-row").forEach((tr) =>
     tr.addEventListener("click", (e) => {

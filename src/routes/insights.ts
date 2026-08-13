@@ -115,6 +115,7 @@ insightsRouter.get("/items", async (req, res) => {
         filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
         region: typeof req.query.region === "string" ? req.query.region : undefined,
         sort: typeof req.query.sort === "string" ? req.query.sort : undefined,
+        dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
         page: Number(req.query.page) || 1,
         pageSize: Number(req.query.pageSize) || 50,
       }),
