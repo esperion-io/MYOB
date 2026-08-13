@@ -61,6 +61,19 @@ function money(v) {
   });
 }
 
+/** Unit prices need cents (and sub-cent for fasteners) — money() rounds to
+ * whole dollars, which makes $0.35 and $1.22 both unreadable. */
+function price(v) {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  const n = Number(v);
+  return n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "NZD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: Math.abs(n) < 1 ? 4 : 2,
+  });
+}
+
 function dateFmt(v) {
   if (!v) return "—";
   const d = new Date(v);
@@ -674,8 +687,13 @@ function expandPanelHtml(i) {
         : ""
     }
     ${kvRow(
-      i.supplierSource === "inferred" ? "Supplier (inferred from purchases)" : "Primary supplier (MYOB)",
-      `${regionChip(i.supplierRegion, i.supplierRegionSource)} ${esc(i.supplierName ?? "—")}`,
+      "Supplier",
+      `${regionChip(i.supplierRegion, i.supplierRegionSource)} ${esc(i.supplierName ?? "—")}
+       ${supplierSourceBadge(i.supplierSource)}${
+         i.supplierCount > 1
+           ? ` <span class="muted">+${i.supplierCount - 1} alternate</span>`
+           : ""
+       }`,
     )}
     ${i.supplierItemNumber ? kvRow("Supplier item no", esc(i.supplierItemNumber)) : ""}`;
 
@@ -909,7 +927,7 @@ async function renderItem(uid) {
                   ? d.purchases
                       .map(
                         (p) => `<tr><td>${dateFmt(p.date)}</td><td>${esc(p.supplier_name ?? "—")}</td>
-                        <td class="num">${qty(p.qty)}</td><td class="num">${money(p.unit_price)}</td></tr>`,
+                        <td class="num">${qty(p.qty)}</td><td class="num">${price(p.unit_price)}</td></tr>`,
                       )
                       .join("")
                   : '<tr><td colspan="4" class="muted">No bills for this item in the synced window.</td></tr>'
@@ -1026,6 +1044,11 @@ async function renderItem(uid) {
           }
         </section>
 
+        <section class="panel" id="item-suppliers">
+          <h2>Suppliers for this product</h2>
+          <p class="loading">Loading suppliers…</p>
+        </section>
+
         <section class="panel">
           <h2>Commitments &amp; incoming</h2>
           <div class="table-wrap"><table>
@@ -1055,6 +1078,171 @@ async function renderItem(uid) {
         </section>
       </div>
     </div>`;
+
+  loadItemSuppliers(uid);
+}
+
+/* ---------- item suppliers (view / edit, multiple per product) ---------- */
+
+function supplierSourceBadge(source) {
+  if (source === "allied") return '<span class="badge brand">Allied-set</span>';
+  if (source === "myob") return '<span class="badge idle">MYOB primary</span>';
+  if (source === "inferred")
+    return '<span class="badge warn" title="No supplier recorded — taken from who has billed this item most">Inferred from purchases</span>';
+  return '<span class="badge fail">None</span>';
+}
+
+async function loadItemSuppliers(uid) {
+  const panel = document.getElementById("item-suppliers");
+  if (!panel) return;
+  try {
+    const d = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}/suppliers`);
+    const canAdd = d.history.filter((h) => !h.already_assigned);
+
+    panel.innerHTML = `
+      <h2>Suppliers for this product</h2>
+      <p class="hint">Allied's own supplier list for this item — stored in this platform, never written to MYOB.
+      A product can have several suppliers; the one marked <strong>preferred</strong> is used for purchasing
+      grouping, region reporting and lead times.</p>
+
+      ${
+        d.assigned.length
+          ? `<div class="table-wrap"><table>
+              <thead><tr><th>Supplier</th><th>Region</th><th>Their item no</th><th>Preferred</th><th></th></tr></thead>
+              <tbody>${d.assigned
+                .map(
+                  (a) => `<tr data-supplier="${esc(a.supplier_uid)}">
+                    <td><strong>${esc(a.supplier_name ?? "—")}</strong>
+                      ${a.is_active === false ? '<span class="badge warn">Inactive</span>' : ""}
+                      ${a.notes ? `<br /><span class="muted">${esc(a.notes)}</span>` : ""}</td>
+                    <td>${regionChip(a.region, a.region_source) || '<span class="muted">—</span>'}</td>
+                    <td><input class="isup-ref" type="text" placeholder="—" value="${esc(a.supplier_item_number ?? "")}" /></td>
+                    <td>${
+                      a.is_preferred
+                        ? '<span class="badge ok">Preferred</span>'
+                        : '<button class="btn small isup-prefer">Make preferred</button>'
+                    }</td>
+                    <td><button class="btn small isup-remove" title="Remove this supplier from the item">Remove</button></td>
+                  </tr>`,
+                )
+                .join("")}</tbody>
+            </table></div>`
+          : `<p class="muted">No suppliers recorded yet. ${
+              d.item.primary_supplier_name
+                ? `MYOB names <strong>${esc(d.item.primary_supplier_name)}</strong> as primary.`
+                : "MYOB has no primary supplier for this item."
+            }</p>`
+      }
+
+      <h3 class="sub-h">Add a supplier</h3>
+      <div class="toolbar">
+        <input type="search" id="isup-search" placeholder="Search supplier name…" />
+        <select id="isup-pick"><option value="">Search to choose a supplier…</option></select>
+        <label class="isup-check"><input type="checkbox" id="isup-preferred" /> preferred</label>
+        <button class="btn primary" id="isup-add">Add</button>
+        <span class="muted" id="isup-msg"></span>
+      </div>
+
+      ${
+        canAdd.length
+          ? `<h3 class="sub-h">Suppliers who have actually billed this item</h3>
+             <p class="hint">From MYOB purchase history — evidence of who really supplies it. Add with one click.</p>
+             <div class="table-wrap"><table>
+               <thead><tr><th>Supplier</th><th>Region</th><th class="num">Bills</th><th class="num">Qty</th><th class="num">Last price</th><th>Last bill</th><th></th></tr></thead>
+               <tbody>${canAdd
+                 .map(
+                   (h) => `<tr>
+                     <td>${esc(h.supplier_name ?? "—")}</td>
+                     <td>${regionChip(h.region, h.region_source) || '<span class="muted">—</span>'}</td>
+                     <td class="num">${qty(h.bills)}</td>
+                     <td class="num">${qty(h.qty)}</td>
+                     <td class="num">${price(h.last_unit_price)}</td>
+                     <td>${dateFmt(h.last_date)}</td>
+                     <td><button class="btn small isup-quick" data-supplier="${esc(h.supplier_uid)}">Add</button></td>
+                   </tr>`,
+                 )
+                 .join("")}</tbody>
+             </table></div>`
+          : ""
+      }`;
+
+    wireItemSupplierPanel(uid, panel);
+  } catch (err) {
+    panel.innerHTML = `<h2>Suppliers for this product</h2>
+      <p class="muted">Could not load suppliers: ${esc(err.message)}</p>`;
+  }
+}
+
+function wireItemSupplierPanel(uid, panel) {
+  const base = `/api/insights/items/${encodeURIComponent(uid)}/suppliers`;
+  const msg = panel.querySelector("#isup-msg");
+  const save = async (body) => {
+    await fetchJson(base, { method: "POST", body: JSON.stringify(body) });
+    await loadItemSuppliers(uid);
+  };
+
+  panel.querySelectorAll("tr[data-supplier]").forEach((tr) => {
+    const supplierUid = tr.dataset.supplier;
+    tr.querySelector(".isup-prefer")?.addEventListener("click", () =>
+      save({ supplierUid, isPreferred: true }).catch((e) => alert(e.message)),
+    );
+    tr.querySelector(".isup-ref")?.addEventListener("change", (e) =>
+      save({ supplierUid, supplierItemNumber: e.target.value }).catch((e2) => alert(e2.message)),
+    );
+    tr.querySelector(".isup-remove")?.addEventListener("click", async () => {
+      if (!confirm("Remove this supplier from the product? Allied data only — MYOB is untouched.")) return;
+      try {
+        await fetchJson(`${base}?supplierUid=${encodeURIComponent(supplierUid)}`, { method: "DELETE" });
+        await loadItemSuppliers(uid);
+      } catch (e) {
+        alert(e.message);
+      }
+    });
+  });
+
+  panel.querySelectorAll(".isup-quick").forEach((btn) =>
+    btn.addEventListener("click", () =>
+      save({ supplierUid: btn.dataset.supplier }).catch((e) => alert(e.message)),
+    ),
+  );
+
+  const search = panel.querySelector("#isup-search");
+  const pick = panel.querySelector("#isup-pick");
+  let debounce;
+  search?.addEventListener("input", () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(async () => {
+      try {
+        const r = await fetchJson(`/api/insights/supplier-options?q=${encodeURIComponent(search.value)}`);
+        pick.innerHTML = r.suppliers.length
+          ? r.suppliers
+              .map(
+                (s) =>
+                  `<option value="${esc(s.uid)}">${esc(s.name)}${s.region ? ` · ${esc(s.region)}` : ""}${s.is_active === false ? " (inactive)" : ""}</option>`,
+              )
+              .join("")
+          : '<option value="">No matches</option>';
+      } catch (e) {
+        msg.textContent = e.message;
+      }
+    }, 250);
+  });
+
+  panel.querySelector("#isup-add")?.addEventListener("click", async () => {
+    const supplierUid = pick.value;
+    if (!supplierUid) {
+      msg.textContent = "Search and choose a supplier first.";
+      return;
+    }
+    try {
+      await save({
+        supplierUid,
+        isPreferred: panel.querySelector("#isup-preferred").checked,
+      });
+    } catch (e) {
+      msg.textContent = e.message;
+    }
+  });
 }
 
 /* ---------- products & BOM ---------- */
@@ -1597,8 +1785,12 @@ async function renderData() {
         a quarter again; the item page lists the exact products and arithmetic behind the figure. Coverage is
         limited to products whose composition is known, so it grows as BOM coverage improves.</dd>
         <dt>Suppliers, regions &amp; lead times</dt>
-        <dd>An item's supplier is its MYOB primary supplier where set; Allied's file rarely sets one, so the
-        platform otherwise infers the dominant supplier from purchase-bill history (always labelled "inferred").
+        <dd>A product can have several suppliers. Allied records them on the item page — one marked
+        <strong>preferred</strong> — and that preferred supplier is what purchasing grouping, region reporting
+        and lead times use. Where Allied has set nothing, the platform falls back to MYOB's primary supplier
+        field and then, since Allied's file rarely sets one, to the dominant supplier inferred from
+        purchase-bill history. Every view labels which of the three applied (Allied-set / MYOB primary /
+        inferred), and supplier records are platform data — MYOB is never written to.
         Region labels are platform data: derived automatically from the supplier's MYOB address country
         (NZ / Australia / China / Overseas — other) and overridable on the Suppliers page. Lead times shown as
         "promised" are the median of MYOB purchase-order date → promised date; Allied-entered lead times are

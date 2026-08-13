@@ -407,6 +407,19 @@ td.num.neg { color: var(--fail); }
   color: var(--muted);
 }
 
+/* ---------- item supplier editing ---------- */
+
+.isup-ref {
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink-deep);
+  width: 110px;
+}
+.isup-check { display: flex; align-items: center; gap: 0.3rem; font-size: 0.74rem; }
+
 /* ---------- BOM bulk import ---------- */
 
 #bom-paste {

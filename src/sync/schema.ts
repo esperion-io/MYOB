@@ -230,6 +230,23 @@ const DDL: string[] = [
    FROM platform_bom
    ORDER BY parent_uid, component_uid, (source = 'user') DESC`,
 
+  // Allied-assigned suppliers per item. A product may have several; exactly
+  // one may be marked preferred, which becomes the item's effective supplier.
+  // Platform data only — MYOB's own primary-supplier field is never written.
+  `CREATE TABLE IF NOT EXISTS platform_item_suppliers (
+    item_uid TEXT NOT NULL,
+    supplier_uid TEXT NOT NULL,
+    is_preferred BOOLEAN NOT NULL DEFAULT FALSE,
+    supplier_item_number TEXT,
+    notes TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (item_uid, supplier_uid)
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_item_supplier_preferred
+     ON platform_item_suppliers (item_uid) WHERE is_preferred`,
+  `CREATE INDEX IF NOT EXISTS idx_item_supplier_supplier
+     ON platform_item_suppliers (supplier_uid)`,
+
   // Allied-managed supplier attributes (region label, lead time, notes).
   // Platform data only — never written to MYOB. A row exists only once a
   // user edits something; region falls back to an auto label derived from

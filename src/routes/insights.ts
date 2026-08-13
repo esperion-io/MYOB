@@ -9,14 +9,18 @@ import {
   dataStatus,
   invalidateItemsCache,
   itemDetail,
+  itemSuppliers,
   listItems,
   overview,
   productsList,
   purchasing,
   purchasingCsv,
   relationships,
+  removeItemSupplier,
   removeUserBom,
+  setItemSupplier,
   setSupplierMeta,
+  supplierOptions,
   suppliersList,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
@@ -201,6 +205,71 @@ insightsRouter.get("/suppliers", async (req, res) => {
         q: typeof req.query.q === "string" ? req.query.q : undefined,
       }),
     );
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.get("/supplier-options", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await supplierOptions(typeof req.query.q === "string" ? req.query.q : undefined));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+// ---- Which suppliers an item can be bought from (platform data) ----
+
+insightsRouter.get("/items/:uid/suppliers", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const data = await itemSuppliers(req.params.uid);
+    if (!data) {
+      res.status(404).json({ error: "Item not found in synced data." });
+      return;
+    }
+    res.json(data);
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.post("/items/:uid/suppliers", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { supplierUid, isPreferred, supplierItemNumber, notes } = req.body ?? {};
+    if (!supplierUid) {
+      res.status(400).json({ error: "supplierUid is required." });
+      return;
+    }
+    await setItemSupplier(req.params.uid, String(supplierUid), {
+      isPreferred: isPreferred === undefined ? undefined : isPreferred === true,
+      supplierItemNumber:
+        supplierItemNumber === undefined
+          ? undefined
+          : supplierItemNumber === null
+            ? null
+            : String(supplierItemNumber),
+      notes: notes === undefined ? undefined : notes === null ? null : String(notes),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
+  }
+});
+
+insightsRouter.delete("/items/:uid/suppliers", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const supplierUid = String(req.query.supplierUid ?? "");
+    if (!supplierUid) {
+      res.status(400).json({ error: "supplierUid is required." });
+      return;
+    }
+    await removeItemSupplier(req.params.uid, supplierUid);
+    res.json({ ok: true });
   } catch (err) {
     send500(res, err);
   }

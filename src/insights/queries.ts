@@ -151,6 +151,22 @@ const DEMAND_CTE = `
     WHERE l.item_uid IS NOT NULL AND b.supplier_uid IS NOT NULL
     GROUP BY l.item_uid, b.supplier_uid, b.supplier_name
     ORDER BY l.item_uid, SUM(COALESCE(l.total, 0)) DESC
+  ),
+  -- Allied's own supplier assignment for an item. The preferred row wins over
+  -- MYOB's primary field and over the inferred supplier; alternates are
+  -- counted so the UI can show "2 more suppliers on file".
+  assigned_supplier AS (
+    SELECT s.item_uid, s.supplier_uid, s.supplier_item_number,
+           sup.name AS supplier_name,
+           (SELECT COUNT(*)::int FROM platform_item_suppliers x WHERE x.item_uid = s.item_uid) AS assigned_count
+    FROM platform_item_suppliers s
+    JOIN myob_suppliers sup ON sup.uid = s.supplier_uid
+    WHERE s.is_preferred
+  ),
+  assigned_any AS (
+    SELECT item_uid, COUNT(*)::int AS assigned_count
+    FROM platform_item_suppliers
+    GROUP BY item_uid
   )
 `;
 
@@ -164,6 +180,10 @@ const ITEM_SELECT = `
          it.synced_at,
          ds.supplier_uid AS inferred_supplier_uid,
          ds.supplier_name AS inferred_supplier_name,
+         asg.supplier_uid AS assigned_supplier_uid,
+         asg.supplier_name AS assigned_supplier_name,
+         asg.supplier_item_number AS assigned_supplier_item_number,
+         COALESCE(aa.assigned_count, 0) AS assigned_supplier_count,
          sup.country AS supplier_country,
          sm.region AS supplier_region_override,
          COALESCE(dd.direct_90, 0) AS direct_90,
@@ -185,8 +205,12 @@ const ITEM_SELECT = `
   LEFT JOIN bom_parents p ON p.item_uid = it.uid
   LEFT JOIN potential_demand pot ON pot.item_uid = it.uid
   LEFT JOIN dominant_supplier ds ON ds.item_uid = it.uid
-  LEFT JOIN myob_suppliers sup ON sup.uid = COALESCE(it.primary_supplier_uid, ds.supplier_uid)
-  LEFT JOIN platform_supplier_meta sm ON sm.supplier_uid = COALESCE(it.primary_supplier_uid, ds.supplier_uid)
+  LEFT JOIN assigned_supplier asg ON asg.item_uid = it.uid
+  LEFT JOIN assigned_any aa ON aa.item_uid = it.uid
+  LEFT JOIN myob_suppliers sup
+    ON sup.uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
+  LEFT JOIN platform_supplier_meta sm
+    ON sm.supplier_uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
 `;
 
 export interface ItemComputed {
@@ -209,12 +233,15 @@ export interface ItemComputed {
   baseSellingPrice: number | null;
   minLevel: number | null;
   reorderQty: number | null;
-  /** Effective supplier: MYOB primary supplier when set, else the dominant
-   * supplier inferred from purchase-bill history (see supplierSource). */
+  /** Effective supplier, in precedence order: Allied's preferred assignment,
+   * else MYOB's primary supplier, else the dominant supplier inferred from
+   * purchase-bill history. `supplierSource` says which applied. */
   supplierUid: string | null;
   supplierName: string | null;
-  supplierSource: "myob" | "inferred" | null;
+  supplierSource: "allied" | "myob" | "inferred" | null;
   supplierItemNumber: string | null;
+  /** How many suppliers Allied has recorded for this item (0 = none yet). */
+  supplierCount: number;
   /** Platform label: user override, else auto from MYOB address country. */
   supplierRegion: string | null;
   supplierRegionSource: "user" | "auto" | null;
@@ -304,9 +331,13 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
   if ((onHand ?? 0) < 0) flags.push("negative_stock");
   if ((onHand ?? 0) > 0 && (avgCost ?? 0) === 0) flags.push("stock_no_cost");
   if (isActive === false && (onHand ?? 0) > 0) flags.push("inactive_with_stock");
-  // Effective supplier: MYOB primary when set, else inferred from purchases.
+  // Effective supplier: Allied's preferred assignment, else MYOB primary,
+  // else inferred from purchase history.
   const supplierUid =
-    (row.primary_supplier_uid as string) ?? (row.inferred_supplier_uid as string) ?? null;
+    (row.assigned_supplier_uid as string) ??
+    (row.primary_supplier_uid as string) ??
+    (row.inferred_supplier_uid as string) ??
+    null;
   if (weekly > 0 && !supplierUid) flags.push("no_supplier");
   if (basis === "365d") flags.push("slow_mover");
   if (understatesMeasured) flags.push("understated_demand");
@@ -415,15 +446,22 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     reorderQty: n(row.reorder_qty),
     supplierUid,
     supplierName:
+      (row.assigned_supplier_name as string) ??
       (row.primary_supplier_name as string) ??
       (row.inferred_supplier_name as string) ??
       null,
-    supplierSource: row.primary_supplier_uid
-      ? "myob"
-      : row.inferred_supplier_uid
-        ? "inferred"
-        : null,
-    supplierItemNumber: (row.supplier_item_number as string) ?? null,
+    supplierSource: row.assigned_supplier_uid
+      ? "allied"
+      : row.primary_supplier_uid
+        ? "myob"
+        : row.inferred_supplier_uid
+          ? "inferred"
+          : null,
+    supplierItemNumber:
+      (row.assigned_supplier_item_number as string) ??
+      (row.supplier_item_number as string) ??
+      null,
+    supplierCount: n(row.assigned_supplier_count) ?? 0,
     supplierRegion:
       (row.supplier_region_override as string) ??
       autoRegion(row.supplier_country as string | null),
@@ -1204,6 +1242,171 @@ export async function suppliersList(params: { q?: string }) {
     total: rows.length,
     regions: SUPPLIER_REGIONS,
     suppliers: rows,
+  };
+}
+
+/**
+ * Every supplier known for one item, from three angles:
+ *  - assigned: Allied's own records (multiple allowed, one preferred)
+ *  - MYOB primary: the item-master field, if Allied ever sets it
+ *  - purchase history: who has actually billed this item, with volumes and
+ *    the latest price, so alternates can be confirmed from evidence
+ */
+export async function itemSuppliers(itemUid: string) {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const [item, assigned, history] = await Promise.all([
+    pool.query(
+      `SELECT i.uid, i.number, i.name,
+              i.primary_supplier_uid, i.primary_supplier_name, i.supplier_item_number
+       FROM myob_items i WHERE i.uid = $1`,
+      [itemUid],
+    ),
+    pool.query(
+      `SELECT s.supplier_uid, s.is_preferred, s.supplier_item_number, s.notes, s.updated_at,
+              sup.name AS supplier_name, sup.is_active, sup.country,
+              m.region AS region_override
+       FROM platform_item_suppliers s
+       JOIN myob_suppliers sup ON sup.uid = s.supplier_uid
+       LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.supplier_uid
+       WHERE s.item_uid = $1
+       ORDER BY s.is_preferred DESC, sup.name`,
+      [itemUid],
+    ),
+    pool.query(
+      `SELECT b.supplier_uid, b.supplier_name,
+              COUNT(DISTINCT b.uid)::int AS bills,
+              SUM(l.qty)::float8 AS qty,
+              SUM(COALESCE(l.total, 0))::float8 AS value,
+              MAX(b.date) AS last_date,
+              (ARRAY_AGG(l.unit_price ORDER BY b.date DESC))[1]::float8 AS last_unit_price,
+              sup.country, m.region AS region_override
+       FROM myob_purchase_bill_lines l
+       JOIN myob_purchase_bills b ON b.uid = l.bill_uid
+       LEFT JOIN myob_suppliers sup ON sup.uid = b.supplier_uid
+       LEFT JOIN platform_supplier_meta m ON m.supplier_uid = b.supplier_uid
+       WHERE l.item_uid = $1 AND b.supplier_uid IS NOT NULL
+       GROUP BY b.supplier_uid, b.supplier_name, sup.country, m.region
+       ORDER BY value DESC`,
+      [itemUid],
+    ),
+  ]);
+  if (!item.rows.length) return null;
+
+  const withRegion = (r: Record<string, unknown>) => ({
+    ...r,
+    region: (r.region_override as string) ?? autoRegion(r.country as string | null),
+    region_source: r.region_override
+      ? "user"
+      : autoRegion(r.country as string | null)
+        ? "auto"
+        : null,
+  });
+
+  const assignedUids = new Set(assigned.rows.map((r) => r.supplier_uid as string));
+  return {
+    item: item.rows[0],
+    assigned: assigned.rows.map(withRegion),
+    // Suppliers seen in bills that Allied has not recorded yet — one click to add.
+    history: history.rows.map((r) => ({
+      ...withRegion(r),
+      already_assigned: assignedUids.has(r.supplier_uid as string),
+    })),
+  };
+}
+
+/** Add or update one Allied supplier record for an item. */
+export async function setItemSupplier(
+  itemUid: string,
+  supplierUid: string,
+  patch: { isPreferred?: boolean; supplierItemNumber?: string | null; notes?: string | null },
+): Promise<void> {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const exists = await pool.query(
+    `SELECT (SELECT COUNT(*)::int FROM myob_items WHERE uid = $1) AS item,
+            (SELECT COUNT(*)::int FROM myob_suppliers WHERE uid = $2) AS supplier`,
+    [itemUid, supplierUid],
+  );
+  if (!Number(exists.rows[0].item)) throw new Error("Item not found in synced data.");
+  if (!Number(exists.rows[0].supplier)) throw new Error("Supplier not found in synced data.");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    // Only one preferred supplier per item (a partial unique index enforces it).
+    if (patch.isPreferred) {
+      await client.query(
+        `UPDATE platform_item_suppliers SET is_preferred = FALSE, updated_at = NOW()
+         WHERE item_uid = $1 AND supplier_uid <> $2 AND is_preferred`,
+        [itemUid, supplierUid],
+      );
+    }
+    const notes = patch.notes === undefined ? null : (patch.notes?.trim().slice(0, 500) || null);
+    const ref =
+      patch.supplierItemNumber === undefined
+        ? null
+        : (patch.supplierItemNumber?.trim().slice(0, 100) || null);
+    await client.query(
+      `INSERT INTO platform_item_suppliers
+         (item_uid, supplier_uid, is_preferred, supplier_item_number, notes, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (item_uid, supplier_uid) DO UPDATE SET
+         is_preferred = CASE WHEN $6 THEN $3 ELSE platform_item_suppliers.is_preferred END,
+         supplier_item_number = CASE WHEN $7 THEN $4 ELSE platform_item_suppliers.supplier_item_number END,
+         notes = CASE WHEN $8 THEN $5 ELSE platform_item_suppliers.notes END,
+         updated_at = NOW()`,
+      [
+        itemUid,
+        supplierUid,
+        patch.isPreferred ?? false,
+        ref,
+        notes,
+        patch.isPreferred !== undefined,
+        patch.supplierItemNumber !== undefined,
+        patch.notes !== undefined,
+      ],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  invalidateItemsCache();
+}
+
+export async function removeItemSupplier(
+  itemUid: string,
+  supplierUid: string,
+): Promise<void> {
+  await ensureInsightsSchema();
+  await getPool().query(
+    `DELETE FROM platform_item_suppliers WHERE item_uid = $1 AND supplier_uid = $2`,
+    [itemUid, supplierUid],
+  );
+  invalidateItemsCache();
+}
+
+/** Supplier picker: name search over synced suppliers. */
+export async function supplierOptions(q: string | undefined) {
+  await ensureInsightsSchema();
+  const term = `%${(q ?? "").trim()}%`;
+  const result = await getPool().query(
+    `SELECT s.uid, s.name, s.is_active, s.country, m.region AS region_override
+     FROM myob_suppliers s
+     LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
+     WHERE $1 = '%%' OR s.name ILIKE $1 OR COALESCE(s.display_id,'') ILIKE $1
+     ORDER BY s.is_active DESC NULLS LAST, s.name
+     LIMIT 25`,
+    [term],
+  );
+  return {
+    suppliers: result.rows.map((r) => ({
+      ...r,
+      region: (r.region_override as string) ?? autoRegion(r.country as string | null),
+    })),
   };
 }
 
