@@ -1446,17 +1446,21 @@ export async function removeItemSupplier(
   invalidateItemsCache();
 }
 
-/** Supplier picker: name search over synced suppliers. */
+/**
+ * Supplier picker source. Allied has a few hundred suppliers, so the whole
+ * list is returned once and filtered as the user types — no round trip per
+ * keystroke, and an empty search still shows everyone.
+ */
 export async function supplierOptions(q: string | undefined) {
   await ensureInsightsSchema();
   const term = `%${(q ?? "").trim()}%`;
   const result = await getPool().query(
-    `SELECT s.uid, s.name, s.is_active, s.country, m.region AS region_override
+    `SELECT s.uid, s.name, s.is_active, s.country, s.display_id,
+            m.region AS region_override
      FROM myob_suppliers s
      LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
      WHERE $1 = '%%' OR s.name ILIKE $1 OR COALESCE(s.display_id,'') ILIKE $1
-     ORDER BY s.is_active DESC NULLS LAST, s.name
-     LIMIT 25`,
+     ORDER BY s.is_active DESC NULLS LAST, s.name`,
     [term],
   );
   return {

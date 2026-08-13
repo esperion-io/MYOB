@@ -250,6 +250,24 @@ function th(termKey, label, cls = "") {
   return `<th class="${cls}"><span class="term" title="${esc(t.short)}">${esc(label ?? t.label)}</span></th>`;
 }
 
+/**
+ * Sortable column header. Clicking sorts by that column; clicking the column
+ * already in use flips the direction. The definition stays available on hover.
+ */
+function sortTh(sortKey, termKey, label, cls = "") {
+  const t = TERMS[termKey];
+  const active = invState.sort === sortKey;
+  const dir = active ? currentDir() : null;
+  const arrow = active ? (dir === "asc" ? "▲" : "▼") : "";
+  const tip = `${t ? `${t.short} · ` : ""}Click to sort${
+    active ? (dir === "asc" ? " highest first" : " lowest first") : ""
+  }`;
+  return `<th class="${cls} sortable${active ? " sorted" : ""}"
+    data-sort="${sortKey}" title="${esc(tip)}"
+    aria-sort="${active ? (dir === "asc" ? "ascending" : "descending") : "none"}"
+    ><span class="th-inner">${esc(label ?? t?.label ?? sortKey)}<span class="sort-arrow">${arrow}</span></span></th>`;
+}
+
 function coverFmt(cover, basis) {
   if (cover == null) return '<span class="muted">no demand</span>';
   const suffix = basis === "365d" ? " (365d rate)" : "";
@@ -688,20 +706,14 @@ async function renderInventory() {
         <option value="Overseas — other">Region: Overseas — other</option>
         <option value="none">Region: unlabelled</option>
       </select>
-      <select id="inv-sort" aria-label="Sort by">
-        ${INVENTORY_SORTS.map(([v, l]) => `<option value="${v}">Sort: ${esc(l)}</option>`).join("")}
-      </select>
-      <button class="btn small" id="inv-dir" title="Switch between highest-first and lowest-first"></button>
     </div>
     <div id="inv-table"><p class="loading">Loading items…</p></div>`;
 
   const q = document.getElementById("inv-q");
   const filter = document.getElementById("inv-filter");
   const region = document.getElementById("inv-region");
-  const sort = document.getElementById("inv-sort");
   filter.value = invState.filter;
   region.value = invState.region;
-  sort.value = invState.sort;
 
   main.querySelectorAll("[data-preset]").forEach((btn) =>
     btn.addEventListener("click", () => {
@@ -716,12 +728,6 @@ async function renderInventory() {
     Object.assign(invState, { q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1 });
     renderInventory();
   });
-  document.getElementById("inv-dir").addEventListener("click", () => {
-    invState.dir = currentDir() === "desc" ? "asc" : "desc";
-    invState.page = 1;
-    loadInventoryTable();
-  });
-
   let debounce;
   q.addEventListener("input", () => {
     clearTimeout(debounce);
@@ -741,14 +747,6 @@ async function renderInventory() {
     invState.page = 1;
     loadInventoryTable();
   });
-  // Changing column resets to that column's most useful direction.
-  sort.addEventListener("change", () => (invState.dir = ""));
-  sort.addEventListener("change", () => {
-    invState.sort = sort.value;
-    invState.page = 1;
-    loadInventoryTable();
-  });
-
   await loadInventoryTable();
 }
 
@@ -792,8 +790,6 @@ async function loadInventoryTable() {
   invTargetCover = data.targetCoverWeeks ?? null;
   invLastDir = data.dir ?? "desc";
 
-  const dirBtn = document.getElementById("inv-dir");
-  if (dirBtn) dirBtn.textContent = currentDir() === "asc" ? "↑ Lowest first" : "↓ Highest first";
   syncInventoryUrl();
 
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
@@ -802,14 +798,16 @@ async function loadInventoryTable() {
     <div class="table-wrap"><table>
       <thead><tr>
         <th class="caret-h"></th>
-        ${th("risk", "Risk")}<th>Item</th>
-        <th class="num">On hand</th>
-        ${th("committed", "Committed", "num")}
-        ${th("free_stock", "Free stock", "num")}
-        ${th("incoming", "Incoming", "num")}
-        ${th("weekly_demand", "Weekly demand", "num")}
-        ${th("cover", "Cover")}
-        ${th("used_in", "Used in", "num")}
+        ${sortTh("risk", "risk", "Risk")}
+        ${sortTh("number", null, "Item")}
+        ${sortTh("on_hand", null, "On hand", "num")}
+        ${sortTh("committed", "committed", "Committed", "num")}
+        ${sortTh("available", "free_stock", "Free stock", "num")}
+        ${sortTh("incoming", "incoming", "Incoming", "num")}
+        ${sortTh("weekly", "weekly_demand", "Weekly demand", "num")}
+        ${sortTh("cover", "cover", "Cover")}
+        ${sortTh("value", null, "Stock value", "num")}
+        ${sortTh("used_in", "used_in", "Used in", "num")}
         <th>Tags</th>
       </tr></thead>
       <tbody>
@@ -827,12 +825,13 @@ async function loadInventoryTable() {
                     <td class="num">${qty(i.incomingQty)}</td>
                     <td class="num">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "—"}</td>
                     <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
+                    <td class="num">${money(i.currentValue)}</td>
                     <td class="num">${i.parentCount || "—"}</td>
                     <td>${flagChips(i.flags)}</td>
                   </tr>`,
                 )
                 .join("")
-            : `<tr><td colspan="11" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
+            : `<tr><td colspan="12" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
         }
       </tbody>
     </table></div>
@@ -846,6 +845,21 @@ async function loadInventoryTable() {
     Object.assign(invState, { q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1 });
     renderInventory();
   });
+
+  // Click a column to sort by it; click the active column to flip direction.
+  container.querySelectorAll("th.sortable").forEach((header) =>
+    header.addEventListener("click", () => {
+      const key = header.dataset.sort;
+      if (invState.sort === key) {
+        invState.dir = currentDir() === "desc" ? "asc" : "desc";
+      } else {
+        invState.sort = key;
+        invState.dir = ""; // start in this column's most useful direction
+      }
+      invState.page = 1;
+      loadInventoryTable();
+    }),
+  );
 
   container.querySelectorAll("tr.inv-row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
@@ -875,7 +889,7 @@ function toggleExpandRow(tr) {
   if (!item) return;
   tr.insertAdjacentHTML(
     "afterend",
-    `<tr class="expand-row"><td colspan="11">${expandPanelHtml(item)}</td></tr>`,
+    `<tr class="expand-row"><td colspan="12">${expandPanelHtml(item)}</td></tr>`,
   );
   tr.classList.add("expanded");
   tr.querySelector(".caret").textContent = "▾";
@@ -1409,12 +1423,11 @@ async function loadItemSuppliers(uid) {
 
       <h3 class="sub-h">Add a supplier</h3>
       <div class="toolbar">
-        <input type="search" id="isup-search" placeholder="Search supplier name…" />
-        <select id="isup-pick"><option value="">Search to choose a supplier…</option></select>
-        <label class="isup-check"><input type="checkbox" id="isup-preferred" /> preferred</label>
-        <button class="btn primary" id="isup-add">Add</button>
+        <input type="search" id="isup-search" placeholder="Type to find a supplier…" autocomplete="off" />
+        <label class="isup-check"><input type="checkbox" id="isup-preferred" /> add as preferred</label>
         <span class="muted" id="isup-msg"></span>
       </div>
+      <div class="picker" id="isup-list"><p class="loading">Loading suppliers…</p></div>
 
       ${
         canAdd.length
@@ -1479,43 +1492,59 @@ function wireItemSupplierPanel(uid, panel) {
     ),
   );
 
-  const search = panel.querySelector("#isup-search");
-  const pick = panel.querySelector("#isup-pick");
-  let debounce;
-  search?.addEventListener("input", () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(async () => {
-      try {
-        const r = await fetchJson(`/api/insights/supplier-options?q=${encodeURIComponent(search.value)}`);
-        pick.innerHTML = r.suppliers.length
-          ? r.suppliers
-              .map(
-                (s) =>
-                  `<option value="${esc(s.uid)}">${esc(s.name)}${s.region ? ` · ${esc(s.region)}` : ""}${s.is_active === false ? " (inactive)" : ""}</option>`,
-              )
-              .join("")
-          : '<option value="">No matches</option>';
-      } catch (e) {
-        msg.textContent = e.message;
-      }
-    }, 250);
-  });
+  wireSupplierPicker(panel, (supplierUid) =>
+    save({ supplierUid, isPreferred: panel.querySelector("#isup-preferred").checked }).catch(
+      (e) => (msg.textContent = e.message),
+    ),
+  );
+}
 
-  panel.querySelector("#isup-add")?.addEventListener("click", async () => {
-    const supplierUid = pick.value;
-    if (!supplierUid) {
-      msg.textContent = "Search and choose a supplier first.";
-      return;
+/**
+ * Type-ahead supplier picker. The full list is fetched once and filtered in
+ * the browser as the user types; an empty box lists every supplier, so it
+ * works as a browse-and-click as well as a search.
+ */
+let supplierCache = null;
+
+async function wireSupplierPicker(panel, onPick) {
+  const search = panel.querySelector("#isup-search");
+  const list = panel.querySelector("#isup-list");
+  if (!search || !list) return;
+
+  const render = (term) => {
+    const q = term.trim().toLowerCase();
+    const rows = (supplierCache ?? []).filter((s) =>
+      !q ? true : `${s.name ?? ""} ${s.display_id ?? ""} ${s.region ?? ""}`.toLowerCase().includes(q),
+    );
+    list.innerHTML = rows.length
+      ? rows
+          .map(
+            (s) => `<button class="picker-row" data-uid="${esc(s.uid)}">
+              <span class="picker-name">${esc(s.name ?? "—")}${
+                s.is_active === false ? ' <span class="badge warn">Inactive</span>' : ""
+              }</span>
+              <span class="picker-meta">${
+                s.region ? esc(s.region) : '<span class="muted">no region</span>'
+              }</span>
+            </button>`,
+          )
+          .join("")
+      : `<p class="muted picker-empty">No supplier matches “${esc(term)}”.</p>`;
+    list.querySelectorAll(".picker-row").forEach((btn) =>
+      btn.addEventListener("click", () => onPick(btn.dataset.uid)),
+    );
+  };
+
+  try {
+    if (!supplierCache) {
+      const r = await fetchJson("/api/insights/supplier-options");
+      supplierCache = r.suppliers;
     }
-    try {
-      await save({
-        supplierUid,
-        isPreferred: panel.querySelector("#isup-preferred").checked,
-      });
-    } catch (e) {
-      msg.textContent = e.message;
-    }
-  });
+    render(search.value);
+    search.addEventListener("input", () => render(search.value));
+  } catch (err) {
+    list.innerHTML = `<p class="muted">Could not load suppliers: ${esc(err.message)}</p>`;
+  }
 }
 
 /* ---------- products & BOM ---------- */

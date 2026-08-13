@@ -458,6 +458,46 @@ td.num.neg { color: var(--fail); }
 .term { border-bottom: 1px dotted var(--muted); cursor: help; }
 .badge.has-help { cursor: help; }
 
+/* ---------- sortable column headers ---------- */
+
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { background: var(--brand-soft); color: var(--brand-deep); }
+th.sortable .th-inner { display: inline-flex; align-items: center; gap: 0.25rem; }
+th.sortable.sorted { color: var(--brand-deep); }
+.sort-arrow { font-size: 0.6rem; line-height: 1; }
+/* Hint the affordance without shouting on every column. */
+th.sortable:not(.sorted):hover .sort-arrow::after { content: "↕"; opacity: 0.5; }
+
+/* ---------- type-ahead picker ---------- */
+
+.picker {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  width: 100%;
+  font: inherit;
+  font-size: 0.74rem;
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  color: var(--ink-deep);
+  cursor: pointer;
+}
+.picker-row:last-child { border-bottom: 0; }
+.picker-row:hover { background: var(--brand-soft); }
+.picker-meta { color: var(--muted); font-size: 0.68rem; white-space: nowrap; }
+.picker-empty { padding: 0.6rem; margin: 0; }
+
 /* ---------- help drawer ---------- */
 
 .drawer {
