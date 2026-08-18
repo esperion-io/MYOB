@@ -51,6 +51,58 @@ const DDL: string[] = [
     synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`,
 
+  // MYOB item custom lists, promoted from `raw` to real columns so they can be
+  // filtered and sorted. CustomList1/2 are Allied's PRODUCT TYPE and PRODUCT
+  // FINISH; CustomList3 is labelled BIN LOCATION but actually holds customer
+  // names, so it is stored and deliberately not surfaced yet.
+  `ALTER TABLE myob_items ADD COLUMN IF NOT EXISTS product_type TEXT`,
+  `ALTER TABLE myob_items ADD COLUMN IF NOT EXISTS product_finish TEXT`,
+  `ALTER TABLE myob_items ADD COLUMN IF NOT EXISTS bin_location TEXT`,
+  // Per-location stock (LocationDetails[]), available on the item master.
+  `ALTER TABLE myob_items ADD COLUMN IF NOT EXISTS location_details JSONB`,
+  /*
+   * When this row's quantities were last read from MYOB.
+   *
+   * Critical: MYOB does NOT bump Item.LastModified when a transaction changes a
+   * quantity, so a LastModified-filtered incremental sync silently serves stale
+   * stock. The items entity is therefore always fully refreshed, and this column
+   * is the proof — anything older than the last completed sync is a bug.
+   */
+  `ALTER TABLE myob_items ADD COLUMN IF NOT EXISTS quantities_as_of TIMESTAMPTZ`,
+
+  // One-time backfill: `raw` already carries these for every synced item, so
+  // the new columns are usable before the next sync runs. Guarded so it is a
+  // no-op on every boot after the first.
+  `UPDATE myob_items SET
+     product_type   = NULLIF(raw->'CustomList1'->>'Value', ''),
+     product_finish = NULLIF(raw->'CustomList2'->>'Value', ''),
+     bin_location   = NULLIF(raw->'CustomList3'->>'Value', ''),
+     location_details = CASE WHEN jsonb_typeof(raw->'LocationDetails') = 'array'
+                             THEN raw->'LocationDetails' END,
+     quantities_as_of = COALESCE(quantities_as_of, synced_at)
+   WHERE raw IS NOT NULL AND quantities_as_of IS NULL`,
+
+  `CREATE INDEX IF NOT EXISTS idx_items_product_type ON myob_items (product_type)`,
+  `CREATE INDEX IF NOT EXISTS idx_items_product_finish ON myob_items (product_finish)`,
+
+  /*
+   * MYOB's own Bill of Materials, from Inventory/Item?$expand=BillOfMaterials.
+   * This is a source fact and is kept apart from platform_bom, which holds our
+   * build-derived guesses and Allied's manual rows. Unlike derived BOMs it also
+   * covers auto-build items, which are never observed as Build transactions.
+   */
+  `CREATE TABLE IF NOT EXISTS myob_item_bom (
+    parent_uid TEXT NOT NULL,
+    component_uid TEXT NOT NULL,
+    qty_per DOUBLE PRECISION NOT NULL,
+    build_qty DOUBLE PRECISION,
+    component_number TEXT,
+    component_name TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (parent_uid, component_uid)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_item_bom_component ON myob_item_bom (component_uid)`,
+
   `CREATE TABLE IF NOT EXISTS myob_locations (
     uid TEXT PRIMARY KEY,
     identifier TEXT,
@@ -219,16 +271,39 @@ const DDL: string[] = [
     PRIMARY KEY (parent_uid, component_uid, source)
   )`,
 
-  // Effective BOM: one row per parent+component pair. Where Allied has
-  // entered a user row for a pair that was also derived from builds, the
-  // user row wins everywhere; the derived observation remains in
-  // platform_bom for comparison/display.
+  /*
+   * Effective BOM: one row per parent+component pair, chosen across three
+   * sources in strict precedence.
+   *
+   *   user    — Allied typed it deliberately, to correct something. A sync must
+   *             never silently overwrite a human decision.
+   *   myob    — MYOB's own Bill of Materials. Verified against Allied's file on
+   *             18 Aug 2026: 489 of 496 pairs that could be cross-checked match
+   *             the quantities actually consumed by build transactions exactly,
+   *             and it covers 299 extra live parents (kits, bolt packs, spacer
+   *             bar kits) that are pre-packed and so never produce a build.
+   *   derived — inferred from observed builds. Weakest: a pair seen in a single
+   *             build is one noisy observation, which is exactly where the 3
+   *             disagreements above came from.
+   *
+   * Losing rows stay in their own tables so the UI can show what was overridden
+   * rather than hiding the disagreement.
+   */
   `CREATE OR REPLACE VIEW effective_bom AS
    SELECT DISTINCT ON (parent_uid, component_uid)
           parent_uid, component_uid, source, qty_per, build_count,
           last_observed, confidence, updated_at
-   FROM platform_bom
-   ORDER BY parent_uid, component_uid, (source = 'user') DESC`,
+   FROM (
+     SELECT parent_uid, component_uid, source, qty_per, build_count,
+            last_observed, confidence, updated_at
+     FROM platform_bom
+     UNION ALL
+     SELECT parent_uid, component_uid, 'myob'::text, qty_per, 0::int,
+            synced_at, 1.0::double precision, synced_at
+     FROM myob_item_bom
+   ) sources
+   ORDER BY parent_uid, component_uid,
+            CASE source WHEN 'user' THEN 0 WHEN 'myob' THEN 1 ELSE 2 END`,
 
   // Allied-assigned suppliers per item. A product may have several; exactly
   // one may be marked preferred, which becomes the item's effective supplier.

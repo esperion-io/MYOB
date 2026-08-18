@@ -127,6 +127,8 @@ export async function myobGetAllPages(
   options: {
     top?: number;
     filter?: string;
+    /** OData $expand, e.g. "BillOfMaterials" on Inventory/Item. */
+    expand?: string;
     onPage: (items: Record<string, unknown>[], pageIndex: number) => Promise<void>;
   },
 ): Promise<{ pages: number; rows: number }> {
@@ -134,6 +136,7 @@ export async function myobGetAllPages(
   const params = new URLSearchParams();
   params.set("$top", String(top));
   if (options.filter) params.set("$filter", options.filter);
+  if (options.expand) params.set("$expand", options.expand);
 
   let url: string | null = `${path}?${params.toString()}`;
   let pages = 0;

@@ -559,7 +559,7 @@ async function renderOverview() {
       <div class="kpi link ${k.negativeStock ? "alert" : ""}" data-filter="negative"><span class="k-label">Negative stock</span><span class="k-value">${qty(k.negativeStock)}</span></div>
       <div class="kpi link" data-filter="parents"><span class="k-label">Assembled products</span><span class="k-value">${qty(k.trackedParents)}</span></div>
       <div class="kpi link" data-filter="excess" title="Stock beyond ${data.excessCoverWeeks} weeks of cover, where it is worth something"><span class="k-label">Excess stock value</span><span class="k-value">${money(k.excessValue)}</span></div>
-      <div class="kpi"><span class="k-label">Relationships</span><span class="k-value">${qty((rel.derived ?? 0) + (rel.user ?? 0))}</span></div>
+      <div class="kpi"><span class="k-label">Relationships</span><span class="k-value">${qty(Object.values(rel).reduce((a, b) => a + b, 0))}</span></div>
     </div>
 
     <div class="two-col">
@@ -1052,6 +1052,11 @@ function sourceBadge(source, confidence, buildCount, shadowedQty, shadowedBuilds
           }</span>`
         : "";
     return `<span class="badge brand">Allied-entered</span>${note}`;
+  }
+  if (source === "myob") {
+    // MYOB's own Bill of Materials — the product's stated recipe, and the only
+    // source that covers pre-packed kits, which never produce a build.
+    return `<span class="badge ok" title="MYOB's own Bill of Materials for this product">MYOB recipe</span>`;
   }
   const pct = Math.round((confidence ?? 0) * 100);
   return `<span class="badge idle" title="Derived from ${buildCount} MYOB build transaction(s)">Derived · ${pct}%</span>`;
@@ -1950,6 +1955,29 @@ async function renderPurchasing() {
 
 /* ---------- data & sync ---------- */
 
+/*
+ * Quantity freshness. MYOB does not bump Item.LastModified when stock moves, so
+ * an item that was not re-fetched is silently serving wrong quantities rather
+ * than merely lagging. The items entity is always fully refreshed now, so any
+ * stale item is a sync bug and must be impossible to miss.
+ */
+function freshnessNotice(f) {
+  if (!f) return "";
+  const stale = Number(f.stale_items ?? 0);
+  const asOf = f.oldest_quantities_as_of;
+  if (stale > 0) {
+    return `<div class="notice fail">
+      <strong>${qty(stale)} of ${qty(f.inventoried_items)} stocked items did not refresh in the last sync.</strong>
+      Their on-hand, committed and available figures are stale, and everything derived from them
+      (cover, valuation, purchasing suggestions) is wrong for those items.
+      This is a sync fault, not a data condition — run a full sync, and if it persists it needs investigating.
+      ${asOf ? `Oldest quantities were read ${ago(asOf)}.` : ""}
+    </div>`;
+  }
+  return `<div class="notice ok">Stock quantities are current — all ${qty(f.inventoried_items)} stocked items
+    were re-read from MYOB in the last sync${f.newest_quantities_as_of ? ` (${ago(f.newest_quantities_as_of)})` : ""}.</div>`;
+}
+
 async function renderData() {
   main.innerHTML = '<p class="loading">Loading data status…</p>';
   const d = await fetchJson("/api/insights/data");
@@ -1980,6 +2008,7 @@ async function renderData() {
     </div>
 
     ${syncStatus.running ? '<div class="notice warn">A sync is currently running — data below refreshes as it completes.</div>' : ""}
+    ${freshnessNotice(d.freshness)}
 
     <div class="two-col">
       <section class="panel">
@@ -1998,8 +2027,12 @@ async function renderData() {
               .join("")}
           </tbody>
         </table></div>
-        <p class="hint" style="margin-top:0.6rem">Transactional history window: ${d.settings.syncWindowDays} days ·
-        relationships derived: ${qty(d.counts?.bom_derived)} · user-defined: ${qty(d.counts?.bom_user)}</p>
+        <p class="hint" style="margin-top:0.6rem">Transaction history from ${esc(d.settings.syncSince ?? `${d.settings.syncWindowDays} days ago`)} ·
+        stock quantities re-read in full every sync, never filtered by MYOB's LastModified.</p>
+        <p class="hint">Recipes in use: <strong>${qty(d.counts?.bom_effective)}</strong> across
+        ${qty(d.counts?.bom_parents)} products. Where each came from, after Allied-entered beats
+        MYOB beats derived — on file: MYOB ${qty(d.counts?.bom_myob)} · derived from builds
+        ${qty(d.counts?.bom_derived)} · Allied-entered ${qty(d.counts?.bom_user)}.</p>
       </section>
 
       <section class="panel">
@@ -2044,8 +2077,11 @@ async function renderData() {
       <dl class="glossary">
         <dt>Position quantities (on hand, committed, on order, available)</dt>
         <dd>Taken directly from the MYOB item master and never recalculated by this platform.
-        Note: MYOB's "available" includes stock on order (verified against Allied's file:
-        available = on hand − committed + on order), so it counts stock that has not arrived yet.</dd>
+        Every stocked item is re-read from MYOB on every sync: MYOB does not update an item's
+        LastModified when stock moves, so fetching only "changed" items would quietly serve
+        month-old quantities. Note: MYOB's "available" includes stock on order (verified against
+        Allied's file: available = on hand − committed + on order), so it counts stock that has
+        not arrived yet.</dd>
         <dt>Free stock</dt>
         <dd>On hand − committed: physical stock not promised to a customer. This is what cover,
         buildability and purchasing suggestions use, so incoming purchase orders are only ever
@@ -2058,9 +2094,11 @@ async function renderData() {
         <dt>Weekly demand / cover</dt>
         <dd>Trailing 90-day rate; items with no 90-day activity fall back to the 365-day rate and are flagged "slow mover".
         Cover = free stock ÷ weekly demand.</dd>
-        <dt>Derived relationships</dt>
-        <dd>Observed from MYOB build transactions with a single finished item. Confidence grows with corroborating builds.
-        MYOB's API does not expose Auto-Build definitions, so unobserved recipes must be added manually.</dd>
+        <dt>Product recipes</dt>
+        <dd>MYOB's own Bill of Materials is read directly from the item master and covers auto-build products,
+        which never appear as build transactions. Recipes are also derived from MYOB build transactions with a
+        single finished item, with confidence growing as more builds corroborate them; anything MYOB does not
+        record can still be entered by hand.</dd>
         <dt>Purchasing suggestions</dt>
         <dd>Weekly demand × target cover + minimum level − free stock − incoming, rounded to the MYOB reorder multiple.
         Advisory only.</dd>

@@ -45,8 +45,18 @@ export const config = {
   },
   dataDir: path.resolve(process.cwd(), process.env.DATA_DIR || ".data"),
   insights: {
-    /** How far back transactional history is mirrored on a full sync. */
+    /**
+     * How far back transactional history is mirrored on a full sync.
+     * Superseded by SYNC_SINCE when that is set.
+     */
     syncWindowDays: Number(process.env.SYNC_WINDOW_DAYS || 365),
+    /**
+     * Absolute earliest transaction date to mirror (ISO yyyy-mm-dd). Pins the
+     * history floor, taking precedence over the rolling syncWindowDays window,
+     * so it cannot creep forward and silently drop the runway the as-at stock
+     * ledger needs. Two years is already loaded for Allied.
+     */
+    syncSince: optional("SYNC_SINCE") || "2024-07-01",
     /** Stock-cover target used by purchasing suggestions. */
     targetCoverWeeks: Number(process.env.TARGET_COVER_WEEKS || 8),
     /** Optional auto-refresh interval (hours). 0 disables. */

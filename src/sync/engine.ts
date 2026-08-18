@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { config } from "../config.js";
 import { getPool } from "../db.js";
-import { myobGetAllPages } from "../myob/client.js";
+import { MyobApiError, myobGetAllPages } from "../myob/client.js";
 import type { CompanyConnection } from "../myob/types.js";
 import { getActiveConnection } from "../store/connections.js";
 import { ensureInsightsSchema } from "./schema.js";
@@ -128,9 +128,63 @@ async function upsertDocs(options: {
 interface EntitySpec {
   entity: string;
   path: string;
-  /** Bounded by SYNC_WINDOW_DAYS on first sync (transactional data). */
+  /** Bounded by the history floor on first sync (transactional data). */
   windowed: boolean;
+  /**
+   * Never apply a LastModified filter to this entity, even on an incremental
+   * run. Set for entities where MYOB does not maintain LastModified against the
+   * changes we care about — see the items spec for why this matters.
+   */
+  alwaysFull?: boolean;
+  /** OData $expand passed through to the collection request. */
+  expand?: string;
   upsertPage: (client: pg.PoolClient, items: Raw[]) => Promise<void>;
+}
+
+/** MYOB custom lists/fields are `{ Label, Value }`; empty values mean unset. */
+function customValue(v: unknown): string | null {
+  const o = (v ?? {}) as Raw;
+  return str(o.Value);
+}
+
+/**
+ * Rows from an item's MYOB Bill of Materials.
+ * Shape: `BillOfMaterials: { Quantity, Items: [{ Quantity, Item: {UID,…} }] }`.
+ * `Quantity` on the parent is how many units the recipe produces, so qty per
+ * single unit is the component quantity divided by it.
+ */
+export function bomRows(item: Raw): unknown[][] {
+  const parentUid = str(item.UID);
+  if (!parentUid || item.BillOfMaterials == null) return [];
+
+  // MYOB has returned this as a single object; tolerate a collection too rather
+  // than silently dropping recipes if the shape differs from the documentation.
+  const raw = item.BillOfMaterials as Raw | Raw[];
+  const bom = (Array.isArray(raw) ? raw[0] : raw) ?? null;
+  if (!bom || typeof bom !== "object") return [];
+
+  const buildQty = num(bom.Quantity) ?? 1;
+  const components = Array.isArray(bom.Items) ? (bom.Items as Raw[]) : [];
+  const rows: unknown[][] = [];
+  const seen = new Set<string>();
+
+  for (const line of components) {
+    const component = ref(line.Item);
+    const qty = num(line.Quantity);
+    if (!component.uid || qty == null || component.uid === parentUid) continue;
+    // MYOB permits a component to repeat; the primary key does not.
+    if (seen.has(component.uid)) continue;
+    seen.add(component.uid);
+    rows.push([
+      parentUid,
+      component.uid,
+      buildQty > 0 ? qty / buildQty : qty,
+      buildQty,
+      str((line.Item as Raw)?.Number),
+      component.name,
+    ]);
+  }
+  return rows;
 }
 
 const ENTITIES: EntitySpec[] = [
@@ -186,6 +240,23 @@ const ENTITIES: EntitySpec[] = [
     entity: "items",
     path: "Inventory/Item",
     windowed: false,
+    /*
+     * MYOB does NOT update Item.LastModified when a transaction changes an
+     * item's quantity — only when the item record itself is edited. Verified on
+     * Allied's file: of 177 items with stock movement after 12 Aug 2026, just 14
+     * had a touched item record, and 2,978 of 3,061 items still carry a
+     * LastModified of 6-7 May 2026 from a bulk edit.
+     *
+     * A LastModified-filtered incremental sync therefore never re-fetches the
+     * items whose stock actually moved, and silently serves stale quantities
+     * while reporting success. Every quantity-derived figure in the product
+     * inherits that error, so this entity is always fully refreshed. It is only
+     * ~3,100 rows / ~8 pages.
+     */
+    alwaysFull: true,
+    // Pulls MYOB's real recipes, including auto-build items that never appear
+    // as Build transactions and so can never be derived from observed builds.
+    expand: "BillOfMaterials",
     upsertPage: async (client, items) => {
       const cols = [
         "uid", "number", "name", "description", "is_active", "is_bought",
@@ -193,7 +264,8 @@ const ENTITIES: EntitySpec[] = [
         "qty_on_order", "qty_available", "average_cost", "current_value",
         "base_selling_price", "min_level", "reorder_qty",
         "primary_supplier_uid", "primary_supplier_name", "supplier_item_number",
-        "last_modified", "raw",
+        "product_type", "product_finish", "bin_location", "location_details",
+        "quantities_as_of", "last_modified", "raw",
       ];
       const rows = items.map((it) => {
         const buying = (it.BuyingDetails ?? {}) as Raw;
@@ -220,6 +292,11 @@ const ENTITIES: EntitySpec[] = [
           supplier.uid,
           supplier.name,
           str(restock.SupplierItemNumber) ?? str(restock.VendorItemNumber),
+          customValue(it.CustomList1),
+          customValue(it.CustomList2),
+          customValue(it.CustomList3),
+          it.LocationDetails ? JSON.stringify(it.LocationDetails) : null,
+          new Date().toISOString(),
           str(it.LastModified),
           JSON.stringify(it),
         ];
@@ -236,6 +313,29 @@ const ENTITIES: EntitySpec[] = [
         rows,
         `ON CONFLICT (uid) DO UPDATE SET ${updates}`,
       );
+
+      // Replace this page's BOM rows wholesale, so recipes removed in MYOB
+      // disappear here too rather than lingering.
+      const uids = items.map((it) => str(it.UID)).filter(Boolean);
+      if (uids.length) {
+        await client.query(
+          `DELETE FROM myob_item_bom WHERE parent_uid = ANY($1)`,
+          [uids],
+        );
+      }
+      const bom = items.flatMap(bomRows);
+      if (bom.length) {
+        await insertRows(
+          client,
+          "myob_item_bom",
+          [
+            "parent_uid", "component_uid", "qty_per", "build_qty",
+            "component_number", "component_name",
+          ],
+          bom,
+          "",
+        );
+      }
     },
   },
   {
@@ -464,6 +564,22 @@ function myobDateLiteral(d: Date): string {
   return `datetime'${d.toISOString().slice(0, 19)}'`;
 }
 
+/**
+ * Earliest transaction date to mirror. A fixed SYNC_SINCE date is preferred
+ * over a rolling window so the history floor does not creep forward and drop
+ * the runway the stock ledger needs; syncWindowDays remains the fallback.
+ */
+function historyFloor(): Date {
+  const since = config.insights.syncSince;
+  if (since) {
+    const parsed = new Date(`${since}T00:00:00Z`);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date(
+    Date.now() - config.insights.syncWindowDays * 24 * 60 * 60 * 1000,
+  );
+}
+
 let running = false;
 
 export function isSyncRunning(): boolean {
@@ -546,41 +662,56 @@ async function syncEntity(
   const high: Date | null = state.rows[0]?.last_modified_high ?? null;
 
   let filter: string | undefined;
-  if (mode === "incremental" && high) {
+  if (mode === "incremental" && high && !spec.alwaysFull) {
     // 5-minute overlap so we never miss edits racing the previous sync.
     const since = new Date(high.getTime() - 5 * 60 * 1000);
     filter = `LastModified gt ${myobDateLiteral(since)}`;
   } else if (spec.windowed) {
-    const windowStart = new Date(
-      Date.now() - config.insights.syncWindowDays * 24 * 60 * 60 * 1000,
-    );
-    filter = `Date ge ${myobDateLiteral(windowStart)}`;
+    filter = `Date ge ${myobDateLiteral(historyFloor())}`;
   }
 
   let rows = 0;
   let maxModified: string | null = null;
 
-  const { pages } = await myobGetAllPages(connection, spec.path, {
-    filter,
-    onPage: async (items) => {
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await spec.upsertPage(client, items);
-        await client.query("COMMIT");
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      } finally {
-        client.release();
-      }
-      rows += items.length;
-      for (const it of items) {
-        const lm = typeof it.LastModified === "string" ? it.LastModified : null;
-        if (lm && (!maxModified || lm > maxModified)) maxModified = lm;
-      }
-    },
-  });
+  const onPage = async (items: Raw[]): Promise<void> => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await spec.upsertPage(client, items);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+    rows += items.length;
+    for (const it of items) {
+      const lm = typeof it.LastModified === "string" ? it.LastModified : null;
+      if (lm && (!maxModified || lm > maxModified)) maxModified = lm;
+    }
+  };
+
+  let pages = 0;
+  let expandError: string | null = null;
+  try {
+    ({ pages } = await myobGetAllPages(connection, spec.path, {
+      filter,
+      expand: spec.expand,
+      onPage,
+    }));
+  } catch (err) {
+    // If MYOB rejects the $expand, the quantities still matter far more than the
+    // recipes do — retry without it rather than failing the whole sync and
+    // leaving stock stale. Upserts are idempotent, so replaying pages is safe.
+    const rejected =
+      spec.expand && err instanceof MyobApiError && err.status >= 400 && err.status < 500;
+    if (!rejected) throw err;
+    expandError = err instanceof Error ? err.message : String(err);
+    rows = 0;
+    maxModified = null;
+    ({ pages } = await myobGetAllPages(connection, spec.path, { filter, onPage }));
+  }
 
   await pool.query(
     `INSERT INTO sync_state (entity, last_modified_high, last_synced_at, row_count, last_error)
@@ -594,7 +725,13 @@ async function syncEntity(
     [spec.entity, maxModified],
   );
 
-  return { pages, fetched: rows, filter: filter ?? "none" };
+  return {
+    pages,
+    fetched: rows,
+    filter: filter ?? "none",
+    ...(spec.expand ? { expand: expandError ? "rejected — retried without" : spec.expand } : {}),
+    ...(expandError ? { expandError } : {}),
+  };
 }
 
 function entityCountTable(entity: string): string {

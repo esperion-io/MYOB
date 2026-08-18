@@ -705,8 +705,10 @@ export async function overview() {
       ORDER BY blocked_parents DESC
       LIMIT 8
     `),
+    // Counted from the effective BOM, so this reflects the recipes actually in
+    // use after user > myob > derived precedence, not every row ever recorded.
     pool.query(`
-      SELECT source, COUNT(*)::int AS count FROM platform_bom GROUP BY source
+      SELECT source, COUNT(*)::int AS count FROM effective_bom GROUP BY source
     `),
     pool.query(`
       SELECT MIN(last_synced_at) AS oldest, MAX(last_synced_at) AS newest
@@ -1201,9 +1203,33 @@ export async function dataStatus() {
         (SELECT COUNT(*)::int FROM platform_bom WHERE source='derived') AS bom_derived,
         (SELECT COUNT(*)::int FROM platform_bom WHERE source='user') AS bom_user,
         (SELECT COUNT(*)::int FROM effective_bom) AS bom_effective,
-        (SELECT COUNT(DISTINCT parent_uid)::int FROM effective_bom) AS bom_parents
+        (SELECT COUNT(DISTINCT parent_uid)::int FROM effective_bom) AS bom_parents,
+        (SELECT COUNT(*)::int FROM myob_item_bom) AS bom_myob,
+        (SELECT COUNT(DISTINCT parent_uid)::int FROM myob_item_bom) AS bom_myob_parents
     `),
   ]);
+
+  /*
+   * Quantity freshness. MYOB does not bump Item.LastModified on stock movement,
+   * so a stale item is not a cosmetic lag — it means every quantity-derived
+   * figure for that item is wrong. The items entity is always fully refreshed,
+   * so a non-zero staleItems here is a bug in the sync, not a data condition,
+   * and the dashboard says so loudly.
+   */
+  const freshness = await pool.query(`
+    WITH newest AS (SELECT MAX(quantities_as_of) AS at FROM myob_items)
+    SELECT
+      (SELECT last_synced_at FROM sync_state WHERE entity = 'items') AS items_last_synced,
+      MIN(quantities_as_of) AS oldest_quantities_as_of,
+      MAX(quantities_as_of) AS newest_quantities_as_of,
+      COUNT(*) FILTER (
+        WHERE is_inventoried
+          AND (quantities_as_of IS NULL
+               OR quantities_as_of < (SELECT at FROM newest) - INTERVAL '1 hour')
+      )::int AS stale_items,
+      COUNT(*) FILTER (WHERE is_inventoried)::int AS inventoried_items
+    FROM myob_items
+  `);
 
   const items = await computedItems();
   const dq = {
@@ -1219,8 +1245,10 @@ export async function dataStatus() {
     recentRuns: runs.rows,
     counts: counts.rows[0],
     dataQuality: dq,
+    freshness: freshness.rows[0],
     settings: {
       syncWindowDays: config.insights.syncWindowDays,
+      syncSince: config.insights.syncSince,
       targetCoverWeeks: config.insights.targetCoverWeeks,
       syncIntervalHours: config.insights.syncIntervalHours,
     },
