@@ -5,6 +5,7 @@ import { MyobApiError, myobGetAllPages } from "../myob/client.js";
 import type { CompanyConnection } from "../myob/types.js";
 import { getActiveConnection } from "../store/connections.js";
 import { ensureInsightsSchema } from "./schema.js";
+import { establishOpeningBalance, snapshotPositions } from "../insights/ledger.js";
 
 type Raw = Record<string, unknown>;
 
@@ -630,6 +631,26 @@ export async function runSync(
       stats.derived_bom_rows = await deriveBomFromBuilds(client);
     } finally {
       client.release();
+    }
+
+    /*
+     * Own the numbers, then record them.
+     *
+     * The opening balance is the single point where MYOB's stock figure is used
+     * as an input; it is a no-op once established. Everything after it is this
+     * platform's own arithmetic over its own movement ledger.
+     *
+     * The snapshot is what makes the history real: without a row written every
+     * day, "what did we hold on 31 July" can only ever be reconstructed, never
+     * looked up. It must not fail the sync — the mirrored MYOB data is still
+     * correct and useful without it.
+     */
+    try {
+      stats.opening_balance = await establishOpeningBalance();
+      stats.position_snapshot = await snapshotPositions();
+    } catch (err) {
+      stats.position_snapshot_error =
+        err instanceof Error ? err.message : String(err);
     }
 
     await pool.query(

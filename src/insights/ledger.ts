@@ -422,3 +422,253 @@ export async function anchorCoverage(): Promise<Record<string, unknown>> {
   );
   return { ...result.rows[0], drift: drift.rows[0] };
 }
+
+/* ---- Owning the numbers: opening balance, our committed, daily snapshots ---- */
+
+/**
+ * Establish the opening balance — the one and only time MYOB's stock figure is
+ * used as an input.
+ *
+ * Why this is necessary rather than counting up from zero: MYOB exposes
+ * `Inventory/Adjustment` and `Inventory/Build` only from 2023-04-03, while
+ * `Sale/Invoice` goes back to 2011 and 507 pre-2023 invoices already sell
+ * inventoried items. There is no opening-stock entry anywhere in the file. So a
+ * from-zero ledger would be missing years of receipts and adjustments and would
+ * be confidently wrong. Probed against the live file on 18 Aug 2026.
+ *
+ * This is the standard conversion-balance approach used when moving onto a new
+ * inventory system: take the outgoing system's closing position once, then own
+ * every movement after it. It is written as a normal anchor with
+ * source 'opening_balance', so:
+ *   - the ledger treats it exactly like a count,
+ *   - it is visible and auditable rather than hidden in the arithmetic,
+ *   - any real stocktake after it supersedes it automatically, which is how
+ *     MYOB's contribution gets progressively replaced by physical reality.
+ *
+ * Safe to call repeatedly: it will not move an existing opening balance, since
+ * doing so would silently rewrite history.
+ */
+export async function establishOpeningBalance(params?: {
+  asOf?: string;
+  force?: boolean;
+}): Promise<{ asOf: string; itemsAnchored: number; alreadyExisted: boolean }> {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const asOf = params?.asOf ?? new Date().toISOString().slice(0, 10);
+
+  const existing = await pool.query(
+    `SELECT count_date::text AS d, COUNT(*)::int AS n
+     FROM platform_stock_count WHERE source = 'opening_balance'
+     GROUP BY count_date ORDER BY count_date LIMIT 1`,
+  );
+  if (existing.rows[0] && !params?.force) {
+    return {
+      asOf: existing.rows[0].d as string,
+      itemsAnchored: existing.rows[0].n as number,
+      alreadyExisted: true,
+    };
+  }
+  if (params?.force) {
+    await pool.query(`DELETE FROM platform_stock_count WHERE source = 'opening_balance'`);
+  }
+
+  const result = await pool.query(
+    `INSERT INTO platform_stock_count
+       (item_uid, count_date, counted_qty, drift_qty, source, source_ref, entered_by, note)
+     SELECT uid, $1::date, COALESCE(qty_on_hand, 0), NULL,
+            'opening_balance', NULL, 'system',
+            'Opening balance taken from MYOB once at cutover. Every movement after this date is computed by this platform.'
+     FROM myob_items WHERE is_inventoried
+     ON CONFLICT (item_uid, count_date, COALESCE(source_ref, '')) DO NOTHING`,
+    [asOf],
+  );
+  return { asOf, itemsAnchored: result.rowCount ?? 0, alreadyExisted: false };
+}
+
+export interface OwnedPosition {
+  uid: string;
+  number: string | null;
+  name: string | null;
+  onHand: number | null;
+  committed: number;
+  freeStock: number | null;
+  onOrder: number;
+  averageCost: number | null;
+  stockValue: number | null;
+  basis: PositionBasis | "no_opening_balance";
+  anchorDate: string | null;
+  anchorSource: string | null;
+  myobOnHand: number | null;
+  myobCommitted: number | null;
+  divergence: number | null;
+}
+
+/**
+ * The platform's own position for every item, as at a date.
+ *
+ * on hand   — anchor + our movement ledger. Never MYOB's figure.
+ * committed — our sum of open sale-order lines. Never MYOB's figure. This one
+ *             already disagrees with MYOB on 19 items: WR16503G carries 5,000
+ *             units on open orders that MYOB reports as 0 committed, which
+ *             would read as free-to-sell stock.
+ * free      — our on hand minus our committed.
+ * on order  — our sum of open purchase-order lines not yet billed.
+ *
+ * MYOB's figures come back on the row for comparison only, so divergence can be
+ * shown and explained rather than quietly resolved.
+ */
+export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
+  await ensureInsightsSchema();
+  const date = asAt ?? new Date().toISOString().slice(0, 10);
+  const result = await getPool().query(
+    `WITH anchor AS (
+       SELECT DISTINCT ON (item_uid) item_uid, count_date, counted_qty, source
+       FROM platform_stock_count
+       WHERE count_date <= $1::date
+       ORDER BY item_uid, count_date DESC,
+                (source <> 'opening_balance') DESC, id DESC
+     ),
+     later_count AS (
+       SELECT DISTINCT ON (item_uid) item_uid FROM platform_stock_count
+       WHERE count_date > $1::date ORDER BY item_uid, count_date ASC
+     ),
+     since_anchor AS (
+       SELECT m.item_uid, SUM(m.qty)::float8 AS qty
+       FROM stock_movements m JOIN anchor a ON a.item_uid = m.item_uid
+       WHERE m.moved_on > a.count_date AND m.moved_on <= $1::date
+       GROUP BY m.item_uid
+     ),
+     our_committed AS (
+       SELECT l.item_uid, SUM(l.qty)::float8 AS qty
+       FROM myob_sale_order_lines l
+       JOIN myob_sale_orders o ON o.uid = l.order_uid
+       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
+         AND l.item_uid IS NOT NULL AND o.date::date <= $1::date
+       GROUP BY l.item_uid
+     ),
+     our_on_order AS (
+       SELECT l.item_uid, SUM(GREATEST(COALESCE(l.qty, 0) - COALESCE(l.received_qty, 0), 0))::float8 AS qty
+       FROM myob_purchase_order_lines l
+       JOIN myob_purchase_orders o ON o.uid = l.order_uid
+       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
+         AND l.item_uid IS NOT NULL AND o.date::date <= $1::date
+       GROUP BY l.item_uid
+     )
+     SELECT i.uid, i.number, i.name, i.average_cost::float8,
+            i.qty_on_hand::float8 AS myob_on_hand,
+            i.qty_committed::float8 AS myob_committed,
+            a.count_date::text AS anchor_date, a.counted_qty::float8, a.source AS anchor_source,
+            COALESCE(sa.qty, 0)::float8 AS since_anchor,
+            COALESCE(oc.qty, 0)::float8 AS committed,
+            COALESCE(oo.qty, 0)::float8 AS on_order,
+            (a.item_uid IS NULL AND lc.item_uid IS NOT NULL) AS precedes_count
+     FROM myob_items i
+     LEFT JOIN anchor a ON a.item_uid = i.uid
+     LEFT JOIN later_count lc ON lc.item_uid = i.uid
+     LEFT JOIN since_anchor sa ON sa.item_uid = i.uid
+     LEFT JOIN our_committed oc ON oc.item_uid = i.uid
+     LEFT JOIN our_on_order oo ON oo.item_uid = i.uid
+     WHERE i.is_inventoried
+     ORDER BY i.number`,
+    [date],
+  );
+
+  return result.rows.map((r) => {
+    const anchored = r.anchor_date != null;
+    const precedes = Boolean(r.precedes_count);
+    const onHand = anchored ? Number(r.counted_qty) + Number(r.since_anchor) : null;
+    const committed = Number(r.committed);
+    const cost = r.average_cost == null ? null : Number(r.average_cost);
+    return {
+      uid: r.uid as string,
+      number: r.number as string | null,
+      name: r.name as string | null,
+      onHand,
+      committed,
+      freeStock: onHand == null ? null : onHand - committed,
+      onOrder: Number(r.on_order),
+      averageCost: cost,
+      stockValue: onHand == null || cost == null ? null : onHand * cost,
+      basis: anchored
+        ? (r.anchor_source === "opening_balance" ? "reconstructed" : "counted")
+        : precedes
+          ? "precedes_count"
+          : "no_opening_balance",
+      anchorDate: anchored ? String(r.anchor_date) : null,
+      anchorSource: anchored ? (r.anchor_source as string) : null,
+      myobOnHand: r.myob_on_hand == null ? null : Number(r.myob_on_hand),
+      myobCommitted: r.myob_committed == null ? null : Number(r.myob_committed),
+      divergence:
+        onHand == null || r.myob_on_hand == null ? null : onHand - Number(r.myob_on_hand),
+    };
+  });
+}
+
+/**
+ * Persist one day's positions. Called at the end of every sync so the history
+ * accumulates without anyone having to remember.
+ *
+ * Existing rows for the date are left alone unless `overwrite` is set: a
+ * snapshot is a record of what we believed on that day, and silently rewriting
+ * it would destroy the trail it exists to provide.
+ */
+export async function snapshotPositions(params?: {
+  asAt?: string;
+  overwrite?: boolean;
+}): Promise<{ asAt: string; rows: number }> {
+  await ensureInsightsSchema();
+  const asAt = params?.asAt ?? new Date().toISOString().slice(0, 10);
+  const positions = await ownedPositions(asAt);
+  const pool = getPool();
+
+  if (params?.overwrite) {
+    await pool.query(`DELETE FROM platform_daily_position WHERE as_at_date = $1::date`, [asAt]);
+  }
+
+  let rows = 0;
+  const batch = 500;
+  for (let i = 0; i < positions.length; i += batch) {
+    const slice = positions.slice(i, i + batch);
+    const values: unknown[] = [];
+    const tuples = slice
+      .map((p, n) => {
+        const b = n * 14;
+        values.push(
+          asAt, p.uid, p.onHand, p.committed, p.freeStock, p.onOrder,
+          p.averageCost, p.stockValue, p.basis, p.anchorDate, p.anchorSource,
+          p.myobOnHand, p.myobCommitted, p.divergence,
+        );
+        return `($${b + 1}::date,$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10}::date,$${b + 11},$${b + 12},$${b + 13},$${b + 14})`;
+      })
+      .join(",");
+    const res = await pool.query(
+      `INSERT INTO platform_daily_position
+         (as_at_date, item_uid, on_hand, committed, free_stock, on_order,
+          average_cost, stock_value, basis, anchor_date, anchor_source,
+          myob_on_hand, myob_committed, divergence)
+       VALUES ${tuples}
+       ON CONFLICT (as_at_date, item_uid) DO NOTHING`,
+      values,
+    );
+    rows += res.rowCount ?? 0;
+  }
+  return { asAt, rows };
+}
+
+/** Dates for which a stored snapshot exists, newest first. */
+export async function snapshotDates(): Promise<
+  { asAt: string; items: number; stockValue: number }[]
+> {
+  await ensureInsightsSchema();
+  const r = await getPool().query(
+    `SELECT as_at_date::text AS as_at, COUNT(*)::int AS items,
+            COALESCE(SUM(stock_value), 0)::float8 AS stock_value
+     FROM platform_daily_position
+     GROUP BY as_at_date ORDER BY as_at_date DESC`,
+  );
+  return r.rows.map((x) => ({
+    asAt: x.as_at as string,
+    items: x.items as number,
+    stockValue: x.stock_value as number,
+  }));
+}

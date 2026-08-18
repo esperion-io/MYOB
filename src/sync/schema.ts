@@ -421,6 +421,40 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_stock_count_item_date
      ON platform_stock_count (item_uid, count_date DESC)`,
 
+  /*
+   * Daily position snapshot — the permanent historical trail.
+   *
+   * Every figure here is computed by this platform from its own movement
+   * ledger and its own open-order arithmetic. `myob_on_hand` is stored only as
+   * a comparison column so divergence can be shown and explained; it is never
+   * an input to on_hand, committed or free.
+   *
+   * Rows are immutable once written: this is what "look back at these numbers
+   * historically" means, and rewriting history would defeat it.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_daily_position (
+    as_at_date DATE NOT NULL,
+    item_uid TEXT NOT NULL,
+    on_hand DOUBLE PRECISION,
+    committed DOUBLE PRECISION,
+    free_stock DOUBLE PRECISION,
+    on_order DOUBLE PRECISION,
+    average_cost DOUBLE PRECISION,
+    stock_value DOUBLE PRECISION,
+    basis TEXT NOT NULL,
+    anchor_date DATE,
+    anchor_source TEXT,
+    myob_on_hand DOUBLE PRECISION,
+    myob_committed DOUBLE PRECISION,
+    divergence DOUBLE PRECISION,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (as_at_date, item_uid)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_daily_position_item
+     ON platform_daily_position (item_uid, as_at_date DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_daily_position_date
+     ON platform_daily_position (as_at_date)`,
+
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_bill_lines_item ON myob_purchase_bill_lines (item_uid)`,

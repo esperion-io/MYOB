@@ -28,7 +28,9 @@ import {
   anchorCoverage,
   confirmStocktake,
   itemLedger,
-  positionsAsAt,
+  ownedPositions,
+  snapshotDates,
+  snapshotPositions,
   stocktakeCandidates,
 } from "../insights/ledger.js";
 
@@ -419,13 +421,17 @@ insightsRouter.get("/positions", async (req, res) => {
     const asAt = typeof req.query.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asAt)
       ? req.query.asAt
       : new Date().toISOString().slice(0, 10);
-    const positions = await positionsAsAt(asAt);
+    const positions = await ownedPositions(asAt);
     res.json({
       asAt,
       counted: positions.filter((p) => p.basis === "counted").length,
-      reconstructed: positions.filter((p) => p.basis === "reconstructed").length,
-      precedesCount: positions.filter((p) => p.basis === "precedes_count").length,
-      diverging: positions.filter((p) => p.divergence != null && Math.abs(p.divergence) > 0.001).length,
+      fromOpeningBalance: positions.filter((p) => p.basis === "reconstructed").length,
+      committedDiffersFromMyob: positions.filter(
+        (p) => Math.abs(p.committed - (p.myobCommitted ?? 0)) > 0.001,
+      ).length,
+      onHandDivergesFromMyob: positions.filter(
+        (p) => p.divergence != null && Math.abs(p.divergence) > 0.001,
+      ).length,
       positions,
     });
   } catch (err) {
@@ -441,6 +447,26 @@ insightsRouter.get("/ledger/:uid", async (req, res) => {
       ? req.query.asAt
       : undefined;
     res.json(await itemLedger(req.params.uid, asAt));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Dates for which a stored position snapshot exists — the historical trail. */
+insightsRouter.get("/snapshots", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({ snapshots: await snapshotDates() });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Force a snapshot for today. Normally the sync does this automatically. */
+insightsRouter.post("/snapshots", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await snapshotPositions({ overwrite: req.body?.overwrite === true }));
   } catch (err) {
     send500(res, err);
   }
