@@ -59,6 +59,35 @@ Source: [Bill of Materials](https://developer.myob.com/api/myob-business-api/v2/
 
 **Conclusion:** every historical stock figure has to be computed by us from a movement ledger. Part 2's P1 defines that ledger; P3 defines how far back it is trustworthy.
 
+### 1.5b Which endpoint every figure comes from
+
+The plan referred to "adjustments" and "movements" without naming endpoints. For
+the avoidance of doubt, this is the complete set we sync and what each one feeds.
+
+| MYOB endpoint | Stored as | What it feeds |
+|---|---|---|
+| `Inventory/Item` | `myob_items` | On hand, committed, on order, available, average cost, min level, product type/finish, per-location stock. Always fully refreshed. |
+| `Inventory/Item?$expand=BillOfMaterials` | `myob_item_bom` | Product recipes, including auto-build/pre-packed kits. |
+| **`Inventory/Adjustment`** | `myob_adjustments` | **Stock adjustments — and therefore every stocktake anchor in P1.** |
+| `Inventory/Build` | `myob_builds` | Components consumed and finished goods produced. |
+| `Purchase/Bill/Item` | `myob_purchase_bills` | Goods received (stock in). Supplier credits appear as negative lines. |
+| `Purchase/Order/Item` | `myob_purchase_orders` | Incoming supply not yet received. Does **not** move stock. |
+| `Sale/Invoice/Item` | `myob_sale_invoices` | Goods shipped (stock out). Customer credits are negative lines. |
+| `Sale/Order/Item` | `myob_sale_orders` | Committed quantity. Does **not** move stock. |
+| `Contact/Supplier` | `myob_suppliers` | Supplier names, addresses, region derivation. |
+| `Inventory/Location` | `myob_locations` | Location names for the per-location split. |
+
+**Stocktakes come from `Inventory/Adjustment`, not from sales.** A physical count
+is entered in MYOB as an inventory adjustment, which is why P1's anchors are
+detected by scanning adjustment memos. Sales invoices are one of the four
+*movement* sources applied on top of an anchor, never the anchor itself.
+
+The four endpoints that move stock, and so make up the movement ledger, are:
+**`Purchase/Bill/Item` (+), `Sale/Invoice/Item` (−), `Inventory/Build` (±) and
+`Inventory/Adjustment` (±).** Purchase orders and sale orders are excluded on
+purpose — they represent intent, not movement, and counting them would
+double-count stock that has not arrived or not shipped.
+
 ### 1.6 Stocktakes in MYOB — how they actually appear
 
 This is new research, driven by the client's direction. Two findings shape the whole design.
