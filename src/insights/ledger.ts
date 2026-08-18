@@ -528,9 +528,27 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
        ORDER BY item_uid, count_date DESC,
                 (source <> 'opening_balance') DESC, id DESC
      ),
+     /*
+      * Only a *physical* count blocks rolling backwards. The opening balance is
+      * a bookkeeping conversion, not an observation of the shelf, so reading
+      * back through it is ordinary reconstruction and is perfectly valid —
+      * which is what makes historical dates answerable at all.
+      */
      later_count AS (
        SELECT DISTINCT ON (item_uid) item_uid FROM platform_stock_count
-       WHERE count_date > $1::date ORDER BY item_uid, count_date ASC
+       WHERE count_date > $1::date AND source <> 'opening_balance'
+       ORDER BY item_uid, count_date ASC
+     ),
+     opening AS (
+       SELECT DISTINCT ON (item_uid) item_uid, count_date, counted_qty
+       FROM platform_stock_count WHERE source = 'opening_balance'
+       ORDER BY item_uid, count_date ASC
+     ),
+     back_from_opening AS (
+       SELECT m.item_uid, SUM(m.qty)::float8 AS qty
+       FROM stock_movements m JOIN opening o ON o.item_uid = m.item_uid
+       WHERE m.moved_on > $1::date AND m.moved_on <= o.count_date
+       GROUP BY m.item_uid
      ),
      since_anchor AS (
        SELECT m.item_uid, SUM(m.qty)::float8 AS qty
@@ -561,10 +579,15 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
             COALESCE(sa.qty, 0)::float8 AS since_anchor,
             COALESCE(oc.qty, 0)::float8 AS committed,
             COALESCE(oo.qty, 0)::float8 AS on_order,
-            (a.item_uid IS NULL AND lc.item_uid IS NOT NULL) AS precedes_count
+            (a.item_uid IS NULL AND lc.item_uid IS NOT NULL) AS precedes_count,
+            op.counted_qty::float8 AS opening_qty,
+            op.count_date::text AS opening_date,
+            COALESCE(bo.qty, 0)::float8 AS back_from_opening
      FROM myob_items i
      LEFT JOIN anchor a ON a.item_uid = i.uid
      LEFT JOIN later_count lc ON lc.item_uid = i.uid
+     LEFT JOIN opening op ON op.item_uid = i.uid
+     LEFT JOIN back_from_opening bo ON bo.item_uid = i.uid
      LEFT JOIN since_anchor sa ON sa.item_uid = i.uid
      LEFT JOIN our_committed oc ON oc.item_uid = i.uid
      LEFT JOIN our_on_order oo ON oo.item_uid = i.uid
@@ -576,7 +599,16 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
   return result.rows.map((r) => {
     const anchored = r.anchor_date != null;
     const precedes = Boolean(r.precedes_count);
-    const onHand = anchored ? Number(r.counted_qty) + Number(r.since_anchor) : null;
+    // Before the conversion balance and with no physical count in between, roll
+    // the opening balance backwards — the same reconstruction as before, just
+    // pinned to a recorded anchor instead of a live MYOB read.
+    const preOpening =
+      !anchored && !precedes && r.opening_qty != null
+        ? Number(r.opening_qty) - Number(r.back_from_opening)
+        : null;
+    const onHand = anchored
+      ? Number(r.counted_qty) + Number(r.since_anchor)
+      : preOpening;
     const committed = Number(r.committed);
     const cost = r.average_cost == null ? null : Number(r.average_cost);
     return {
@@ -593,9 +625,19 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
         ? (r.anchor_source === "opening_balance" ? "reconstructed" : "counted")
         : precedes
           ? "precedes_count"
-          : "no_opening_balance",
-      anchorDate: anchored ? String(r.anchor_date) : null,
-      anchorSource: anchored ? (r.anchor_source as string) : null,
+          : preOpening != null
+            ? "reconstructed"
+            : "no_opening_balance",
+      anchorDate: anchored
+        ? String(r.anchor_date)
+        : preOpening != null
+          ? String(r.opening_date)
+          : null,
+      anchorSource: anchored
+        ? (r.anchor_source as string)
+        : preOpening != null
+          ? "opening_balance_rolled_back"
+          : null,
       myobOnHand: r.myob_on_hand == null ? null : Number(r.myob_on_hand),
       myobCommitted: r.myob_committed == null ? null : Number(r.myob_committed),
       divergence:
