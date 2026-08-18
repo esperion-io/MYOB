@@ -1,0 +1,662 @@
+<title>Allied Priority Fix Plan</title>
+<style>
+  :root {
+    --ground:   #F1F4F5;
+    --surface:  #FFFFFF;
+    --surface-2:#E8EDEF;
+    --ink:      #14181B;
+    --ink-2:    #3D474F;
+    --muted:    #66727C;
+    --rule:     #D2DADD;
+    --accent:   #0F5A66;
+    --accent-2: #FFFFFF;
+    --crit:     #A63D24;
+    --crit-bg:  #F9EAE5;
+    --warn:     #8A6210;
+    --warn-bg:  #F8F0DD;
+    --good:     #2C6349;
+    --good-bg:  #E4EFE9;
+    --code-bg:  #EDF1F2;
+    --shadow:   0 1px 2px rgba(20,24,27,.06), 0 4px 16px rgba(20,24,27,.05);
+    --serif: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --sans:  ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono:  ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0E1214; --surface:#161B1E; --surface-2:#1E2529;
+      --ink:#E3E9EB; --ink-2:#B3BEC4; --muted:#869299; --rule:#2A3338;
+      --accent:#5FB8C7; --accent-2:#0E1214;
+      --crit:#E08A6E; --crit-bg:#2E1C16; --warn:#D6AA5A; --warn-bg:#2B2314;
+      --good:#7FBF9E; --good-bg:#142520; --code-bg:#1C2327;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 18px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0E1214; --surface:#161B1E; --surface-2:#1E2529;
+    --ink:#E3E9EB; --ink-2:#B3BEC4; --muted:#869299; --rule:#2A3338;
+    --accent:#5FB8C7; --accent-2:#0E1214;
+    --crit:#E08A6E; --crit-bg:#2E1C16; --warn:#D6AA5A; --warn-bg:#2B2314;
+    --good:#7FBF9E; --good-bg:#142520; --code-bg:#1C2327;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 18px rgba(0,0,0,.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground); color: var(--ink); font-family: var(--serif);
+    font-size: 17px; line-height: 1.62; margin: 0; padding: 0 20px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  .masthead { padding: 56px 0 28px; border-bottom: 2px solid var(--ink); }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--sans); font-weight: 640; letter-spacing: -.022em;
+    font-size: clamp(34px, 6vw, 52px); line-height: 1.06; margin: 0 0 20px;
+    text-wrap: balance;
+  }
+  .standfirst { font-size: 19px; color: var(--ink-2); margin: 0; max-width: 62ch; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 8px 26px; margin-top: 26px;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+  .meta b { color: var(--ink-2); font-weight: 500; }
+
+  .changelog {
+    margin: 32px 0 0; padding: 22px 24px; background: var(--good-bg);
+    border-left: 4px solid var(--good); border-radius: 0 6px 6px 0;
+  }
+  .changelog h2 {
+    font-family: var(--sans); font-size: 15px; font-weight: 640; margin: 0 0 10px;
+    color: var(--good); border: 0; padding: 0;
+  }
+  .changelog ul { margin: 0; padding-left: 20px; }
+  .changelog li { color: var(--ink-2); margin-bottom: 6px; }
+
+  .blocker {
+    margin: 22px 0 8px; padding: 22px 24px; background: var(--crit-bg);
+    border-left: 4px solid var(--crit); border-radius: 0 6px 6px 0;
+  }
+  .blocker h2 {
+    font-family: var(--sans); font-size: 15px; font-weight: 640; margin: 0 0 8px;
+    color: var(--crit); border: 0; padding: 0;
+  }
+  .blocker p { margin: 0; font-size: 16px; color: var(--ink-2); }
+  .blocker p + p { margin-top: 10px; }
+
+  .part { margin-top: 64px; }
+  .part-label {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+  }
+  h2 {
+    font-family: var(--sans); font-weight: 620; letter-spacing: -.016em;
+    font-size: 27px; line-height: 1.2; margin: 0 0 22px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--rule); text-wrap: balance;
+  }
+  h3 {
+    font-family: var(--sans); font-weight: 620; letter-spacing: -.012em;
+    font-size: 19px; margin: 38px 0 12px; text-wrap: balance;
+  }
+  h4 {
+    font-family: var(--mono); font-weight: 600; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+    margin: 26px 0 10px;
+  }
+  p { margin: 0 0 15px; max-width: 68ch; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+  strong { font-weight: 700; color: var(--ink); }
+  ul, ol { margin: 0 0 15px; padding-left: 22px; max-width: 68ch; }
+  li { margin-bottom: 8px; }
+  li::marker { color: var(--muted); }
+  code {
+    font-family: var(--mono); font-size: .855em; background: var(--code-bg);
+    padding: .12em .38em; border-radius: 3px; color: var(--ink);
+  }
+  pre {
+    font-family: var(--mono); font-size: 13px; line-height: 1.65;
+    background: var(--surface); border: 1px solid var(--rule);
+    padding: 18px 20px; border-radius: 6px; overflow-x: auto; margin: 0 0 20px;
+  }
+  pre code { background: none; padding: 0; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 44px 0; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 8px; padding: 26px 28px; margin: 0 0 22px; box-shadow: var(--shadow);
+  }
+  .card.is-critical { border-left: 4px solid var(--crit); }
+  .card.is-core { border-left: 4px solid var(--accent); }
+  .card > :first-child { margin-top: 0; }
+  .card > :last-child { margin-bottom: 0; }
+  .card h3 { margin-top: 0; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .pid {
+    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .06em;
+    color: var(--accent-2); background: var(--accent); padding: 4px 9px;
+    border-radius: 4px; flex: none;
+  }
+  .card.is-critical .pid { background: var(--crit); }
+  .dep {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    margin: 0 0 16px; padding-bottom: 14px; border-bottom: 1px dashed var(--rule);
+  }
+  .quote {
+    font-style: italic; color: var(--ink-2); border-left: 3px solid var(--rule);
+    padding: 2px 0 2px 18px; margin: 0 0 18px; max-width: 66ch;
+  }
+
+  .tag {
+    display: inline-block; font-family: var(--mono); font-size: 10.5px;
+    font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 3px; vertical-align: 2px;
+  }
+  .tag.crit { background: var(--crit-bg); color: var(--crit); }
+  .tag.warn { background: var(--warn-bg); color: var(--warn); }
+  .tag.good { background: var(--good-bg); color: var(--good); }
+
+  .evidence {
+    background: var(--surface-2); border-radius: 6px; padding: 18px 20px;
+    margin: 0 0 20px; font-family: var(--mono); font-size: 13.5px;
+    line-height: 1.62; color: var(--ink-2);
+  }
+  .evidence .etitle {
+    font-size: 10.5px; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 10px; font-weight: 600;
+  }
+  .evidence ul { margin: 0; padding-left: 18px; max-width: none; }
+  .evidence li { margin-bottom: 6px; }
+  .evidence p { max-width: none; }
+
+  .scroll { overflow-x: auto; margin: 0 0 22px; border: 1px solid var(--rule); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; background: var(--surface); font-size: 14.5px; }
+  th, td { text-align: left; padding: 11px 15px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+    background: var(--surface-2); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.bad { font-family: var(--mono); color: var(--crit); font-variant-numeric: tabular-nums; }
+
+  .dist { display: grid; gap: 5px; margin: 0 0 22px; font-family: var(--mono); font-size: 12.5px; }
+  .dist .row { display: grid; grid-template-columns: minmax(96px, 150px) 1fr 52px; gap: 12px; align-items: center; }
+  .dist .lab { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dist .bar { background: var(--surface-2); border-radius: 2px; height: 15px; overflow: hidden; }
+  .dist .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+  .dist .val { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  footer {
+    margin-top: 64px; padding-top: 22px; border-top: 1px solid var(--rule);
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+  @media (max-width: 620px) {
+    body { font-size: 16px; padding: 0 16px 64px; }
+    .card { padding: 20px 18px; }
+    .dist .row { grid-template-columns: minmax(80px, 116px) 1fr 44px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v2.1</p>
+    <h1>Allied Priority Fix Plan</h1>
+    <p class="standfirst">Implementation plan for the six client priorities, rebuilt around a stocktake-anchored stock ledger — plus one blocking defect found while verifying the numbers.</p>
+    <div class="meta">
+      <span><b>Revised</b> 18 Aug 2026</span>
+      <span><b>Status</b> P0 shipped · P1–P6 proposed</span>
+      <span><b>Verified against</b> Live MYOB file, 3,100 items</span>
+    </div>
+  </header>
+
+  <div class="changelog">
+    <h2>What changed in v2</h2>
+    <ul>
+      <li><strong>P1 is rewritten.</strong> Stock on hand now comes from a stocktake-anchored ledger, not MYOB's <code>QuantityOnHand</code>. This is the client's direction, and the data supports it.</li>
+      <li><strong>P3 is clarified</strong> — yes, we start persisting data now. The plan states exactly which dates will be exact, which reconstructed, and which unreliable.</li>
+      <li><strong>Client answers folded in</strong> — no finish suppression, bin location synced but hidden, Allied tags their own suppliers, the "open POs netted" item dropped.</li>
+      <li><strong>P0 has shipped.</strong> The sync no longer serves stale quantities, and MYOB's Bill of Materials was verified as genuinely maintained and promoted to the primary recipe source.</li>
+    </ul>
+  </div>
+
+  <div class="changelog">
+    <h2>The blocker is fixed</h2>
+    <p style="margin:0 0 10px;color:var(--ink-2)">A defect sat <em>underneath</em> everything and silently corrupted every quantity in the product. It was invisible from the UI — the numbers looked plausible, they were just old. <code>N12S16</code> read <strong>299</strong> units against a real <strong>18,449</strong>.</p>
+    <p style="margin:0;color:var(--ink-2)">Shipped 18 Aug 2026. Stock quantities are now re-read in full on every sync, and staleness is reported as a fault rather than rendered silently. Details in P0 below.</p>
+  </div>
+
+  <!-- ================= PART 1 ================= -->
+  <section class="part">
+    <p class="part-label">Part 1</p>
+    <h2>MYOB API research findings</h2>
+    <p>Every finding was checked against the live MYOB documentation <strong>and</strong> Allied's actual company file (3,100 items, 3,061 inventoried) on 17 August 2026. All counts come from the production database.</p>
+
+    <h3>1.1 &nbsp;Item quantity and cost fields</h3>
+    <p>Source: <a href="https://developer.myob.com/api/myob-business-api/v2/inventory/item/">Inventory/Item</a></p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Field</th><th>MYOB's definition</th><th>Verified on Allied's file</th></tr></thead>
+        <tbody>
+          <tr><td><code>QuantityOnHand</code></td><td>"Quantity of units held in inventory"</td><td>Excludes on-order. <strong>We stop treating this as truth — see P1.</strong></td></tr>
+          <tr><td><code>QuantityCommitted</code></td><td>"Quantity held in pending sale invoices"</td><td>Actually open sale <em>orders</em>, despite the wording.</td></tr>
+          <tr><td><code>QuantityOnOrder</code></td><td>"Quantity held in pending purchase orders"</td><td>Open POs not yet billed.</td></tr>
+          <tr><td><code>QuantityAvailable</code></td><td>"Calculated quantity available for sale"</td><td><strong>= OnHand − Committed + OnOrder, 3,061 of 3,061 items.</strong> Never used in analysis.</td></tr>
+          <tr><td><code>AverageCost</code></td><td>"Average cost when quantity on hand is ≥ zero"</td><td>Current weighted average. No history exposed.</td></tr>
+          <tr><td><code>CurrentValue</code></td><td>"Dollar value of units held"</td><td><strong>= OnHand × AverageCost, 3,058 of 3,061.</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>1.2 &nbsp;Product type and finish — already in the file</h3>
+    <p><code>CustomList1</code>, <code>2</code> and <code>3</code> are populated on all 3,100 items and already sit inside the <code>raw</code> JSON we store. <strong>No new sync work to obtain them</strong> — they just need promoting to real columns.</p>
+
+    <h4>CustomList1 — "PRODUCT TYPE"</h4>
+    <div class="dist">
+      <div class="row"><span class="lab">NUTS AND BOLTS</span><span class="bar"><i style="width:100%"></i></span><span class="val">1412</span></div>
+      <div class="row"><span class="lab">SCREWS</span><span class="bar"><i style="width:26.1%"></i></span><span class="val">369</span></div>
+      <div class="row"><span class="lab">HYDRO</span><span class="bar"><i style="width:24.4%"></i></span><span class="val">344</span></div>
+      <div class="row"><span class="lab">WASHERS</span><span class="bar"><i style="width:19.6%"></i></span><span class="val">277</span></div>
+      <div class="row"><span class="lab">THREADED ROD</span><span class="bar"><i style="width:12%"></i></span><span class="val">169</span></div>
+      <div class="row"><span class="lab">INFRASTRUCTURE</span><span class="bar"><i style="width:12%"></i></span><span class="val">169</span></div>
+      <div class="row"><span class="lab">ANCHORS</span><span class="bar"><i style="width:5.8%"></i></span><span class="val">82</span></div>
+      <div class="row"><span class="lab">GASKET</span><span class="bar"><i style="width:5.4%"></i></span><span class="val">76</span></div>
+      <div class="row"><span class="lab">MISC</span><span class="bar"><i style="width:4.2%"></i></span><span class="val">60</span></div>
+      <div class="row"><span class="lab">(not set)</span><span class="bar"><i style="width:3.8%"></i></span><span class="val">53</span></div>
+      <div class="row"><span class="lab">SPIRAFIX</span><span class="bar"><i style="width:3%"></i></span><span class="val">42</span></div>
+      <div class="row"><span class="lab">MARINA</span><span class="bar"><i style="width:1.4%"></i></span><span class="val">20</span></div>
+      <div class="row"><span class="lab">RIVETS</span><span class="bar"><i style="width:1.3%"></i></span><span class="val">19</span></div>
+      <div class="row"><span class="lab">NAIL</span><span class="bar"><i style="width:.4%"></i></span><span class="val">6</span></div>
+      <div class="row"><span class="lab">ANTI-TAMPER</span><span class="bar"><i style="width:.2%"></i></span><span class="val">2</span></div>
+    </div>
+
+    <h4>CustomList2 — "PRODUCT FINISH"</h4>
+    <div class="dist">
+      <div class="row"><span class="lab">GALVANIZED</span><span class="bar"><i style="width:100%"></i></span><span class="val">1251</span></div>
+      <div class="row"><span class="lab">STAINLESS STEEL</span><span class="bar"><i style="width:85%"></i></span><span class="val">1063</span></div>
+      <div class="row"><span class="lab">ZINC PLATED</span><span class="bar"><i style="width:30.5%"></i></span><span class="val">381</span></div>
+      <div class="row"><span class="lab">(not set)</span><span class="bar"><i style="width:9%"></i></span><span class="val">113</span></div>
+      <div class="row"><span class="lab">OTHER</span><span class="bar"><i style="width:7.3%"></i></span><span class="val">91</span></div>
+      <div class="row"><span class="lab">RUBBER/PLASTIC</span><span class="bar"><i style="width:6.6%"></i></span><span class="val">83</span></div>
+      <div class="row"><span class="lab">BLACK</span><span class="bar"><i style="width:4.6%"></i></span><span class="val">57</span></div>
+      <div class="row"><span class="lab">BRASS</span><span class="bar"><i style="width:3.8%"></i></span><span class="val">48</span></div>
+      <div class="row"><span class="lab">CHEMICAL</span><span class="bar"><i style="width:.6%"></i></span><span class="val">7</span></div>
+      <div class="row"><span class="lab">XYLAN1424</span><span class="bar"><i style="width:.2%"></i></span><span class="val">3</span></div>
+      <div class="row"><span class="lab">ALLUMINUM</span><span class="bar"><i style="width:.2%"></i></span><span class="val">3</span></div>
+    </div>
+    <p><strong>All of these will be shown</strong>, per client direction — no suppression, Allied filters for themselves. <code>CustomList3</code> "BIN LOCATION" holds customer names (HYNDS 245, NORTHPOWER 214, CSP PACIFIC 54); it will be synced but surfaced nowhere yet.</p>
+
+    <h3>1.3 &nbsp;Bill of Materials — a real endpoint exists <span class="tag good">Major find</span></h3>
+    <p>Source: <a href="https://developer.myob.com/api/myob-business-api/v2/inventory/item/bill-materials/">Bill of Materials</a></p>
+    <p><code>GET /Inventory/Item/?$expand=BillOfMaterials</code> returns each item's real recipe — component <code>Item.UID</code>, <code>Item.Number</code> and <code>Quantity</code> — and explicitly covers <strong>auto-build</strong> items. This supplies P1's kit-component and auto-build verification sample, and largely <strong>retires the planned Phase 4 CSV bulk-import</strong>: we pull the real BOM rather than asking Allied to hand-key ~1,000 relationships.</p>
+
+    <h3>1.4 &nbsp;Per-location stock is available</h3>
+    <p><code>LocationDetails</code> returns <code>{ Location, QuantityOnHand }</code> per item. <code>PLAN.md</code> records the per-location split as a documented limitation. <strong>That is wrong; it is exposed.</strong> Not scheduled, but the note should be corrected.</p>
+
+    <h3>1.5 &nbsp;Historical data — what the API will and will not give us</h3>
+    <p><strong>There is no as-at inventory endpoint.</strong> The <a href="https://developer.myob.com/api/myob-business-api/v2/report/">Report collection</a> holds only Payroll Advice, Payroll Category Summary, Tax Code Summary, Transaction Coding Summary, Profit and Loss Summary, NZ GST and Balance Sheet Summary. No inventory report, no stock-on-hand-as-at, no per-item trial balance. <strong>The item master is present-tense only</strong> — no history, no as-at parameter on any quantity or cost field.</p>
+    <p><strong>Transaction history is fully available by date range.</strong> Every transactional endpoint accepts an OData <code>$filter</code> on <code>Date</code>. Our store starts at 2025-08-07 only because <code>SYNC_WINDOW_DAYS</code> is 365 — <strong>a self-imposed limit, not an API one.</strong> This is what makes backdating possible.</p>
+    <p><strong><code>GeneralLedger/JournalTransaction</code> is not a shortcut</strong> — it covers Inventory journals and has a <code>UnitCount</code> field, but posts at account level, not item level.</p>
+    <p><strong>Conclusion:</strong> every historical stock figure must be computed by us from a movement ledger. P1 defines that ledger; P3 defines how far back it is trustworthy.</p>
+
+    <h3>1.6 &nbsp;Stocktakes in MYOB — how they actually appear <span class="tag good">New research</span></h3>
+    <p>Driven by the client's direction. Three findings shape the whole design.</p>
+
+    <div class="evidence">
+      <p class="etitle">Finding 1 — an adjustment records a delta, not a counted quantity</p>
+      <p style="margin:0">Allied's own memo gives it away: <em>"N8S16 COUNT QTY 66 … QTY 919 ADDED AT STOCK"</em>. The line quantity is <strong>+919</strong> (the correction); the counted figure <strong>66</strong> survives only as free text. A count adjustment never hands us an absolute — the counted quantity must be recovered as <strong>the running balance immediately after the adjustment</strong>.</p>
+    </div>
+
+    <p><strong>Finding 2 — stocktakes are rolling and partial, identified only by free-text memo.</strong> Across the two-year window there are 1,314 adjustments; <strong>51</strong> match stocktake wording, covering 1–24 items each. A sample:</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Date</th><th>Memo</th><th>Lines</th></tr></thead>
+        <tbody>
+          <tr><td class="num">2026-08-10</td><td>Gasket Stock Count - GOD</td><td class="num">18</td></tr>
+          <tr><td class="num">2026-06-24</td><td>Gasket Stock Count with Phil - GOD</td><td class="num">24</td></tr>
+          <tr><td class="num">2026-04-30</td><td>Rolling Stocktake - GOD (×3)</td><td class="num">4, 4, 2</td></tr>
+          <tr><td class="num">2026-04-30</td><td>Black Gasket Stock Count - GOD</td><td class="num">16</td></tr>
+          <tr><td class="num">2026-04-30</td><td>Ridgetyte Stock Count - GOD</td><td class="num">10</td></tr>
+          <tr><td class="num">2026-04-20</td><td>Physical Stock Count w/ Paul - GOD</td><td class="num">8</td></tr>
+          <tr><td class="num">2025-09-25</td><td>OCT STOCK TAKE DK PC</td><td class="num">3</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Wording is inconsistent — "Stock Count", "Stocktake", "STOCK TAKE", "COUNT QTY". A regex finds 51 with strict wording but 159 matching "count" loosely, so <strong>memo matching can propose candidates but must never silently define truth.</strong> Allied confirms each one.</p>
+
+    <p><strong>Finding 3 — the ledger is sound, and it proves why anchoring is right.</strong> I tested reconstruction by anchoring on the 12 Aug full sync (3,047 items were accurate at that moment) and rolling movements backwards:</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>As-at date</th><th>Items reconstructing negative</th><th>Worst</th></tr></thead>
+        <tbody>
+          <tr><td class="num">2026-07-31</td><td class="num">2</td><td class="bad">−20</td></tr>
+          <tr><td class="num">2026-06-30</td><td class="num">2</td><td class="bad">−5,080</td></tr>
+          <tr><td class="num">2026-03-31</td><td class="num">1</td><td class="bad">−1</td></tr>
+          <tr><td class="num">2025-12-31</td><td class="num">2</td><td class="bad">−27</td></tr>
+          <tr><td class="num">2025-08-07</td><td class="num">1</td><td class="bad">−1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><strong>Out of 3,047 items, at most 2 fail at any horizon.</strong> Bills, invoices, builds and adjustments account for virtually all stock movement across a full year — our movement model is essentially complete.</p>
+
+    <div class="evidence">
+      <p class="etitle">And the one real failure is the whole argument for the client's model</p>
+      <p style="margin:0"><strong>SPWD20G</strong> (M20 double coil spring washer) holds <strong>27,880</strong> at the anchor but reconstructs to <strong>−5,080</strong> at 30 June. The intervening window contains a stock-count adjustment. <strong>Rolling backwards through a count is invalid</strong> — the count absorbed accumulated drift that no document explains. Rolling <em>forwards from</em> a count is exactly right. That is precisely the model Allied asked for, and it becomes a hard rule in the engine.</p>
+    </div>
+  </section>
+
+  <hr />
+
+  <!-- ================= PART 2 ================= -->
+  <section class="part">
+    <p class="part-label">Part 2</p>
+    <h2>The work</h2>
+
+    <article class="card is-core">
+      <h3><span class="pid">P0</span> Stock quantities are stale. Fix the sync first. <span class="tag good">Shipped 18 Aug</span></h3>
+      <p class="dep">Not in the client's list · Invalidated everything downstream · Went first</p>
+      <p>MYOB does <strong>not</strong> update <code>Item.LastModified</code> when a transaction changes an item's quantity — it moves only when the item record itself is edited. Our sync filters <code>LastModified gt &lt;high-water mark&gt;</code>, so <strong>items whose stock moved are never re-fetched.</strong></p>
+
+      <div class="evidence">
+        <p class="etitle">Evidence from the live file</p>
+        <ul>
+          <li>177 inventoried items had stock movement after 12 Aug. Only <strong>14</strong> had an updated item record — <strong>163 carried stale quantities.</strong></li>
+          <li>2,978 of 3,061 inventoried items share a <code>last_modified</code> of 6–7 May 2026 (a bulk edit).</li>
+          <li>Every incremental run since 12 Aug fetched 2–13 items and <strong>reported success</strong> while the file drifted.</li>
+          <li><code>N12S16</code>: we hold <code>qty_on_hand = 299</code>. A bill for <strong>20,000 units</strong> landed 13 Aug. Real on-hand ≈ 20,299 — <strong>off by 98.5%.</strong></li>
+        </ul>
+      </div>
+
+      <h4>Build</h4>
+      <ol>
+        <li><strong>Always fully refresh the <code>items</code> entity.</strong> Never <code>LastModified</code>-filter it — ~3,100 rows / ~8 pages, a few seconds. Keep incremental filtering for transactional entities, where MYOB does maintain it.</li>
+        <li>Pull <code>$expand=BillOfMaterials</code> in the same pass into a new <code>myob_item_bom</code> table.</li>
+        <li>Persist <code>CustomList1/2/3</code> and <code>LocationDetails</code> as real columns.</li>
+        <li><strong>Staleness guard:</strong> record <code>quantities_as_of</code> per item, surface it on Data &amp; Sync, and raise a visible error if any item's quantities predate the last completed sync.</li>
+        <li><strong>Backfill history</strong> to the depth set in P3 — the ledger cannot pre-date the transaction data.</li>
+      </ol>
+      <h4>Verified</h4>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Acceptance criterion</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td><code>N12S16</code> matches MYOB</td><td>✅ 299 → <strong>18,449</strong></td></tr>
+            <tr><td>31 July reconstruction produces zero negatives</td><td>⚠️ <strong>26 → 2</strong></td></tr>
+            <tr><td>Data &amp; Sync shows per-entity freshness</td><td>✅ 0 stale of 3,061</td></tr>
+            <tr><td>Stocktake anchor candidates for P1</td><td>✅ 28 → <strong>51</strong></td></tr>
+            <tr><td>Two consecutive incremental syncs leave zero stale</td><td>⏳ pending two scheduled runs</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The two remaining negatives are <code>DSSS050NP</code> (−20, built but never invoiced in the window) and <code>DS</code> "MISC. CODE" (−2, one of the dead codes the brief warns about). Both are left to P1 — stocktake anchoring is designed to absorb exactly this, and chasing them here would have meant guessing at movements no document explains.</p>
+      <div class="evidence">
+        <p class="etitle">MYOB's Bill of Materials is real — verified before being trusted</p>
+        <ul>
+          <li><strong>489 of 496</strong> cross-checkable pairs match build-consumed quantities exactly; 493 within 5%.</li>
+          <li>The 3 disagreements favour MYOB — two rest on a <em>single</em> observed build.</li>
+          <li>Covers <strong>299 extra live parents</strong> — kits and bolt packs that never produce a build.</li>
+          <li><code>effective_bom</code> now resolves <strong>user → myob → derived</strong>. Coverage: 558 relationships / 207 parents → <strong>1,392 / 535</strong>.</li>
+        </ul>
+      </div>
+    </article>
+
+    <article class="card is-core">
+      <h3><span class="pid">P1</span> Stocktake-anchored stock ledger <span class="tag good">Rewritten</span></h3>
+      <p class="dep">Depends on P0 · Replaces the previous P1 · This is now the core of the product</p>
+      <p class="quote">"Whenever there is a stock count and they have this in MYOB, that is the reference point. All future numbers should be sales, stock movements, new stock in, etc. adjusted based on that reference point, until the next time they do a stock take."</p>
+      <p>We no longer read <code>QuantityOnHand</code> as truth. We compute it.</p>
+
+      <h4>The math</h4>
+      <p>For item <em>i</em> and date <em>D</em>:</p>
+      <p><strong>Anchor.</strong> <code>A(i,D) = (tₐ, qₐ)</code> — the most recent trusted physical count at or before <em>D</em>.</p>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>#</th><th>Anchor source</th><th>Trust</th><th>How qₐ is obtained</th></tr></thead>
+          <tbody>
+            <tr><td class="num">1</td><td>Allied-entered count (UI or CSV)</td><td>Highest</td><td>Entered directly as an absolute</td></tr>
+            <tr><td class="num">2</td><td>MYOB adjustment confirmed as a stocktake</td><td>High</td><td>Running balance immediately <strong>after</strong> the adjustment</td></tr>
+            <tr><td class="num">3</td><td>No count on record</td><td>Low — labelled</td><td>Epoch baseline back-computed from the earliest reliable snapshot</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p><strong>Movement ledger.</strong> <code>M(i, t₁, t₂]</code> = stock-moving document lines dated in <code>(t₁, t₂]</code>:</p>
+      <pre><code>M = + purchase bill lines   (received; supplier credits negative → net out)
+    − sale invoice lines    (shipped; customer credits negative → add back)
+    ± build lines           (positive = produced, negative = consumed)
+    ± adjustment lines      EXCLUDING the anchor adjustment itself</code></pre>
+      <p>That exclusion matters: the count adjustment is already baked into <code>qₐ</code>. Counting it again double-applies the correction.</p>
+
+      <pre><code>on_hand(i, D)   = qₐ + M(i, tₐ, D]
+
+committed(i, D) = Σ sale-order line qty where
+                    order.date ≤ D
+                    AND still open at D (not invoiced, or invoice.date > D)
+
+free(i, D)      = on_hand(i, D) − committed(i, D)
+incoming(i, D)  = Σ open PO line qty not yet billed at D
+
+divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
+      <p>Committed is derived independently and is unaffected by the anchor — it is forward-looking demand, not stock history. MYOB's <code>QuantityAvailable</code> stays visible as a labelled fact and is <strong>never</strong> used in analysis, because it includes on-order.</p>
+
+      <h4>Hard rules, derived from the data</h4>
+      <ol>
+        <li><strong>Never roll the ledger backwards through a count.</strong> For <code>D &lt; tₐ</code>, fall back to the previous anchor. Proven by <code>SPWD20G</code>.</li>
+        <li><strong>Adjustments are deltas, not counts.</strong> Recovering <code>qₐ</code> needs the running balance at that moment.</li>
+        <li><strong>Exclude the anchor adjustment</strong> from the movement sum.</li>
+        <li><strong>Memo matching proposes, Allied confirms.</strong> No regex silently defines an anchor.</li>
+      </ol>
+
+      <h4>An honest word on "trusting us more than MYOB"</h4>
+      <p>A complete ledger and MYOB compute on-hand the same way — by applying every transaction. So the ledger will usually <strong>agree</strong> with MYOB, and it should. Where it earns more trust is in four specific places, and these are the deliverable:</p>
+      <ol>
+        <li><strong>It is anchored to physical reality.</strong> After each count, accumulated drift is wiped. MYOB carries error forward silently until someone notices.</li>
+        <li><strong>Every number shows its working</strong> — anchor, anchor date, and every document since, as a drillable audit trail. MYOB shows a figure with no derivation.</li>
+        <li><strong>Divergence is detected and priced.</strong> Where we disagree with MYOB we say so, quantify it in dollars, and show which documents explain the gap. This is what will actually catch the double debit/credit PO-receipt artefact the brief warns about.</li>
+        <li><strong>Allied's own counts can override MYOB entirely.</strong> If they counted something and never entered it, our number reflects reality and MYOB's does not.</li>
+      </ol>
+      <p>Worth setting this expectation directly with the client: <strong>the goal is not a different number, it is a number they can audit</strong> — plus the ability to override MYOB with their own counts. Promising "different and better" would be dishonest; "auditable, anchored and correctable" is exactly what we can deliver.</p>
+
+      <h4>Build</h4>
+      <ol>
+        <li><strong><code>platform_stock_count</code></strong> — <code>(item_uid, count_date, counted_qty, source, source_ref, entered_by, note)</code>, source ∈ <code>myob_adjustment | manual | csv_import</code>.</li>
+        <li><strong>Stocktake detection.</strong> Scan adjustment memos for count wording and present candidates on a <strong>"Confirm stocktakes"</strong> screen — date, memo, affected items, delta, resulting post-adjustment balance. Allied confirms or rejects each. Show the free-text counted quantities from the memo as a cross-check hint, displayed but never parsed as authoritative.</li>
+        <li><strong>Manual + CSV count entry</strong>, so Allied can anchor items MYOB never had a count for. This is the path to genuinely beating MYOB.</li>
+        <li><strong>Ledger engine</strong> implementing the math above, materialised per item per day for speed, rebuildable from scratch.</li>
+        <li><strong>Divergence panel</strong> — every item where ledger ≠ MYOB, ranked by dollar impact, audit trail beside it.</li>
+        <li><strong>Audit trail UI</strong> — click any on-hand figure to see the anchor, then every document since with a running balance.</li>
+        <li><strong>Coverage metric</strong> — how many items are anchored to a real count vs a back-computed baseline, and how old each anchor is. This tells Allied where to count next.</li>
+      </ol>
+
+      <h4>Done when</h4>
+      <ul>
+        <li>On hand, committed and free stock are each computed by us, each with a visible derivation.</li>
+        <li>Every item shows its anchor, anchor date, source and days since.</li>
+        <li>The divergence panel is empty, or every entry has a documented explanation.</li>
+        <li>Reconciles against Allied's manual month-end for a sample including open POs (122 available), kit components, auto-built items, supplier credits (8 negative bill lines), and <strong>at least one item covered by a recent rolling stocktake</strong>.</li>
+        <li><code>SPWD20G</code> produces a correct on-hand figure from its post-count anchor.</li>
+      </ul>
+    </article>
+
+    <article class="card">
+      <h3><span class="pid">P2</span> Value stock at average cost <span class="tag good">Cheapest win</span></h3>
+      <p class="dep">Depends on P0 and P1</p>
+      <p>MYOB gives us the answer directly: <code>CurrentValue = QuantityOnHand × AverageCost</code> for 3,058 of 3,061 items. We do not need to derive valuation from POs and sales at all.</p>
+      <ul>
+        <li>Stock value = <code>on_hand × average_cost</code>, where <strong><code>on_hand</code> is now the P1 ledger figure</strong>, not MYOB's.</li>
+        <li>Delete the PO/sales-derived valuation path entirely.</li>
+        <li>Apply consistently: item view, inventory list, aggregate totals, every export.</li>
+        <li>Investigate the 3 items where <code>CurrentValue ≠ OnHand × AverageCost</code>.</li>
+        <li>Reconcile the aggregate against MYOB's average-cost valuation report, expecting a documented difference wherever the ledger diverges.</li>
+      </ul>
+    </article>
+
+    <article class="card">
+      <h3><span class="pid">P3</span> Point-in-time date vs rolling window <span class="tag warn">Hard deadline</span></h3>
+      <p class="dep">Depends on P0 and P1 · Tied to the August inventory run</p>
+
+      <h4>Direct answer: yes, we start saving data</h4>
+      <p>From the moment P3 ships we persist an immutable daily record, so any date from then on is an <strong>exact read</strong> rather than a reconstruction, and any window can be selected over it. Three things get stored:</p>
+      <ol>
+        <li><strong><code>platform_item_snapshot</code></strong> — <code>(as_at_date, item_uid, on_hand, committed, on_order, average_cost)</code>, written once per day per item, never mutated.</li>
+        <li><strong>The full movement ledger</strong> from P1, retained permanently — this is what lets any historical date be recomputed <em>and audited</em>, not merely read.</li>
+        <li><strong><code>platform_stock_count</code></strong> — every anchor, permanently.</li>
+      </ol>
+
+      <h4>Confidence tiers — what is exact and what is not</h4>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Tier</th><th>Date range</th><th>Basis</th><th>Label in UI</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Counted</strong></td><td>Any date after a confirmed stocktake for that item</td><td>Anchor + documents since</td><td>"Anchored to count of <em>dd mmm</em>"</td></tr>
+            <tr><td><strong>Snapshot</strong></td><td>From P3 go-live onward</td><td>Stored daily snapshot</td><td>"Snapshot"</td></tr>
+            <tr><td><strong>Reconstructed</strong></td><td>Before go-live, after the item's last anchor</td><td>Ledger rolled from anchor</td><td>"Reconstructed from <em>n</em> movements"</td></tr>
+            <tr><td><strong>Unreliable</strong></td><td>Before the item's earliest anchor</td><td>Back-computed baseline</td><td>"No count on record — indicative only"</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>31 July 2026 will always be reconstructed</strong> — no snapshot existed then. That is fine and it is accurate, but it must be labelled honestly for the August run.</p>
+
+      <h4>Build</h4>
+      <ol>
+        <li><strong>Two visually and functionally distinct controls:</strong> an <strong>as-at date</strong> (default: most recent month end) governing stock position, and a <strong>rolling window</strong> (default: <strong>6 months</strong>, down from 12) governing sales, consumption and demand.</li>
+        <li>All derived metrics — weekly demand, weeks of cover, below-minimum flags, purchasing suggestions — respect the selected window. Today it is hard-coded at 90/365 days throughout <code>queries.ts</code>; it becomes a parameter.</li>
+        <li><strong>Committed as-at.</strong> Spike first: does <code>Sale/Invoice/Item</code> reference the originating <code>Sale/Order</code>? If yes, an order was open on <em>D</em> when <code>order.date ≤ D &lt; invoice.date</code>. If not, show as-at <em>on hand</em> only, say plainly that committed cannot be reconstructed before snapshots began, and <strong>do not fabricate it</strong>.</li>
+        <li><strong>Average cost as-at</strong> uses today's average cost against historical quantity, explicitly labelled an approximation. MYOB exposes no cost history.</li>
+        <li><strong>Validation control:</strong> check whether <code>Report/BalanceSheetSummary</code> accepts an as-at date — if so it gives an independent inventory-asset control total. 30-minute spike.</li>
+      </ol>
+
+      <h4>Backdating — how far, and how</h4>
+      <p><strong>Recommendation: pull transaction history back to 1 July 2024 (two years).</strong> It spans at least two of Allied's rolling stocktake cycles, so most items get a real anchor rather than a back-computed baseline; it comfortably covers the 6- and 12-month windows; and it is bounded enough to backfill in one run. Going further adds little — anchors older than a cycle are superseded anyway.</p>
+      <ol>
+        <li>Raise <code>SYNC_WINDOW_DAYS</code> and run a <strong>one-off deep sync</strong> with <code>$filter Date ge datetime'2024-07-01'</code> across bills, invoices, sale orders, purchase orders, builds and adjustments. Ordinary paging, just more pages.</li>
+        <li><strong>Back-compute the epoch baseline:</strong> <code>epoch_qty = on_hand(12 Aug 2026 snapshot) − M(i, epoch, 12 Aug 2026]</code>. The 12 Aug full sync is the only point where MYOB quantities are known-good for all 3,047 items, so it is the pivot. Label the result "no count on record — indicative only".</li>
+        <li><strong>Run the ledger forward</strong> from the epoch. Every confirmed stocktake re-anchors and wipes accumulated error, so early-period uncertainty does not propagate past the first count.</li>
+        <li><strong>Re-run the completeness check</strong> over the deeper history. Any item reconstructing negative between two anchors indicates either a missing document type or an unconfirmed stocktake — both worth chasing.</li>
+      </ol>
+
+      <h4>Not building</h4>
+      <p>No prior-year or two-year comparison view. Declined by the client.</p>
+    </article>
+
+    <article class="card">
+      <h3><span class="pid">P4</span> Independent facets plus free-text tags</h3>
+      <p class="dep">Depends on P0 · Simplified by client direction — no suppression work</p>
+      <ol>
+        <li><code>product_type</code> and <code>product_finish</code> as <strong>independent</strong> filterable, sortable columns. Never concatenated. No compound categories anywhere.</li>
+        <li><strong>Show every value that exists</strong>, including ZINC PLATED, OTHER, BRASS and blank. Allied filters for themselves — no hardcoded allow-list, no hidden values, no standing maintenance burden.</li>
+        <li>Blank finish or type renders as an explicit <strong>"(not set)"</strong> facet, so those 113 and 53 items stay reachable rather than vanishing from filters.</li>
+        <li><strong>Free-text tags</strong> — new <code>platform_item_tags (item_uid, tag)</code>, many per item, user-created, filterable. This is also how "never require new item codes" is honoured.</li>
+        <li><strong>Bin location</strong> (<code>CustomList3</code>) synced and stored but <strong>surfaced nowhere yet</strong>, per client direction. Available the moment they want it.</li>
+        <li>Filter state lives in the URL so a view like "stainless washers" is shareable.</li>
+      </ol>
+    </article>
+
+    <article class="card is-critical">
+      <h3><span class="pid">P5 + P6</span> The purchasing cart <span class="tag crit">Largest item</span></h3>
+      <p class="dep">Build as one piece of work · P6 cannot be fixed inside the current design</p>
+      <p>P5's editable quantities need the same persistence P6's split-orders need. <strong>Doing them separately means building the cart twice.</strong></p>
+
+      <h4>Why the current design cannot be patched</h4>
+      <p><code>purchasing()</code> in <code>src/insights/queries.ts:1110</code> is a <strong>stateless recomputation, not a cart</strong>:</p>
+      <div class="evidence">
+        <ul>
+          <li>Line 1121 buckets every item under exactly one key — <code>item.supplierName</code>. <strong>One item, one bucket, by construction.</strong> This is the P6 defect.</li>
+          <li>The key is the supplier <strong>name</strong>, not UID. Same-named suppliers silently merge; everything unresolved collapses into one "No known supplier" group.</li>
+          <li><strong>There is no cart table anywhere.</strong> Nothing persists, so there is nowhere to put an edited quantity, a removal, a supplier choice or a split.</li>
+          <li><code>platform_item_suppliers</code> holds <strong>exactly one row across the entire database</strong> — the feature has never run against real data.</li>
+        </ul>
+      </div>
+
+      <h4>Build — four stages</h4>
+      <p><strong>Stage 1 — fan-out (fixes the defect).</strong> Group by supplier <strong>UID</strong>, emitting one line per (item × tagged supplier), so an item with three suppliers appears in all three buckets. Effective supplier becomes the <em>default selection</em>, not the only option. Adding or removing a supplier reflects immediately.</p>
+      <p><strong>Stage 2 — a real cart.</strong> New <code>platform_purchase_cart (item_uid, supplier_uid, qty, state, updated_at)</code> with <code>state</code> ∈ <code>suggested | edited | removed | selected | split</code>.</p>
+      <p><strong>Stage 3 — double-order protection, all five guard rails.</strong></p>
+      <ol>
+        <li><strong>Badge on every multi-supplier line, in every bucket</strong> — "also under 2 other suppliers", visible without hovering.</li>
+        <li><strong>Linked view</strong> — all suppliers for that item side by side with lead time, last/average cost, on-hand and incoming.</li>
+        <li><strong>Select-one</strong> — pick a supplier, the item drops out of the others in a single action.</li>
+        <li><strong>Explicit split</strong> — total plus per-supplier split shown together, so it reads as intentional.</li>
+        <li><strong>Pre-export check</strong> — flag any item still under multiple suppliers with no explicit split.</li>
+      </ol>
+      <p><strong>Stage 4 — export.</strong> Real <code>.xlsx</code> per supplier, formatted to paste straight into an email, with reasoning columns travelling on each line.</p>
+
+      <h4>Not building</h4>
+      <p><strong>No automatic sending of purchase order emails.</strong> Rejected by the client as too risky.</p>
+
+      <h4>Prerequisite — Allied tags their own items</h4>
+      <p>Per client direction, Allied will tag multi-supplier items themselves. Two consequences: <strong>stages 1–3 cannot be demonstrated until some items are tagged</strong>, so we should ask for a starter set of <strong>~20 items with 2+ suppliers each, ideally including stainless lines</strong>, before the demo. Meanwhile we build a throwaway seeded fixture for our own testing, so development is not blocked waiting on them.</p>
+    </article>
+  </section>
+
+  <hr />
+
+  <!-- ================= PART 3 ================= -->
+  <section class="part">
+    <p class="part-label">Part 3</p>
+    <h2>Sequencing</h2>
+    <pre><code>P0 sync + freshness ──> P1 stocktake-anchored ledger ──┬──> P2 valuation
+   (blocker)              (the new core)               │
+                                                       ├──> P3 as-at + windows  [Aug deadline]
+                                                       │
+                          P4 facets + tags ────────────┴──> P5+P6 cart rebuild</code></pre>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>#</th><th>Item</th><th>Size</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="num">P0</td><td>Sync freshness + BOM + custom fields</td><td class="num">S–M</td><td>Blocks everything. Do immediately.</td></tr>
+          <tr><td class="num">P1</td><td>Stocktake-anchored ledger</td><td class="num"><strong>L</strong></td><td>Was M; the rewrite makes it the core of the product.</td></tr>
+          <tr><td class="num">P2</td><td>Average-cost valuation</td><td class="num">S</td><td>Trivial once P1 supplies on-hand.</td></tr>
+          <tr><td class="num">P3</td><td>As-at + rolling window + backfill</td><td class="num">L</td><td>Snapshots, confidence tiers, 2-year backfill.</td></tr>
+          <tr><td class="num">P4</td><td>Facets + tags</td><td class="num">S–M</td><td>Reduced — no suppression logic.</td></tr>
+          <tr><td class="num">P5+P6</td><td>Cart rebuild</td><td class="num">XL</td><td>New persistence, fan-out, guard rails, xlsx.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="evidence">
+      <p class="etitle">Recommended order</p>
+      <p style="margin:0 0 10px"><strong>P0 → P1 → P2 → P3 → P4 → P5+P6</strong></p>
+      <p style="margin:0 0 10px">P1 now sits directly behind P0 rather than beside P2, because on-hand is an input to valuation, cover, below-minimum flags and every purchasing suggestion. P2 follows immediately and is nearly free. P3 must not slip — it is the only item with a hard external deadline.</p>
+      <p style="margin:0"><strong>Note on P1's new size.</strong> The rewrite moves roughly a week of work into the critical path. If the August run is at risk, the sequencing that protects it is P0 → P1 (ledger + anchors, no UI polish) → P3 (as-at + 6-month window), deferring the divergence panel and audit-trail UI to immediately after. The maths ships; the presentation follows.</p>
+    </div>
+  </section>
+
+  <hr />
+
+  <!-- ================= PART 4 ================= -->
+  <section class="part">
+    <p class="part-label">Part 4</p>
+    <h2>Client decisions</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>#</th><th>Question</th><th>Decision</th></tr></thead>
+        <tbody>
+          <tr><td class="num">1</td><td>Product finish suppression</td><td><strong>No suppression.</strong> Show every value; Allied filters. Removes hardcoding and ongoing maintenance.</td></tr>
+          <tr><td class="num">2</td><td><code>CustomList3</code> bin location</td><td><strong>Sync and store, surface nowhere yet.</strong> Ready when they want it.</td></tr>
+          <tr><td class="num">3</td><td>How far to backdate</td><td><strong>1 July 2024 (two years)</strong>, back-computed from the 12 Aug 2026 pivot, re-anchored at each confirmed stocktake.</td></tr>
+          <tr><td class="num">4</td><td>Multi-supplier tagging</td><td><strong>Allied tags their own.</strong> We need ~20 tagged items before the P5/P6 demo; a throwaway fixture unblocks development meanwhile.</td></tr>
+          <tr><td class="num">5</td><td>"Open POs sometimes netted"</td><td><strong>Dropped.</strong> <code>QuantityAvailable = OnHand − Committed + OnOrder</code> for 3,061 of 3,061 items. No evidence of the reported inconsistency; it was P0 staleness.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Still open</h3>
+    <ol>
+      <li><strong>Confirming historical stocktakes.</strong> Detection proposes candidates, but someone at Allied has to confirm which of the 28 memo matches were genuine counts — and whether any counts happened that never reached MYOB. This is the one input only they can supply, and P1's accuracy depends on it.</li>
+      <li><strong><code>SPWD20G</code> and the second anomaly.</strong> Two items fail the ledger completeness check. We diagnose both during P1; if either turns out to be a document type we do not sync, that becomes a P0 addition.</li>
+    </ol>
+  </section>
+
+  <footer>
+    Allied Fastenings · Inventory Intelligence — priority fix plan v2, 17 Aug 2026.<br />
+    Findings verified against the live MYOB company file and the production database.
+  </footer>
+
+</div>
