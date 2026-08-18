@@ -24,6 +24,13 @@ import {
   suppliersList,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
+import {
+  anchorCoverage,
+  confirmStocktake,
+  itemLedger,
+  positionsAsAt,
+  stocktakeCandidates,
+} from "../insights/ledger.js";
 
 export const insightsRouter = Router();
 
@@ -361,6 +368,79 @@ insightsRouter.delete("/bom", async (req, res) => {
     }
     await removeUserBom(parentUid, componentUid);
     res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+// ---- P1: stocktake-anchored stock ledger --------------------------------
+
+/** Adjustments that look like physical counts, for Allied to confirm or reject. */
+insightsRouter.get("/stocktakes", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({
+      candidates: await stocktakeCandidates(),
+      coverage: await anchorCoverage(),
+    });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/**
+ * Record Allied's decision on one candidate. Detection only proposes — memo
+ * wording is too inconsistent for a regex to define an anchor on its own.
+ */
+insightsRouter.post("/stocktakes/:uid/confirm", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const isStocktake = req.body?.isStocktake;
+    if (typeof isStocktake !== "boolean") {
+      res.status(400).json({ error: "isStocktake (boolean) is required." });
+      return;
+    }
+    const result = await confirmStocktake({
+      adjustmentUid: req.params.uid,
+      isStocktake,
+      confirmedBy: typeof req.body?.confirmedBy === "string" ? req.body.confirmedBy : null,
+      note: typeof req.body?.note === "string" ? req.body.note : null,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** On-hand for every item as at a date, from the anchored ledger. */
+insightsRouter.get("/positions", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const asAt = typeof req.query.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asAt)
+      ? req.query.asAt
+      : new Date().toISOString().slice(0, 10);
+    const positions = await positionsAsAt(asAt);
+    res.json({
+      asAt,
+      counted: positions.filter((p) => p.basis === "counted").length,
+      reconstructed: positions.filter((p) => p.basis === "reconstructed").length,
+      precedesCount: positions.filter((p) => p.basis === "precedes_count").length,
+      diverging: positions.filter((p) => p.divergence != null && Math.abs(p.divergence) > 0.001).length,
+      positions,
+    });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** The audit trail behind one item's figure: anchor, then every movement since. */
+insightsRouter.get("/ledger/:uid", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const asAt = typeof req.query.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asAt)
+      ? req.query.asAt
+      : undefined;
+    res.json(await itemLedger(req.params.uid, asAt));
   } catch (err) {
     send500(res, err);
   }

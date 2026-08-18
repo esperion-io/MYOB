@@ -334,6 +334,93 @@ const DDL: string[] = [
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`,
 
+  /*
+   * ---- P1: stocktake-anchored stock ledger -------------------------------
+   *
+   * Every line that physically moves stock, in one place. This is the ledger's
+   * spine and the audit trail behind every on-hand figure.
+   *
+   * Purchase orders and sale orders are deliberately absent: they are intent,
+   * not movement. Counting them would double-count stock that has not arrived
+   * or has not shipped.
+   *
+   * NOTE ON DATES: MYOB returns transaction dates with no time component (0 of
+   * 1,314 adjustments carry one), so same-day ordering is unknowable. The ledger
+   * therefore treats a physical count as the last word on its date — movements
+   * are applied only from the day *after* an anchor.
+   */
+  `CREATE OR REPLACE VIEW stock_movements AS
+     SELECT h.uid AS doc_uid, 'bill'::text AS kind, h.number AS doc_number,
+            h.date::date AS moved_on, l.item_uid, l.qty::double precision AS qty,
+            h.supplier_name AS party, NULL::text AS memo
+     FROM myob_purchase_bill_lines l
+     JOIN myob_purchase_bills h ON h.uid = l.bill_uid
+     WHERE l.item_uid IS NOT NULL AND l.qty IS NOT NULL
+     UNION ALL
+     SELECT h.uid, 'invoice', h.number, h.date::date, l.item_uid,
+            (-l.qty)::double precision, h.customer_name, NULL
+     FROM myob_sale_invoice_lines l
+     JOIN myob_sale_invoices h ON h.uid = l.invoice_uid
+     WHERE l.item_uid IS NOT NULL AND l.qty IS NOT NULL
+     UNION ALL
+     SELECT h.uid, 'build', h.number, h.date::date, l.item_uid,
+            l.qty::double precision, NULL, h.memo
+     FROM myob_build_lines l
+     JOIN myob_builds h ON h.uid = l.build_uid
+     WHERE l.item_uid IS NOT NULL AND l.qty IS NOT NULL
+     UNION ALL
+     SELECT h.uid, 'adjustment', h.number, h.date::date, l.item_uid,
+            l.qty::double precision, NULL, COALESCE(NULLIF(l.memo, ''), h.memo)
+     FROM myob_adjustment_lines l
+     JOIN myob_adjustments h ON h.uid = l.adjustment_uid
+     WHERE l.item_uid IS NOT NULL AND l.qty IS NOT NULL`,
+
+  /*
+   * Allied's confirmation that a given MYOB adjustment was a physical count.
+   * Detection proposes candidates by memo wording; a person decides. Memo
+   * wording is inconsistent enough ("Stock Count", "STOCK TAKE", "COUNT QTY" —
+   * 51 strict matches vs 159 loose) that a regex must never silently define an
+   * anchor.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_stocktake_confirmation (
+    adjustment_uid TEXT PRIMARY KEY,
+    is_stocktake BOOLEAN NOT NULL,
+    confirmed_by TEXT,
+    confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    note TEXT
+  )`,
+
+  /*
+   * Physical counts — the reference points the whole ledger hangs off.
+   *
+   * `counted_qty` is the stock level the count asserted. For a count Allied
+   * types in, that is the number they counted. For one recovered from a MYOB
+   * adjustment it is the running balance immediately after that adjustment,
+   * because a MYOB adjustment records a *delta*, never the counted figure
+   * (their own memo: "N8S16 COUNT QTY 66 … QTY 919 ADDED").
+   *
+   * `drift_qty` is what the count corrected — how far MYOB had drifted from
+   * physical reality at that moment. It is the single most useful number here
+   * and is only knowable at a count.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_stock_count (
+    id BIGSERIAL PRIMARY KEY,
+    item_uid TEXT NOT NULL,
+    count_date DATE NOT NULL,
+    counted_qty DOUBLE PRECISION NOT NULL,
+    drift_qty DOUBLE PRECISION,
+    source TEXT NOT NULL,
+    source_ref TEXT,
+    entered_by TEXT,
+    note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_count_unique
+     ON platform_stock_count (item_uid, count_date, COALESCE(source_ref, ''))`,
+  `CREATE INDEX IF NOT EXISTS idx_stock_count_item_date
+     ON platform_stock_count (item_uid, count_date DESC)`,
+
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_bill_lines_item ON myob_purchase_bill_lines (item_uid)`,
