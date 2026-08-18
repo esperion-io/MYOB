@@ -65,7 +65,7 @@ This is new research, driven by the client's direction. Two findings shape the w
 
 **Finding 1 — a MYOB adjustment records a delta, not a counted quantity.** Allied's own memos give it away: *"N8S16 COUNT QTY 66 … QTY 919 ADDED AT STOCK"*. The line quantity is `+919` (the correction), while the counted figure `66` survives only as free text. So a count adjustment never hands us an absolute number — the counted quantity has to be recovered as *the running balance immediately after the adjustment*.
 
-**Finding 2 — stocktakes are rolling and partial, not company-wide, and are identified only by free-text memo.** Across 12 months there are 602 adjustments; 28 have memos matching stocktake wording, covering 1–24 items each:
+**Finding 2 — stocktakes are rolling and partial, not company-wide, and are identified only by free-text memo.** Across the two-year window there are 1,314 adjustments; **51** have memos matching stocktake wording, covering 1–24 items each. A sample:
 
 | Date | Memo | Lines |
 |---|---|---|
@@ -77,7 +77,7 @@ This is new research, driven by the client's direction. Two findings shape the w
 | 2026-04-20 | Physical Stock Count w/ Paul - GOD | 8 |
 | 2025-09-25 | OCT STOCK TAKE DK PC | 3 |
 
-Wording is inconsistent — "Stock Count", "Stocktake", "STOCK TAKE", "COUNT QTY". A regex finds 28 with strict wording but 79 if you match "count" loosely, so **memo matching can propose candidates but must never silently define truth.** Allied confirms each one.
+Wording is inconsistent — "Stock Count", "Stocktake", "STOCK TAKE", "COUNT QTY". A regex finds 51 with strict wording but 159 if you match "count" loosely, so **memo matching can propose candidates but must never silently define truth.** Allied confirms each one.
 
 **Finding 3 — the ledger is sound, and it proves why anchoring is right.**
 
@@ -145,15 +145,16 @@ re-fetched.**
 | Acceptance criterion | Result |
 |---|---|
 | `N12S16` matches MYOB | ✅ 299 → **18,449** |
-| 31 July reconstruction produces zero negatives | ⚠️ **26 → 4** |
+| 31 July reconstruction produces zero negatives | ⚠️ **26 → 2** |
 | Data & Sync shows a per-entity freshness figure | ✅ |
+| Stocktake anchor candidates available to P1 | ✅ 28 → **51** |
 | Two consecutive incremental syncs leave zero stale items | ⏳ pending — needs two scheduled runs to elapse |
 
-The 4 remaining reconstruction negatives are small and two are dead codes — item
-`4` "BOLT AND NUT" (−8) and `DS` "MISC. CODE" (−2), the backlog the brief warns
-about — plus `DSSS050NP` (−20) and `BP1665G` (−5). They are left to P1: stocktake
-anchoring is designed to absorb exactly this, and chasing them in P0 would have
-meant guessing at movements the documents do not explain.
+Completing the two-year backfill took the 31 July reconstruction from 26
+negatives to **2**: `DSSS050NP` (−20, built but never invoiced in the window) and
+`DS` "MISC. CODE" (−2, one of the dead codes the brief warns about). Both are left
+to P1 — stocktake anchoring is designed to absorb exactly this, and chasing them
+in P0 would have meant guessing at movements no document explains.
 
 #### MYOB's Bill of Materials is real, and is now the primary recipe source
 
@@ -174,7 +175,7 @@ build transactions before being trusted:
 `effective_bom` now resolves **user → myob → derived**. A hand-entered row is a
 deliberate correction and must not be silently overwritten by a sync; MYOB's
 stated recipe beats an inference drawn from builds. Coverage went from 558
-relationships / 207 parents to **1,343 / 506**.
+relationships / 207 parents to **1,392 / 535**.
 
 Per-pair precedence was checked for noise: 25 derived rows survive on 17 parents
 that also have a MYOB recipe, and they are legitimate — `BP24100G` + `WR24503G`
