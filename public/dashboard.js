@@ -504,6 +504,7 @@ function route() {
     products: renderProducts,
     suppliers: renderSuppliers,
     purchasing: renderPurchasing,
+    counts: renderCounts,
     data: renderData,
   };
   (views[view] || renderOverview)().catch((err) => {
@@ -1374,6 +1375,11 @@ async function renderItem(uid) {
           }
         </section>
 
+        <section class="panel" id="item-ledger">
+          <h2>How this stock figure was reached</h2>
+          <p class="loading">Loading the trail…</p>
+        </section>
+
         <section class="panel" id="item-suppliers">
           <h2>Suppliers for this product</h2>
           <p class="loading">Loading suppliers…</p>
@@ -1409,6 +1415,7 @@ async function renderItem(uid) {
       </div>
     </div>`;
 
+  loadItemLedger(uid);
   loadItemSuppliers(uid);
 }
 
@@ -2263,3 +2270,336 @@ if (urlKey) {
 route();
 pollSyncChip();
 setInterval(pollSyncChip, 60_000);
+
+/* ================= Stock counts (P1) =================
+ *
+ * One page for the three things Allied do with physical counts:
+ *   1. confirm which MYOB adjustments were genuinely stocktakes,
+ *   2. enter a count for a single item,
+ *   3. paste a whole counting sheet in.
+ *
+ * A confirmed or entered count becomes the anchor the whole ledger hangs off,
+ * so this page is where the platform's numbers stop simply agreeing with MYOB.
+ */
+
+const COUNT_SOURCE_LABEL = {
+  opening_balance: "Opening balance",
+  myob_adjustment: "Stocktake in MYOB",
+  manual: "Entered by Allied",
+  csv_import: "Imported by Allied",
+};
+
+async function renderCounts() {
+  main.innerHTML = '<p class="loading">Loading stock counts…</p>';
+  const d = await fetchJson("/api/insights/stocktakes");
+  const cov = d.coverage ?? {};
+  const anchored = Number(cov.anchored_items ?? 0);
+  const total = Number(cov.inventoried_items ?? 0);
+  const realCounts = d.candidates.filter((c) => c.confirmed === true).length;
+  const pending = d.candidates.filter((c) => c.confirmed == null);
+
+  main.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Stock counts</h1>
+        <p class="page-sub">A physical count is the reference point every stock figure is built from.
+        Confirm the counts already in MYOB, or record one Allied has just done.</p>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><span class="k-label">Items anchored to a real count</span><span class="k-value">${qty(realCounts ? cov.drift?.counted_lines ?? 0 : 0)}</span></div>
+      <div class="kpi"><span class="k-label">Still on the opening balance</span><span class="k-value">${qty(anchored - (cov.drift?.counted_lines ?? 0))}</span></div>
+      <div class="kpi ${pending.length ? "warn" : ""}"><span class="k-label">Counts awaiting confirmation</span><span class="k-value">${qty(pending.length)}</span></div>
+      <div class="kpi"><span class="k-label">Stocked items in total</span><span class="k-value">${qty(total)}</span></div>
+    </div>
+
+    <div class="two-col">
+      <section class="panel">
+        <h2>Record a count</h2>
+        <p class="hint">Enter what was physically counted. From that moment the item's stock figure is
+        driven by your count plus the movements since — not by MYOB.</p>
+        <div class="count-form">
+          <label>Item
+            <input type="search" id="count-item" placeholder="Type an item number…" autocomplete="off" />
+          </label>
+          <div class="picker" id="count-item-list" hidden></div>
+          <label>Counted quantity
+            <input type="number" id="count-qty" step="any" min="0" placeholder="e.g. 1250" />
+          </label>
+          <label>Count date
+            <input type="date" id="count-date" value="${new Date().toISOString().slice(0, 10)}" />
+          </label>
+          <label>Note (optional)
+            <input type="text" id="count-note" placeholder="Counted by…" />
+          </label>
+          <button class="btn primary" id="count-save" disabled>Record count</button>
+          <p id="count-result" class="hint"></p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Paste a counting sheet</h2>
+        <p class="hint">One row per item: <code>item number, counted quantity</code>. Everything is checked
+        before anything is saved, so a mistake halfway down cannot leave the ledger half-updated.</p>
+        <textarea id="count-bulk" rows="8" placeholder="BN1675G, 420&#10;N12S16, 18449&#10;WR16503G, 31000"></textarea>
+        <div class="form-row">
+          <label>Count date <input type="date" id="count-bulk-date" value="${new Date().toISOString().slice(0, 10)}" /></label>
+          <button class="btn" id="count-bulk-check">Check</button>
+          <button class="btn primary" id="count-bulk-save" disabled>Save counts</button>
+        </div>
+        <div id="count-bulk-result"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h2>Stocktakes found in MYOB</h2>
+      <p class="hint">Detected by memo wording, which Allied write inconsistently — so these are
+      <strong>suggestions, not conclusions</strong>. Confirm the ones that were genuine physical counts and
+      they become anchors; reject the ones that were something else. "Corrected" is the net change the
+      count made, after offsetting lines on the same item cancel out.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Date</th><th>Memo</th><th class="num">Items</th><th class="num">Corrected</th>
+          <th class="num">Value</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          ${d.candidates.map((c) => `<tr data-adj="${esc(c.adjustmentUid)}">
+            <td>${dateFmt(c.date)}</td>
+            <td>${esc((c.memo ?? "").replace(/\s+/g, " ").slice(0, 70))}
+              ${c.strictMatch ? "" : '<br /><span class="badge idle" title="Matched only a loose keyword — check carefully">weak match</span>'}</td>
+            <td class="num">${qty(c.itemCount)}${c.itemsNetZero ? `<br /><span class="muted" title="Lines that cancel out entirely">${c.itemsNetZero} net zero</span>` : ""}</td>
+            <td class="num">${qty(Math.round(c.unitsCorrected))}</td>
+            <td class="num">${money(c.valueCorrected)}</td>
+            <td>${
+              c.confirmed === true
+                ? '<span class="badge ok">Confirmed</span>'
+                : c.confirmed === false
+                  ? '<span class="badge idle">Not a count</span>'
+                  : '<span class="badge warn">Needs review</span>'
+            }</td>
+            <td class="nowrap">
+              <button class="btn small st-yes" ${c.confirmed === true ? "disabled" : ""}>Was a count</button>
+              <button class="btn small st-no" ${c.confirmed === false ? "disabled" : ""}>Wasn't</button>
+            </td>
+          </tr>`).join("")}
+        </tbody>
+      </table></div>
+    </section>`;
+
+  wireCountForm();
+  wireBulkCounts();
+  wireStocktakeButtons();
+}
+
+/** Single-item count entry, with a type-ahead so the item number is never guessed. */
+function wireCountForm() {
+  const input = document.getElementById("count-item");
+  const list = document.getElementById("count-item-list");
+  const save = document.getElementById("count-save");
+  const result = document.getElementById("count-result");
+  let chosen = null;
+
+  const refresh = () => { save.disabled = !chosen || document.getElementById("count-qty").value === ""; };
+  document.getElementById("count-qty").addEventListener("input", refresh);
+
+  let timer;
+  input.addEventListener("input", () => {
+    chosen = null; refresh();
+    clearTimeout(timer);
+    const term = input.value.trim();
+    if (term.length < 2) { list.hidden = true; return; }
+    timer = setTimeout(async () => {
+      try {
+        const r = await fetchJson(`/api/insights/items?q=${encodeURIComponent(term)}&limit=8`);
+        const rows = r.items ?? r.rows ?? [];
+        list.hidden = false;
+        list.innerHTML = rows.length
+          ? rows.map((i) => `<button type="button" class="picker-row" data-uid="${esc(i.uid)}" data-num="${esc(i.number)}">
+               <strong>${esc(i.number)}</strong> <span class="muted">${esc(i.name ?? "")}</span>
+               <span class="muted"> · we hold ${qty(i.qtyOnHand)}</span></button>`).join("")
+          : '<p class="muted picker-empty">No item matches that.</p>';
+        list.querySelectorAll(".picker-row").forEach((b) =>
+          b.addEventListener("click", () => {
+            chosen = { uid: b.dataset.uid, number: b.dataset.num };
+            input.value = b.dataset.num;
+            list.hidden = true;
+            refresh();
+          }));
+      } catch { list.hidden = true; }
+    }, 200);
+  });
+
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    result.textContent = "Saving…";
+    try {
+      const r = await fetchJson("/api/insights/counts", {
+        method: "POST",
+        body: JSON.stringify({
+          itemUid: chosen.uid,
+          countedQty: Number(document.getElementById("count-qty").value),
+          countDate: document.getElementById("count-date").value,
+          note: document.getElementById("count-note").value || null,
+          enteredBy: "dashboard",
+        }),
+      });
+      result.innerHTML = r.drift == null
+        ? `Count recorded for <strong>${esc(chosen.number)}</strong>.`
+        : `Count recorded for <strong>${esc(chosen.number)}</strong>. It corrected our figure by
+           <strong>${qty(r.drift)}</strong> — that is how far the books had drifted from the shelf.`;
+    } catch (err) {
+      result.textContent = `Could not save: ${err.message}`;
+    }
+    save.disabled = false;
+  });
+}
+
+/** Bulk entry: validate first, save only once the user has seen the result. */
+function wireBulkCounts() {
+  const box = document.getElementById("count-bulk");
+  const out = document.getElementById("count-bulk-result");
+  const saveBtn = document.getElementById("count-bulk-save");
+
+  const parse = () =>
+    box.value.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
+      const [num, q] = line.split(/[,\t]/).map((x) => (x ?? "").trim());
+      return { itemNumber: num, countedQty: Number(q) };
+    });
+
+  const post = async (dryRun) =>
+    fetchJson("/api/insights/counts/import", {
+      method: "POST",
+      body: JSON.stringify({
+        rows: parse(),
+        countDate: document.getElementById("count-bulk-date").value,
+        enteredBy: "dashboard",
+        dryRun,
+      }),
+    });
+
+  const show = (r, saved) => {
+    saveBtn.disabled = !r.accepted.length;
+    out.innerHTML = `
+      <p class="hint">${saved ? `Saved <strong>${qty(r.written)}</strong> count(s).` : `<strong>${qty(r.accepted.length)}</strong> row(s) ready, <strong>${qty(r.rejected.length)}</strong> rejected.`}</p>
+      ${r.rejected.length ? `<div class="notice warn"><ul>${r.rejected.map((x) => `<li><strong>${esc(x.itemNumber || "(blank)")}</strong> — ${esc(x.reason)}</li>`).join("")}</ul></div>` : ""}
+      ${saved && r.accepted.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th class="num">Counted</th><th class="num">Corrected by</th></tr></thead>
+        <tbody>${r.accepted.map((a) => `<tr><td>${esc(a.itemNumber)}</td><td class="num">${qty(a.countedQty)}</td>
+          <td class="num">${a.drift == null ? "—" : qty(a.drift)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+  };
+
+  document.getElementById("count-bulk-check").addEventListener("click", async () => {
+    out.innerHTML = '<p class="loading">Checking…</p>';
+    try { show(await post(true), false); } catch (e) { out.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+  });
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    out.innerHTML = '<p class="loading">Saving…</p>';
+    try { show(await post(false), true); } catch (e) { out.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+  });
+}
+
+/** Confirm or reject a detected stocktake; the ledger re-anchors immediately. */
+function wireStocktakeButtons() {
+  document.querySelectorAll("tr[data-adj]").forEach((tr) => {
+    const send = async (isStocktake) => {
+      tr.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      try {
+        await fetchJson(`/api/insights/stocktakes/${encodeURIComponent(tr.dataset.adj)}/confirm`, {
+          method: "POST",
+          body: JSON.stringify({ isStocktake, confirmedBy: "dashboard" }),
+        });
+        renderCounts();
+      } catch (err) {
+        alert(err.message);
+        tr.querySelectorAll("button").forEach((b) => (b.disabled = false));
+      }
+    };
+    tr.querySelector(".st-yes").addEventListener("click", () => send(true));
+    tr.querySelector(".st-no").addEventListener("click", () => send(false));
+  });
+}
+
+/* ---------- the audit trail behind one item's stock figure ---------- */
+
+/**
+ * The full working: the anchor this item's stock is measured from, then every
+ * document since with a running balance. The client is auditing these figures
+ * against their own spreadsheets, so this is the page that has to convince them
+ * — a number they cannot trace is a number they will not act on.
+ */
+async function loadItemLedger(uid) {
+  const panel = document.getElementById("item-ledger");
+  if (!panel) return;
+  try {
+    const d = await fetchJson(`/api/insights/ledger/${encodeURIComponent(uid)}`);
+    if (!d.anchor) {
+      panel.innerHTML = `<h2>How this stock figure was reached</h2>
+        <p class="muted">No reference point recorded for this item yet, so its figure cannot be traced.
+        Record a count on the <a href="#/counts">Stock counts</a> page to anchor it.</p>`;
+      return;
+    }
+    const src = COUNT_SOURCE_LABEL[d.anchor.source] ?? d.anchor.source;
+    const agrees = d.myobOnHand != null && Math.abs((d.closing ?? 0) - d.myobOnHand) < 0.001;
+    const rows = d.entries.slice(-40);
+
+    panel.innerHTML = `
+      <h2>How this stock figure was reached</h2>
+      <p class="hint">Everything below is computed here from Allied's own documents. MYOB's own figure is
+      shown only so any disagreement is visible.</p>
+
+      <div class="ledger-head">
+        <div><span class="k-label">Reference point</span>
+          <span class="k-value">${qty(d.anchor.qty)}</span>
+          <span class="muted">${esc(src)} · ${dateFmt(d.anchor.date)}</span></div>
+        <div><span class="k-label">Movements since</span>
+          <span class="k-value">${d.entries.length ? qty(d.entries.reduce((a, e) => a + e.qty, 0)) : "0"}</span>
+          <span class="muted">${qty(d.entries.length)} document(s)</span></div>
+        <div><span class="k-label">Our stock figure</span>
+          <span class="k-value">${qty(d.closing)}</span>
+          <span class="muted">${
+            agrees
+              ? "MYOB agrees"
+              : `MYOB says ${qty(d.myobOnHand)} — a difference of ${qty((d.closing ?? 0) - (d.myobOnHand ?? 0))}`
+          }</span></div>
+      </div>
+      ${
+        d.anchor.drift != null && Math.abs(d.anchor.drift) > 0.001
+          ? `<div class="notice warn">When this count was taken it corrected the books by
+             <strong>${qty(d.anchor.drift)}</strong> — the stock on the shelf did not match what was recorded.</div>`
+          : ""
+      }
+
+      ${
+        rows.length
+          ? `<div class="table-wrap"><table>
+              <thead><tr><th>Date</th><th>Movement</th><th>Reference</th><th class="num">Change</th><th class="num">Running total</th></tr></thead>
+              <tbody>
+                <tr class="ledger-anchor"><td>${dateFmt(d.anchor.date)}</td>
+                  <td colspan="2"><strong>${esc(src)}</strong></td>
+                  <td class="num">—</td><td class="num"><strong>${qty(d.anchor.qty)}</strong></td></tr>
+                ${rows.map((e) => `<tr>
+                  <td>${dateFmt(e.date)}</td>
+                  <td>${esc(LEDGER_KIND_LABEL[e.kind] ?? e.kind)}</td>
+                  <td class="muted">${esc(e.docNumber ?? "")}${e.party ? ` · ${esc(e.party)}` : ""}${
+                    e.memo ? `<br /><span class="muted">${esc(String(e.memo).replace(/\s+/g, " ").slice(0, 60))}</span>` : ""
+                  }</td>
+                  <td class="num ${e.qty < 0 ? "alert" : ""}">${e.qty > 0 ? "+" : ""}${qty(e.qty)}</td>
+                  <td class="num">${qty(e.balance)}</td>
+                </tr>`).join("")}
+              </tbody>
+            </table></div>
+            ${d.entries.length > rows.length ? `<p class="hint">Showing the most recent ${rows.length} of ${qty(d.entries.length)} movements.</p>` : ""}`
+          : '<p class="muted">Nothing has moved since the reference point.</p>'
+      }`;
+  } catch (err) {
+    panel.innerHTML = `<h2>How this stock figure was reached</h2>
+      <p class="muted">Could not load the trail: ${esc(err.message)}</p>`;
+  }
+}
+
+const LEDGER_KIND_LABEL = {
+  bill: "Received (supplier bill)",
+  invoice: "Shipped (sales invoice)",
+  build: "Build",
+  adjustment: "Adjustment",
+};

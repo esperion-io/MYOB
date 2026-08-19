@@ -679,3 +679,44 @@ tr.expand-row:hover > td { background: #fbf9f6; }
   .side-foot { margin: 0; }
   .two-col { grid-template-columns: 1fr; }
 }
+
+/* ---------- stock counts + ledger trail (P1) ---------- */
+
+.count-form { display: grid; gap: 0.7rem; }
+.count-form label { display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); }
+.count-form input,
+#count-bulk,
+.form-row input[type="date"] {
+  font: inherit; padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--ink); width: 100%;
+}
+#count-bulk { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; resize: vertical; }
+.count-form .btn { justify-self: start; }
+.form-row {
+  display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: end; margin-top: 0.6rem;
+}
+.form-row label { display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); }
+.nowrap { white-space: nowrap; }
+.nowrap .btn + .btn { margin-left: 0.35rem; }
+
+/* Running-balance trail: the anchor row is the thing everything else counts from. */
+.ledger-head {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem; margin: 0 0 1rem;
+}
+.ledger-head > div {
+  display: grid; gap: 0.15rem;
+  padding: 0.7rem 0.85rem; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2, var(--surface));
+}
+.ledger-head .k-value { font-size: 1.25rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.ledger-head .muted { font-size: 0.78rem; }
+tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weight: 600; }
+
+.picker-row {
+  display: block; width: 100%; text-align: left; font: inherit;
+  padding: 0.45rem 0.6rem; border: 0; border-bottom: 1px solid var(--line);
+  background: none; color: inherit; cursor: pointer;
+}
+.picker-row:hover, .picker-row:focus-visible { background: var(--surface-2, rgba(0,0,0,0.04)); }
