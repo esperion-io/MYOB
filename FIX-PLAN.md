@@ -1,6 +1,6 @@
 # Allied Priority Fix Plan — v2
 
-**Status:** P0 shipped 18 Aug 2026. P1–P6 proposed. Revised after client direction on stocktake-anchored stock maths.
+**Status:** P0 shipped 18 Aug 2026. P1 shipped 19 Aug 2026. P2–P6 proposed. Revised after client direction on stocktake-anchored stock maths.
 
 **What changed in v2**
 
@@ -224,7 +224,7 @@ leaving adjustments a year short). Stop the watcher before running a full sync.
 
 ---
 
-### P1 — Stocktake-anchored stock ledger 🔴 REWRITTEN
+### P1 — Stocktake-anchored stock ledger ✅ SHIPPED 19 Aug 2026
 
 **Client direction:** *"whenever there is a stock count and they have this in MYOB, that is the reference point. All future numbers should be sales, stock movements, new stock in, etc. adjusted based on that reference point, until the next time they do a stock take."*
 
@@ -315,7 +315,32 @@ We should set this expectation with the client directly: **the goal is not a dif
 6. **Audit trail UI** — click any on-hand figure to see: anchor (source, date, qty), then every document since with running balance.
 7. **Coverage metric** — how many items are anchored to a real count vs a back-computed baseline, and how old each anchor is. This tells Allied where to count next, and is a genuinely useful output in its own right.
 
-#### 2.5 Done when
+#### 2.5 Shipped — what is live
+
+- **The ledger drives the product.** `queries.ts` reads no MYOB quantities;
+  everything flows through the `item_position` view. A build-failing guard
+  (`scripts/check-ledger-boundary.mjs`) stops anything reaching back to MYOB's
+  raw figures — it caught a real leftover on its first run.
+- **On hand, committed, free, on order and available are all computed here.**
+  Committed already disagrees with MYOB on **27 items, $2,402 at stake**;
+  `WR16503G` carries 5,000 units on open orders that MYOB reports as 0.
+- **Stock counts page** — confirm detected stocktakes (54 candidates), enter a
+  single count, or paste a counting sheet. Verified: confirming one gasket
+  stocktake created 18 anchors, each carrying its drift.
+- **Audit trail on every item** — the anchor, then every document since with a
+  running balance, MYOB's figure beside it.
+- **Divergence panel** on Data & Sync, priced by what the gap is worth.
+- **Daily position snapshots**, immutable, written at the end of every sync.
+- **`docs/myob-field-reference.md`** — the written derivation reference.
+
+**One consequence worth knowing.** The conversion balance is dated at cutover
+(18 Aug 2026), so it outranks every stocktake recorded before it. Confirming
+historical stocktakes therefore improves *historical* answers and drift
+insight, but does not move today's figure. Only counts taken from now on change
+the current number — which is the intended behaviour, not a limitation to work
+around.
+
+#### Original acceptance criteria
 
 - On hand, committed and free stock are each computed by us, each with a visible derivation.
 - Every item shows its anchor, anchor date, anchor source, and days since.
