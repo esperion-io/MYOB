@@ -205,12 +205,12 @@
 <div class="wrap">
 
   <header class="masthead">
-    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v2.1</p>
+    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v2.2</p>
     <h1>Allied Priority Fix Plan</h1>
     <p class="standfirst">Implementation plan for the six client priorities, rebuilt around a stocktake-anchored stock ledger — plus one blocking defect found while verifying the numbers.</p>
     <div class="meta">
-      <span><b>Revised</b> 18 Aug 2026</span>
-      <span><b>Status</b> P0 shipped · P1–P6 proposed</span>
+      <span><b>Revised</b> 19 Aug 2026</span>
+      <span><b>Status</b> P0, P1, P2 shipped · P3–P6 proposed</span>
       <span><b>Verified against</b> Live MYOB file, 3,100 items</span>
     </div>
   </header>
@@ -221,7 +221,9 @@
       <li><strong>P1 is rewritten.</strong> Stock on hand now comes from a stocktake-anchored ledger, not MYOB's <code>QuantityOnHand</code>. This is the client's direction, and the data supports it.</li>
       <li><strong>P3 is clarified</strong> — yes, we start persisting data now. The plan states exactly which dates will be exact, which reconstructed, and which unreliable.</li>
       <li><strong>Client answers folded in</strong> — no finish suppression, bin location synced but hidden, Allied tags their own suppliers, the "open POs netted" item dropped.</li>
-      <li><strong>P0 has shipped.</strong> The sync no longer serves stale quantities, and MYOB's Bill of Materials was verified as genuinely maintained and promoted to the primary recipe source.</li>
+      <li><strong>P0 shipped 18 Aug.</strong> The sync no longer serves stale quantities, and MYOB's Bill of Materials was verified as genuinely maintained and promoted to the primary recipe source.</li>
+      <li><strong>P1 shipped 19 Aug.</strong> On hand, committed, free, on order and available are all computed here from Allied's own documents. Committed already disagrees with MYOB on 27 items, $2,402 at stake. Counts, divergence and a full audit trail are on screen.</li>
+      <li><strong>P2 shipped 19 Aug.</strong> Stock value is our on hand × average cost — which caught a MYOB valuation error of exactly 100×: SW101616G4 recorded at $3.36 instead of $336.00.</li>
     </ul>
   </div>
 
@@ -406,7 +408,7 @@
     </article>
 
     <article class="card is-core">
-      <h3><span class="pid">P1</span> Stocktake-anchored stock ledger <span class="tag good">Rewritten</span></h3>
+      <h3><span class="pid">P1</span> Stocktake-anchored stock ledger <span class="tag good">Shipped 19 Aug</span></h3>
       <p class="dep">Depends on P0 · Replaces the previous P1 · This is now the core of the product</p>
       <p class="quote">"Whenever there is a stock count and they have this in MYOB, that is the reference point. All future numbers should be sales, stock movements, new stock in, etc. adjusted based on that reference point, until the next time they do a stock take."</p>
       <p>We no longer read <code>QuantityOnHand</code> as truth. We compute it.</p>
@@ -484,8 +486,8 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
     </article>
 
     <article class="card">
-      <h3><span class="pid">P2</span> Value stock at average cost <span class="tag good">Cheapest win</span></h3>
-      <p class="dep">Depends on P0 and P1</p>
+      <h3><span class="pid">P2</span> Value stock at average cost <span class="tag good">Shipped 19 Aug</span></h3>
+      <p class="dep">Depended on P0 and P1 · Caught a real MYOB valuation error</p>
       <p>MYOB gives us the answer directly: <code>CurrentValue = QuantityOnHand × AverageCost</code> for 3,058 of 3,061 items. We do not need to derive valuation from POs and sales at all.</p>
       <ul>
         <li>Stock value = <code>on_hand × average_cost</code>, where <strong><code>on_hand</code> is now the P1 ledger figure</strong>, not MYOB's.</li>
