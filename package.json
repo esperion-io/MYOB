@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "node scripts/check-ledger-boundary.mjs && tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:ledger": "node scripts/check-ledger-boundary.mjs"
   },
   "engines": {
     "node": ">=20"

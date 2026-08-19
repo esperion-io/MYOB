@@ -462,9 +462,26 @@ export async function establishOpeningBalance(params?: {
      GROUP BY count_date ORDER BY count_date LIMIT 1`,
   );
   if (existing.rows[0] && !params?.force) {
+    /*
+     * The cutover has happened, but items created in MYOB since then have no
+     * anchor at all and would drop out of every position query. Give each of
+     * them its own opening balance dated today. Existing anchors are untouched:
+     * re-dating them would rewrite history.
+     */
+    const topUp = await pool.query(
+      `INSERT INTO platform_stock_count
+         (item_uid, count_date, counted_qty, drift_qty, source, source_ref, entered_by, note)
+       SELECT i.uid, CURRENT_DATE, COALESCE(i.qty_on_hand, 0), NULL,
+              'opening_balance', NULL, 'system',
+              'Opening balance for an item first seen after cutover.'
+       FROM myob_items i
+       WHERE i.is_inventoried
+         AND NOT EXISTS (SELECT 1 FROM platform_stock_count c WHERE c.item_uid = i.uid)
+       ON CONFLICT (item_uid, count_date, COALESCE(source_ref, '')) DO NOTHING`,
+    );
     return {
       asOf: existing.rows[0].d as string,
-      itemsAnchored: existing.rows[0].n as number,
+      itemsAnchored: (existing.rows[0].n as number) + (topUp.rowCount ?? 0),
       alreadyExisted: true,
     };
   }
@@ -713,4 +730,170 @@ export async function snapshotDates(): Promise<
     items: x.items as number,
     stockValue: x.stock_value as number,
   }));
+}
+
+
+/**
+ * Record a physical count Allied performed themselves.
+ *
+ * This is the mechanism by which the platform's numbers stop agreeing with
+ * MYOB: a count entered here supersedes the conversion balance and every
+ * MYOB-sourced anchor before it, so on hand is driven by what Allied actually
+ * counted rather than by what MYOB believes.
+ *
+ * `drift_qty` records how far the platform's own figure was out at that moment,
+ * which is the honest measure of how much the number needed correcting.
+ */
+export async function recordManualCount(params: {
+  itemUid: string;
+  countDate: string;
+  countedQty: number;
+  enteredBy?: string | null;
+  note?: string | null;
+  source?: "manual" | "csv_import";
+}): Promise<{ itemUid: string; countDate: string; countedQty: number; drift: number | null }> {
+  await ensureInsightsSchema();
+  const pool = getPool();
+
+  // What we believed on that date, before the count lands.
+  const before = await pool.query(
+    `SELECT on_hand FROM (
+       SELECT (sc.counted_qty + COALESCE((
+         SELECT SUM(m.qty) FROM stock_movements m
+         WHERE m.item_uid = sc.item_uid
+           AND m.moved_on > sc.count_date AND m.moved_on <= $2::date
+       ), 0)) AS on_hand
+       FROM platform_stock_count sc
+       WHERE sc.item_uid = $1 AND sc.count_date <= $2::date
+       ORDER BY sc.count_date DESC, (sc.source <> 'opening_balance') DESC, sc.id DESC
+       LIMIT 1
+     ) x`,
+    [params.itemUid, params.countDate],
+  );
+  const expected = before.rows[0]?.on_hand == null ? null : Number(before.rows[0].on_hand);
+  const drift = expected == null ? null : params.countedQty - expected;
+
+  await pool.query(
+    `INSERT INTO platform_stock_count
+       (item_uid, count_date, counted_qty, drift_qty, source, source_ref, entered_by, note)
+     VALUES ($1, $2::date, $3, $4, $5, NULL, $6, $7)
+     ON CONFLICT (item_uid, count_date, COALESCE(source_ref, '')) DO UPDATE SET
+       counted_qty = EXCLUDED.counted_qty,
+       drift_qty = EXCLUDED.drift_qty,
+       entered_by = EXCLUDED.entered_by,
+       note = EXCLUDED.note,
+       updated_at = NOW()`,
+    [
+      params.itemUid, params.countDate, params.countedQty, drift,
+      params.source ?? "manual", params.enteredBy ?? null, params.note ?? null,
+    ],
+  );
+  return {
+    itemUid: params.itemUid,
+    countDate: params.countDate,
+    countedQty: params.countedQty,
+    drift,
+  };
+}
+
+/**
+ * Bulk count entry from a pasted sheet: `item number, counted qty[, count date]`.
+ * Validated in full before anything is written, so a typo halfway down does not
+ * leave the ledger half-updated.
+ */
+export async function importCounts(params: {
+  rows: { itemNumber: string; countedQty: number; countDate?: string }[];
+  countDate: string;
+  enteredBy?: string | null;
+  dryRun?: boolean;
+}): Promise<{
+  accepted: { itemNumber: string; countedQty: number; countDate: string; drift: number | null }[];
+  rejected: { itemNumber: string; reason: string }[];
+  written: number;
+}> {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const numbers = params.rows.map((r) => r.itemNumber);
+  const known = await pool.query(
+    `SELECT uid, number FROM myob_items WHERE number = ANY($1) AND is_inventoried`,
+    [numbers],
+  );
+  const byNumber = new Map(known.rows.map((r) => [r.number as string, r.uid as string]));
+
+  const accepted: { itemNumber: string; countedQty: number; countDate: string; drift: number | null }[] = [];
+  const rejected: { itemNumber: string; reason: string }[] = [];
+  const seen = new Set<string>();
+
+  for (const row of params.rows) {
+    const date = row.countDate ?? params.countDate;
+    if (!byNumber.has(row.itemNumber)) {
+      rejected.push({ itemNumber: row.itemNumber, reason: "not a stocked item in MYOB" });
+    } else if (!Number.isFinite(row.countedQty) || row.countedQty < 0) {
+      rejected.push({ itemNumber: row.itemNumber, reason: "counted quantity must be zero or more" });
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      rejected.push({ itemNumber: row.itemNumber, reason: `count date "${date}" is not yyyy-mm-dd` });
+    } else if (seen.has(`${row.itemNumber}|${date}`)) {
+      rejected.push({ itemNumber: row.itemNumber, reason: "duplicate row for the same item and date" });
+    } else {
+      seen.add(`${row.itemNumber}|${date}`);
+      accepted.push({ itemNumber: row.itemNumber, countedQty: row.countedQty, countDate: date, drift: null });
+    }
+  }
+
+  if (params.dryRun) return { accepted, rejected, written: 0 };
+
+  let written = 0;
+  for (const a of accepted) {
+    const res = await recordManualCount({
+      itemUid: byNumber.get(a.itemNumber)!,
+      countDate: a.countDate,
+      countedQty: a.countedQty,
+      enteredBy: params.enteredBy,
+      source: "csv_import",
+      note: "Bulk count import",
+    });
+    a.drift = res.drift;
+    written += 1;
+  }
+  return { accepted, rejected, written };
+}
+
+
+/**
+ * Where the platform's figures disagree with MYOB's, priced so the biggest
+ * discrepancies come first. Committed differences are shown separately from
+ * on-hand ones because they have different causes: committed diverges as soon
+ * as MYOB miscounts open orders, whereas on hand only diverges once a real
+ * count lands or our movement ledger parts company with MYOB's.
+ */
+export async function divergenceReport(): Promise<Record<string, unknown>> {
+  await ensureInsightsSchema();
+  const r = await getPool().query(
+    `SELECT i.number, i.name,
+            p.on_hand::float8, p.myob_on_hand::float8, p.divergence::float8,
+            p.committed::float8, p.myob_committed::float8,
+            (p.committed - COALESCE(p.myob_committed, 0))::float8 AS committed_divergence,
+            i.average_cost::float8,
+            (ABS(COALESCE(p.divergence, 0)) * COALESCE(i.average_cost, 0))::float8 AS on_hand_value_at_risk,
+            (ABS(p.committed - COALESCE(p.myob_committed, 0)) * COALESCE(i.average_cost, 0))::float8 AS committed_value_at_risk,
+            p.anchor_date::text, p.anchor_source
+     FROM item_position p
+     JOIN myob_items i ON i.uid = p.item_uid
+     WHERE i.is_inventoried
+       AND (ABS(COALESCE(p.divergence, 0)) > 0.001
+            OR ABS(p.committed - COALESCE(p.myob_committed, 0)) > 0.001)
+     ORDER BY GREATEST(
+       ABS(COALESCE(p.divergence, 0)) * COALESCE(i.average_cost, 0),
+       ABS(p.committed - COALESCE(p.myob_committed, 0)) * COALESCE(i.average_cost, 0)
+     ) DESC`,
+  );
+  const onHand = r.rows.filter((x) => Math.abs(Number(x.divergence ?? 0)) > 0.001);
+  const committed = r.rows.filter((x) => Math.abs(Number(x.committed_divergence ?? 0)) > 0.001);
+  return {
+    onHandDiverging: onHand.length,
+    committedDiverging: committed.length,
+    committedValueAtRisk: committed.reduce((a, x) => a + Number(x.committed_value_at_risk ?? 0), 0),
+    onHandValueAtRisk: onHand.reduce((a, x) => a + Number(x.on_hand_value_at_risk ?? 0), 0),
+    items: r.rows,
+  };
 }

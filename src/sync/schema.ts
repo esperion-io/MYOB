@@ -455,6 +455,65 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_daily_position_date
      ON platform_daily_position (as_at_date)`,
 
+  /*
+   * The platform's current position for every item — the single definition the
+   * whole product reads. on_hand comes from the anchored ledger, committed from
+   * our own open sale orders, on_order from our own unreceived purchase orders.
+   *
+   * MYOB's raw quantities appear here only as myob_* comparison columns. Nothing
+   * outside this view, the ledger and the sync may read them; a guard test
+   * enforces that, because silently reaching back to MYOB's figure is exactly
+   * the failure this work exists to remove.
+   */
+  `CREATE OR REPLACE VIEW item_position AS
+   WITH anchor AS (
+     SELECT DISTINCT ON (item_uid) item_uid, count_date, counted_qty, source
+     FROM platform_stock_count
+     WHERE count_date <= CURRENT_DATE
+     ORDER BY item_uid, count_date DESC,
+              (source <> 'opening_balance') DESC, id DESC
+   ),
+   since_anchor AS (
+     SELECT m.item_uid, SUM(m.qty)::double precision AS qty
+     FROM stock_movements m
+     JOIN anchor a ON a.item_uid = m.item_uid
+     WHERE m.moved_on > a.count_date AND m.moved_on <= CURRENT_DATE
+     GROUP BY m.item_uid
+   ),
+   our_committed AS (
+     SELECT l.item_uid, SUM(l.qty)::double precision AS qty
+     FROM myob_sale_order_lines l
+     JOIN myob_sale_orders o ON o.uid = l.order_uid
+     WHERE UPPER(COALESCE(o.status, '')) = 'OPEN' AND l.item_uid IS NOT NULL
+     GROUP BY l.item_uid
+   ),
+   our_on_order AS (
+     SELECT l.item_uid,
+            SUM(GREATEST(COALESCE(l.qty,0) - COALESCE(l.received_qty,0), 0))::double precision AS qty
+     FROM myob_purchase_order_lines l
+     JOIN myob_purchase_orders o ON o.uid = l.order_uid
+     WHERE UPPER(COALESCE(o.status, '')) = 'OPEN' AND l.item_uid IS NOT NULL
+     GROUP BY l.item_uid
+   )
+   SELECT i.uid AS item_uid,
+          (a.counted_qty + COALESCE(sa.qty, 0))::double precision AS on_hand,
+          COALESCE(oc.qty, 0)::double precision AS committed,
+          ((a.counted_qty + COALESCE(sa.qty, 0)) - COALESCE(oc.qty, 0))::double precision AS free_stock,
+          COALESCE(oo.qty, 0)::double precision AS on_order,
+          a.count_date AS anchor_date,
+          a.source AS anchor_source,
+          a.counted_qty::double precision AS anchor_qty,
+          COALESCE(sa.qty, 0)::double precision AS movements_since_anchor,
+          (a.item_uid IS NOT NULL) AS has_anchor,
+          i.qty_on_hand::double precision AS myob_on_hand,
+          i.qty_committed::double precision AS myob_committed,
+          ((a.counted_qty + COALESCE(sa.qty, 0)) - COALESCE(i.qty_on_hand, 0))::double precision AS divergence
+   FROM myob_items i
+   LEFT JOIN anchor a ON a.item_uid = i.uid
+   LEFT JOIN since_anchor sa ON sa.item_uid = i.uid
+   LEFT JOIN our_committed oc ON oc.item_uid = i.uid
+   LEFT JOIN our_on_order oo ON oo.item_uid = i.uid`,
+
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_bill_lines_item ON myob_purchase_bill_lines (item_uid)`,

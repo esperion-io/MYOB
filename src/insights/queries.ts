@@ -173,7 +173,10 @@ const DEMAND_CTE = `
 const ITEM_SELECT = `
   SELECT it.uid, it.number, it.name, it.description,
          it.is_active, it.is_bought, it.is_sold, it.is_inventoried,
-         it.qty_on_hand, it.qty_committed, it.qty_on_order, it.qty_available,
+         pos.on_hand, pos.committed, pos.free_stock, pos.on_order,
+         pos.anchor_date::text AS anchor_date, pos.anchor_source, pos.anchor_qty,
+         pos.movements_since_anchor, pos.myob_on_hand, pos.myob_committed,
+         pos.divergence,
          it.average_cost, it.current_value, it.base_selling_price,
          it.min_level, it.reorder_qty,
          it.primary_supplier_uid, it.primary_supplier_name, it.supplier_item_number,
@@ -197,6 +200,7 @@ const ITEM_SELECT = `
          COALESCE(pot.potential_90, 0) AS potential_90,
          COALESCE(pot.potential_parents, 0) AS potential_parents
   FROM myob_items it
+  JOIN item_position pos ON pos.item_uid = it.uid
   LEFT JOIN direct_demand dd ON dd.item_uid = it.uid
   LEFT JOIN component_demand cd ON cd.item_uid = it.uid
   LEFT JOIN incoming inc ON inc.item_uid = it.uid
@@ -224,6 +228,15 @@ export interface ItemComputed {
   isSold: boolean | null;
   qtyOnHand: number | null;
   qtyCommitted: number | null;
+  /** How this item's on-hand figure was reached — shown in the UI. */
+  anchorDate: string | null;
+  anchorSource: string | null;
+  anchorQty: number | null;
+  movementsSinceAnchor: number;
+  /** MYOB's own figures, carried for comparison only. */
+  myobOnHand: number | null;
+  myobCommitted: number | null;
+  divergence: number | null;
   qtyOnOrder: number | null;
   qtyAvailable: number | null;
   /** on hand - committed. MYOB's "available" also adds on-order stock. */
@@ -304,9 +317,13 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     basis = "365d";
   }
 
-  const available = n(row.qty_available);
-  const onHand = n(row.qty_on_hand);
-  const committed = n(row.qty_committed);
+  // Every downstream figure — cover, below-minimum, suggestions, risk, sorting,
+  // filters — hangs off these three. They come from the platform ledger; MYOB's
+  // own quantities travel alongside only so divergence can be shown.
+  const onHand = n(row.on_hand);
+  const committed = n(row.committed);
+  const myobOnHand = n(row.myob_on_hand);
+  const myobCommitted = n(row.myob_committed);
   const minLevel = n(row.min_level);
   const avgCost = n(row.average_cost);
   const incomingQty = n(row.incoming_qty) ?? 0;
@@ -319,8 +336,12 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
   const understatesMeasured =
     potential90 > 0 && (total90 <= 0 || potential90 >= total90 * 0.25);
 
-  // MYOB's qty_available includes on-order stock; analysis uses free stock.
   const freeStock = onHand == null ? null : onHand - (committed ?? 0);
+  const onOrder = n(row.on_order) ?? 0;
+  // Our own "available": free stock plus what is on the water. Kept distinct
+  // from free stock, which is what every downstream calculation uses, so
+  // un-arrived stock can never be counted as if it were on the shelf.
+  const available = freeStock == null ? null : freeStock + onOrder;
 
   const coverWeeks =
     weekly > 0 && freeStock != null ? Math.max(freeStock, 0) / weekly : null;
@@ -436,9 +457,17 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     isSold: row.is_sold as boolean | null,
     qtyOnHand: onHand,
     qtyCommitted: committed,
-    qtyOnOrder: n(row.qty_on_order),
+    qtyOnOrder: onOrder,
     qtyAvailable: available,
     qtyFreeStock: freeStock,
+    // Derivation, so every figure can show its working in the UI.
+    anchorDate: (row.anchor_date as string) ?? null,
+    anchorSource: (row.anchor_source as string) ?? null,
+    anchorQty: n(row.anchor_qty),
+    movementsSinceAnchor: n(row.movements_since_anchor) ?? 0,
+    myobOnHand,
+    myobCommitted,
+    divergence: n(row.divergence),
     averageCost: avgCost,
     currentValue: n(row.current_value),
     baseSellingPrice: n(row.base_selling_price),
@@ -695,13 +724,14 @@ export async function overview() {
         WHERE u.depth < 6 AND NOT b.parent_uid = ANY(u.path)
       )
       SELECT u.item_uid AS uid, i.number, i.name,
-             (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
+             COALESCE(p.free_stock, 0)::float8 AS stock_free,
              COUNT(DISTINCT u.parent_uid)::int AS blocked_parents,
              MAX(u.depth)::int AS max_depth
       FROM up u
       JOIN myob_items i ON i.uid = u.item_uid
-      WHERE COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0) < u.qty_per
-      GROUP BY u.item_uid, i.number, i.name, i.qty_on_hand, i.qty_committed
+      JOIN item_position p ON p.item_uid = u.item_uid
+      WHERE COALESCE(p.free_stock, 0) < u.qty_per
+      GROUP BY u.item_uid, i.number, i.name, p.free_stock
       ORDER BY blocked_parents DESC
       LIMIT 8
     `),
@@ -800,10 +830,11 @@ async function relationshipRows(uid: string) {
               b.build_count, b.confidence::float8 AS confidence, b.last_observed,
               d.qty_per::float8 AS shadowed_derived_qty, d.build_count AS shadowed_build_count,
               i.number, i.name,
-              (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
+              COALESCE(p.free_stock, 0)::float8 AS stock_free,
               (SELECT COUNT(*)::int FROM effective_bom x WHERE x.parent_uid = b.component_uid) AS sub_components
        FROM effective_bom b
        JOIN myob_items i ON i.uid = b.component_uid
+       JOIN item_position p ON p.item_uid = b.component_uid
        LEFT JOIN platform_bom d ON d.parent_uid = b.parent_uid
          AND d.component_uid = b.component_uid AND d.source = 'derived' AND b.source = 'user'
        WHERE b.parent_uid = $1
@@ -814,10 +845,11 @@ async function relationshipRows(uid: string) {
       `SELECT b.parent_uid AS uid, b.qty_per::float8 AS qty_per, b.source,
               b.build_count, b.confidence::float8 AS confidence,
               i.number, i.name,
-              (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
+              COALESCE(p.free_stock, 0)::float8 AS stock_free,
               (SELECT COUNT(*)::int FROM effective_bom x WHERE x.component_uid = b.parent_uid) AS used_higher
        FROM effective_bom b
        JOIN myob_items i ON i.uid = b.parent_uid
+       JOIN item_position p ON p.item_uid = b.parent_uid
        WHERE b.component_uid = $1
        ORDER BY b.qty_per DESC`,
       [uid],
@@ -858,10 +890,11 @@ async function explodeBom(uid: string): Promise<BomTreeRow[]> {
      )
      SELECT t.parent_uid, t.component_uid, t.qty_per, t.qty_total, t.depth,
             i.number, i.name,
-            (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
+            COALESCE(p.free_stock, 0)::float8 AS stock_free,
             EXISTS (SELECT 1 FROM effective_bom c WHERE c.parent_uid = t.component_uid) AS has_children
      FROM tree t
      JOIN myob_items i ON i.uid = t.component_uid
+     JOIN item_position p ON p.item_uid = t.component_uid
      ORDER BY t.depth, t.qty_total DESC`,
     [uid],
   );
@@ -1072,16 +1105,17 @@ export async function productsList(params: { q?: string; page?: number }) {
     WITH parent_build AS (
       SELECT b.parent_uid,
              COUNT(*)::int AS component_count,
-             MIN(FLOOR(GREATEST(COALESCE(ci.qty_on_hand,0) - COALESCE(ci.qty_committed,0), 0) / NULLIF(b.qty_per,0)))::float8 AS buildable,
+             MIN(FLOOR(GREATEST(COALESCE(cp.free_stock,0), 0) / NULLIF(b.qty_per,0)))::float8 AS buildable,
              BOOL_OR(b.source = 'user') AS has_user_rows,
              MIN(b.confidence)::float8 AS min_confidence
       FROM effective_bom b
       JOIN myob_items ci ON ci.uid = b.component_uid
+      JOIN item_position cp ON cp.item_uid = b.component_uid
       GROUP BY b.parent_uid
     )
     SELECT p.*, i.number, i.name,
-           (COALESCE(i.qty_on_hand,0) - COALESCE(i.qty_committed,0))::float8 AS stock_free,
-           i.qty_committed::float8 AS qty_committed, i.is_active,
+           COALESCE(ip.free_stock, 0)::float8 AS stock_free,
+           COALESCE(ip.committed, 0)::float8 AS committed, i.is_active,
            (SELECT COALESCE(SUM(l.qty),0)::float8
               FROM myob_sale_invoice_lines l
               JOIN myob_sale_invoices si ON si.uid = l.invoice_uid
@@ -1089,6 +1123,7 @@ export async function productsList(params: { q?: string; page?: number }) {
                AND si.date >= NOW() - INTERVAL '90 days') AS sold_90
     FROM parent_build p
     JOIN myob_items i ON i.uid = p.parent_uid
+    JOIN item_position ip ON ip.item_uid = p.parent_uid
     ORDER BY sold_90 DESC NULLS LAST
   `);
 
@@ -1811,10 +1846,11 @@ export async function bomBlindspots() {
       GROUP BY l.item_uid
     )
     SELECT i.uid, i.number, i.name,
-           (COALESCE(i.qty_on_hand, 0) - COALESCE(i.qty_committed, 0))::float8 AS stock_free,
+           COALESCE(p.free_stock, 0)::float8 AS stock_free,
            s.sold_90, s.sold_365,
            COUNT(*) OVER ()::int AS total_count
     FROM myob_items i
+    JOIN item_position p ON p.item_uid = i.uid
     JOIN sold s ON s.item_uid = i.uid AND s.sold_365 > 0
     WHERE i.is_active IS NOT FALSE
       AND COALESCE(i.is_sold, TRUE)

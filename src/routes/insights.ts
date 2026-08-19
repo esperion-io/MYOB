@@ -28,7 +28,10 @@ import {
   anchorCoverage,
   confirmStocktake,
   itemLedger,
+  divergenceReport,
+  importCounts,
   ownedPositions,
+  recordManualCount,
   snapshotDates,
   snapshotPositions,
   stocktakeCandidates,
@@ -467,6 +470,73 @@ insightsRouter.post("/snapshots", async (req, res) => {
   if (!requireDb(res)) return;
   try {
     res.json(await snapshotPositions({ overwrite: req.body?.overwrite === true }));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Record a physical count Allied performed — this is what diverges us from MYOB. */
+insightsRouter.post("/counts", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { itemUid, countDate, countedQty } = req.body ?? {};
+    if (typeof itemUid !== "string" || !itemUid) {
+      res.status(400).json({ error: "itemUid is required." });
+      return;
+    }
+    if (typeof countedQty !== "number" || !Number.isFinite(countedQty) || countedQty < 0) {
+      res.status(400).json({ error: "countedQty must be a number of zero or more." });
+      return;
+    }
+    if (typeof countDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(countDate)) {
+      res.status(400).json({ error: "countDate must be yyyy-mm-dd." });
+      return;
+    }
+    res.json(
+      await recordManualCount({
+        itemUid,
+        countDate,
+        countedQty,
+        enteredBy: typeof req.body?.enteredBy === "string" ? req.body.enteredBy : null,
+        note: typeof req.body?.note === "string" ? req.body.note : null,
+      }),
+    );
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Bulk count entry. Send dryRun to validate a pasted sheet before committing. */
+insightsRouter.post("/counts/import", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
+    if (!rows) {
+      res.status(400).json({ error: "rows[] is required." });
+      return;
+    }
+    const countDate =
+      typeof req.body?.countDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.body.countDate)
+        ? req.body.countDate
+        : new Date().toISOString().slice(0, 10);
+    res.json(
+      await importCounts({
+        rows,
+        countDate,
+        enteredBy: typeof req.body?.enteredBy === "string" ? req.body.enteredBy : null,
+        dryRun: req.body?.dryRun === true,
+      }),
+    );
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Items where our figures disagree with MYOB's, ranked by what it is worth. */
+insightsRouter.get("/divergence", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await divergenceReport());
   } catch (err) {
     send500(res, err);
   }

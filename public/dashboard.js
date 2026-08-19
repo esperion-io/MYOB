@@ -912,8 +912,8 @@ function expandPanelHtml(i) {
 
   const position = `
     <h3>Position</h3>
-    ${kvRow("On hand", qty(i.qtyOnHand))}
-    ${kvRow("Committed", qty(i.qtyCommitted))}
+    ${kvRow("On hand", `${qty(i.qtyOnHand)}${derivationNote(i)}`)}
+    ${kvRow("Committed", `${qty(i.qtyCommitted)}${committedNote(i)}`)}
     ${kvRow("Free stock (on hand − committed)", `<strong>${qty(i.qtyFreeStock)}</strong>`)}
     ${kvRow("Incoming (open POs)", qty(i.incomingQty))}
     ${kvRow("MYOB available (incl. on order)", qty(i.qtyAvailable), "muted-row")}
@@ -1037,6 +1037,44 @@ async function loadExpandExtras(uid, el) {
   } catch (err) {
     el.innerHTML = `<p class="muted">Could not load activity: ${esc(err.message)}</p>`;
   }
+}
+
+
+/* ---------- derivation: show the working behind every position number ---------- */
+
+const ANCHOR_LABEL = {
+  opening_balance: "opening balance",
+  myob_adjustment: "stocktake recorded in MYOB",
+  manual: "count entered by Allied",
+  csv_import: "count imported by Allied",
+};
+
+/**
+ * How this on-hand figure was reached: the anchor it started from, and the
+ * movements applied since. The client is auditing these numbers against their
+ * own spreadsheets, so an unexplained figure is one they will not act on.
+ */
+function derivationNote(i) {
+  if (!i.anchorDate) return "";
+  const src = ANCHOR_LABEL[i.anchorSource] ?? i.anchorSource;
+  const moves = i.movementsSinceAnchor ?? 0;
+  const sign = moves > 0 ? "+" : "";
+  const detail =
+    `${qty(i.anchorQty)} at the ${src} on ${dateFmt(i.anchorDate)}` +
+    (moves ? `, ${sign}${qty(moves)} from movements since` : ", no movements since");
+  const diverged =
+    i.divergence != null && Math.abs(i.divergence) > 0.001
+      ? ` <span class="badge warn" title="MYOB says ${qty(i.myobOnHand)}">MYOB differs by ${qty(i.divergence)}</span>`
+      : "";
+  return ` <span class="muted" title="${esc(detail)}">·&nbsp;why?</span>${diverged}`;
+}
+
+/** Committed is our own sum of open sale orders, and it often beats MYOB's. */
+function committedNote(i) {
+  const mine = i.qtyCommitted ?? 0;
+  const theirs = i.myobCommitted ?? 0;
+  if (Math.abs(mine - theirs) < 0.001) return "";
+  return ` <span class="badge warn" title="Counted from open sale orders. MYOB reports ${qty(theirs)}, which would read as ${theirs < mine ? "free-to-sell stock that is already promised" : "stock withheld that is actually available"}.">MYOB says ${qty(theirs)}</span>`;
 }
 
 /* ---------- item detail ---------- */
@@ -1978,6 +2016,48 @@ function freshnessNotice(f) {
     were re-read from MYOB in the last sync${f.newest_quantities_as_of ? ` (${ago(f.newest_quantities_as_of)})` : ""}.</div>`;
 }
 
+/**
+ * Items where the platform disagrees with MYOB, priced by what the gap is worth.
+ * Committed and on-hand are separated because they diverge for different
+ * reasons: committed the moment MYOB miscounts open orders, on hand only once a
+ * real count lands or the movement ledger parts company with MYOB's.
+ */
+async function loadDivergence() {
+  const el = document.getElementById("divergence-panel");
+  if (!el) return;
+  try {
+    const d = await fetchJson("/api/insights/divergence");
+    const body = el.querySelector(".loading");
+    if (!d.items.length) {
+      body.outerHTML = '<p class="muted">Nothing differs — every figure reconciles to MYOB today.</p>';
+      return;
+    }
+    body.outerHTML = `
+      <div class="kpis">
+        <div class="kpi"><span class="k-label">Committed differs</span><span class="k-value">${qty(d.committedDiverging)}</span></div>
+        <div class="kpi"><span class="k-label">Value at stake</span><span class="k-value">${money(d.committedValueAtRisk)}</span></div>
+        <div class="kpi"><span class="k-label">On hand differs</span><span class="k-value">${qty(d.onHandDiverging)}</span></div>
+        <div class="kpi"><span class="k-label">Value at stake</span><span class="k-value">${money(d.onHandValueAtRisk)}</span></div>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th class="num">Our committed</th><th class="num">MYOB</th>
+          <th class="num">Our on hand</th><th class="num">MYOB</th><th>Anchored to</th></tr></thead>
+        <tbody>${d.items.slice(0, 40).map((r) => `<tr>
+          <td><strong>${esc(r.number ?? "—")}</strong><br /><span class="muted">${esc(r.name ?? "")}</span></td>
+          <td class="num">${qty(r.committed)}</td>
+          <td class="num ${Math.abs(r.committed_divergence ?? 0) > 0.001 ? "alert" : ""}">${qty(r.myob_committed)}</td>
+          <td class="num">${qty(r.on_hand)}</td>
+          <td class="num ${Math.abs(r.divergence ?? 0) > 0.001 ? "alert" : ""}">${qty(r.myob_on_hand)}</td>
+          <td class="muted">${esc(ANCHOR_LABEL[r.anchor_source] ?? r.anchor_source ?? "—")}<br />${r.anchor_date ? dateFmt(r.anchor_date) : ""}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+      ${d.items.length > 40 ? `<p class="hint">Showing the 40 largest of ${qty(d.items.length)}.</p>` : ""}`;
+  } catch (err) {
+    const body = el.querySelector(".loading");
+    if (body) body.outerHTML = `<p class="muted">Could not load divergence: ${esc(err.message)}</p>`;
+  }
+}
+
 async function renderData() {
   main.innerHTML = '<p class="loading">Loading data status…</p>';
   const d = await fetchJson("/api/insights/data");
@@ -2048,6 +2128,14 @@ async function renderData() {
         </table></div>
       </section>
     </div>
+
+    <section class="panel" id="divergence-panel">
+      <h2>Where our figures differ from MYOB</h2>
+      <p class="hint">On hand and committed are computed here from Allied's own documents —
+      counts, bills, invoices, builds, adjustments and open sale orders — not read from MYOB.
+      Anything listed below is a real disagreement worth understanding, not a rounding artefact.</p>
+      <p class="loading">Loading divergence…</p>
+    </section>
 
     <section class="panel">
       <h2>Recent sync runs</h2>
@@ -2143,6 +2231,7 @@ async function renderData() {
       </dl>
     </section>`;
 
+  loadDivergence();
   document.getElementById("sync-inc").addEventListener("click", (e) =>
     startSync("incremental", e.currentTarget),
   );
