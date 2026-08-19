@@ -553,7 +553,7 @@ async function renderOverview() {
 
     <div class="kpis">
       <div class="kpi"><span class="k-label">SKUs</span><span class="k-value">${qty(k.totalSkus)}</span></div>
-      <div class="kpi"><span class="k-label">Stock value (MYOB)</span><span class="k-value">${money(k.stockValue)}</span></div>
+      <div class="kpi"><span class="k-label">Stock value</span><span class="k-value">${money(k.stockValue)}</span></div>
       <div class="kpi link ${k.belowMin ? "alert" : ""}" data-filter="below_min"><span class="k-label">Below min level</span><span class="k-value">${qty(k.belowMin)}</span></div>
       <div class="kpi link ${k.coverUnder2w ? "warn" : ""}" data-filter="low_cover"><span class="k-label">Cover &lt; 2 weeks</span><span class="k-value">${qty(k.coverUnder2w)}</span></div>
       <div class="kpi link" data-filter="suggested"><span class="k-label">Suggested orders</span><span class="k-value">${qty(k.suggestedOrders)}</span></div>
@@ -2044,17 +2044,21 @@ async function loadDivergence() {
         <div class="kpi"><span class="k-label">Committed differs</span><span class="k-value">${qty(d.committedDiverging)}</span></div>
         <div class="kpi"><span class="k-label">Value at stake</span><span class="k-value">${money(d.committedValueAtRisk)}</span></div>
         <div class="kpi"><span class="k-label">On hand differs</span><span class="k-value">${qty(d.onHandDiverging)}</span></div>
-        <div class="kpi"><span class="k-label">Value at stake</span><span class="k-value">${money(d.onHandValueAtRisk)}</span></div>
+        <div class="kpi"><span class="k-label">Stock value differs</span><span class="k-value">${qty(d.valueDiverging)}</span></div>
+        <div class="kpi"><span class="k-label">Value difference</span><span class="k-value">${money(d.valueDifference)}</span></div>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Item</th><th class="num">Our committed</th><th class="num">MYOB</th>
-          <th class="num">Our on hand</th><th class="num">MYOB</th><th>Anchored to</th></tr></thead>
+          <th class="num">Our on hand</th><th class="num">MYOB</th>
+          <th class="num">Our value</th><th class="num">MYOB</th><th>Anchored to</th></tr></thead>
         <tbody>${d.items.slice(0, 40).map((r) => `<tr>
           <td><strong>${esc(r.number ?? "—")}</strong><br /><span class="muted">${esc(r.name ?? "")}</span></td>
           <td class="num">${qty(r.committed)}</td>
           <td class="num ${Math.abs(r.committed_divergence ?? 0) > 0.001 ? "alert" : ""}">${qty(r.myob_committed)}</td>
           <td class="num">${qty(r.on_hand)}</td>
           <td class="num ${Math.abs(r.divergence ?? 0) > 0.001 ? "alert" : ""}">${qty(r.myob_on_hand)}</td>
+          <td class="num">${money(r.our_stock_value)}</td>
+          <td class="num ${Math.abs(r.value_divergence ?? 0) > 0.5 ? "alert" : ""}">${money(r.myob_stock_value)}</td>
           <td class="muted">${esc(ANCHOR_LABEL[r.anchor_source] ?? r.anchor_source ?? "—")}<br />${r.anchor_date ? dateFmt(r.anchor_date) : ""}</td>
         </tr>`).join("")}</tbody>
       </table></div>
@@ -2177,6 +2181,12 @@ async function renderData() {
         month-old quantities. Note: MYOB's "available" includes stock on order (verified against
         Allied's file: available = on hand − committed + on order), so it counts stock that has
         not arrived yet.</dd>
+        <dt>Stock value</dt>
+        <dd>Our on hand × the item's average cost from MYOB, which is Allied's standing valuation
+        policy and what their month-end reporting uses. It is calculated here rather than read from
+        MYOB's stored value, for two reasons: on hand is our figure, so reading MYOB's value would
+        price our quantity at theirs; and MYOB's stored value is not always right — SW101616G4 holds
+        180 units at $1.87 and is recorded as $3.36 instead of $336.00. Last buy price is never used.</dd>
         <dt>Free stock</dt>
         <dd>On hand − committed: physical stock not promised to a customer. This is what cover,
         buildability and purchasing suggestions use, so incoming purchase orders are only ever

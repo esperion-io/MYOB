@@ -874,6 +874,9 @@ export async function divergenceReport(): Promise<Record<string, unknown>> {
             p.committed::float8, p.myob_committed::float8,
             (p.committed - COALESCE(p.myob_committed, 0))::float8 AS committed_divergence,
             i.average_cost::float8,
+            (p.on_hand * COALESCE(i.average_cost, 0))::float8 AS our_stock_value,
+            i.current_value::float8 AS myob_stock_value,
+            ((p.on_hand * COALESCE(i.average_cost, 0)) - COALESCE(i.current_value, 0))::float8 AS value_divergence,
             (ABS(COALESCE(p.divergence, 0)) * COALESCE(i.average_cost, 0))::float8 AS on_hand_value_at_risk,
             (ABS(p.committed - COALESCE(p.myob_committed, 0)) * COALESCE(i.average_cost, 0))::float8 AS committed_value_at_risk,
             p.anchor_date::text, p.anchor_source
@@ -881,7 +884,8 @@ export async function divergenceReport(): Promise<Record<string, unknown>> {
      JOIN myob_items i ON i.uid = p.item_uid
      WHERE i.is_inventoried
        AND (ABS(COALESCE(p.divergence, 0)) > 0.001
-            OR ABS(p.committed - COALESCE(p.myob_committed, 0)) > 0.001)
+            OR ABS(p.committed - COALESCE(p.myob_committed, 0)) > 0.001
+            OR ABS((p.on_hand * COALESCE(i.average_cost, 0)) - COALESCE(i.current_value, 0)) > 0.5)
      ORDER BY GREATEST(
        ABS(COALESCE(p.divergence, 0)) * COALESCE(i.average_cost, 0),
        ABS(p.committed - COALESCE(p.myob_committed, 0)) * COALESCE(i.average_cost, 0)
@@ -889,9 +893,12 @@ export async function divergenceReport(): Promise<Record<string, unknown>> {
   );
   const onHand = r.rows.filter((x) => Math.abs(Number(x.divergence ?? 0)) > 0.001);
   const committed = r.rows.filter((x) => Math.abs(Number(x.committed_divergence ?? 0)) > 0.001);
+  const value = r.rows.filter((x) => Math.abs(Number(x.value_divergence ?? 0)) > 0.5);
   return {
     onHandDiverging: onHand.length,
     committedDiverging: committed.length,
+    valueDiverging: value.length,
+    valueDifference: value.reduce((a, x) => a + Number(x.value_divergence ?? 0), 0),
     committedValueAtRisk: committed.reduce((a, x) => a + Number(x.committed_value_at_risk ?? 0), 0),
     onHandValueAtRisk: onHand.reduce((a, x) => a + Number(x.on_hand_value_at_risk ?? 0), 0),
     items: r.rows,

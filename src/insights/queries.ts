@@ -242,7 +242,10 @@ export interface ItemComputed {
   /** on hand - committed. MYOB's "available" also adds on-order stock. */
   qtyFreeStock: number | null;
   averageCost: number | null;
+  /** Our on hand x average cost. Never MYOB's stored CurrentValue. */
   currentValue: number | null;
+  /** MYOB's stored value, carried for comparison only. */
+  myobStockValue: number | null;
   baseSellingPrice: number | null;
   minLevel: number | null;
   reorderQty: number | null;
@@ -469,7 +472,17 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     myobCommitted,
     divergence: n(row.divergence),
     averageCost: avgCost,
-    currentValue: n(row.current_value),
+    /*
+     * Stock value is computed here, not read from MYOB's CurrentValue.
+     *
+     * Two reasons. After P1 on hand is ours, so reading MYOB's stored value
+     * would silently value our quantity at their quantity — a count entered by
+     * Allied would move the stock figure but not the money. And MYOB's stored
+     * value is not always right: SW101616G4 holds 180 at $1.8667 and is
+     * recorded as $3.36 rather than $336.00, out by exactly 100x.
+     */
+    currentValue: onHand == null || avgCost == null ? null : onHand * avgCost,
+    myobStockValue: n(row.current_value),
     baseSellingPrice: n(row.base_selling_price),
     minLevel,
     reorderQty: n(row.reorder_qty),
@@ -1193,6 +1206,7 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
     [
       "Supplier", "Supplier source", "Item number", "Item name", "Supplier item no",
       "On hand", "Committed", "Free stock", "On order (incoming)", "Min level",
+      "Average cost", "Stock value (on hand x average cost)",
       "Weekly demand", "Demand basis", "Cover (weeks)",
       "Potential pack demand 90d (not in totals)",
       "Suggested order qty", "Est cost", "Risk score", "Flags",
@@ -1206,7 +1220,9 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
           i.supplierSource === "inferred" ? "inferred from purchases" : i.supplierSource === "myob" ? "MYOB primary" : "",
           esc(i.number), esc(i.name), esc(i.supplierItemNumber),
           i.qtyOnHand ?? "", i.qtyCommitted ?? "", i.qtyFreeStock ?? "", i.incomingQty,
-          i.minLevel ?? "", i.demand.weekly, i.demand.basis,
+          i.minLevel ?? "",
+          i.averageCost ?? "", i.currentValue == null ? "" : i.currentValue.toFixed(2),
+          i.demand.weekly, i.demand.basis,
           i.coverWeeks ?? "", i.potential.qty90 || "",
           i.suggestion?.qty ?? 0,
           ((i.suggestion?.qty ?? 0) * (i.averageCost ?? 0)).toFixed(2),

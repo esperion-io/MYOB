@@ -1,13 +1,15 @@
 # Allied Priority Fix Plan — v2
 
-**Status:** P0 shipped 18 Aug 2026. P1 shipped 19 Aug 2026. P2–P6 proposed. Revised after client direction on stocktake-anchored stock maths.
+**Status:** P0 shipped 18 Aug 2026. P1 and P2 shipped 19 Aug 2026. P3–P6 proposed. Revised after client direction on stocktake-anchored stock maths.
 
 **What changed in v2**
 
 - **P1 is rewritten.** Stock on hand is now derived from a **stocktake-anchored ledger**, not from MYOB's `QuantityOnHand`. This is the client's explicit direction and the data supports it.
 - **P3 is clarified** — yes, we start persisting data now, and the plan states exactly which dates will be exact, which reconstructed, and which unreliable.
 - **Client answers folded in.** No finish suppression; bin location synced but hidden; suppliers tagged by Allied; the "open POs netted" item dropped.
-- **P0 shipped** — the sync no longer serves stale quantities, and MYOB's Bill of Materials was verified as genuinely maintained and promoted to the primary recipe source.
+- **P0 shipped 18 Aug** — the sync no longer serves stale quantities, and MYOB's Bill of Materials was verified as genuinely maintained and promoted to the primary recipe source.
+- **P1 shipped 19 Aug** — on hand, committed, free, on order and available are all computed here from Allied's own documents; counts, divergence and the audit trail are on screen.
+- **P2 shipped 19 Aug** — stock value is our on hand × average cost, which caught a MYOB valuation error of exactly 100×.
 
 ---
 
@@ -350,17 +352,56 @@ around.
 
 ---
 
-### P2 — Value stock at average cost
+### P2 — Value stock at average cost ✅ SHIPPED 19 Aug 2026
 
-Depends on P0 and P1. **The cheapest item in the list.**
+Depended on P0 and P1.
 
-MYOB gives us the answer directly: `CurrentValue = QuantityOnHand × AverageCost` for 3,058 of 3,061 items. We do not need to derive valuation from POs and sales at all.
+#### What the brief asked for, and what was actually there
 
-- Stock value = `on_hand × average_cost`, where **`on_hand` is now the ledger figure from P1**, not MYOB's.
-- Delete the PO/sales-derived valuation path entirely.
-- Apply consistently: item view, inventory list, aggregate totals, every export.
-- Investigate the 3 items where `CurrentValue ≠ OnHand × AverageCost` before calling it done.
-- Reconcile the aggregate against MYOB's average-cost valuation report, and expect a documented difference wherever the ledger diverges.
+The brief said to "remove the current derivation that infers stock value from
+purchase orders and sales data". **No such derivation existed.** Valuation was
+already reading MYOB's stored `CurrentValue` field. Worth recording so nobody
+goes looking for code that was never written.
+
+The real defect was subtler and only appeared once P1 landed: `CurrentValue` is
+MYOB's *own* on hand × average cost. Reading it after P1 would have priced our
+quantity at MYOB's — so a count entered by Allied would move the stock figure
+but leave the money unchanged.
+
+#### What shipped
+
+- **Stock value = our on hand × `AverageCost`**, computed here, everywhere it
+  appears: item view, expanded rows, inventory list, Overview total, region
+  breakdown, excess-stock value and the purchasing export.
+- MYOB's stored value is kept as a comparison column only and surfaced in the
+  divergence panel, never used as an input.
+- The purchasing CSV gains **Average cost** and **Stock value** columns.
+- Last buy price remains unused, as Allied's policy requires.
+- The Overview KPI, previously labelled "Stock value (MYOB)", now says
+  "Stock value" because it is ours.
+
+#### The three CurrentValue outliers, resolved
+
+Two are rounding dust on zero-quantity items (`N30S16` at −$0.01, `FGHP` at
++$0.01). The third is a **real MYOB error**: `SW101616G4` holds 180 units at
+$1.8667, which is $336.00, and MYOB records **$3.36** — out by exactly 100×.
+Computing the value ourselves corrects it.
+
+#### Verified
+
+| Check | Result |
+|---|---|
+| `SW101616G4` valued correctly | ✅ $336.00 (MYOB stored $3.36) |
+| Aggregate stock value | **$872,346.85** vs MYOB's stored $872,106.89 |
+| Items whose value differs from MYOB | 4, totalling **$239.96** |
+| Divergence panel covers value | ✅ alongside on hand and committed |
+
+The $239.96 gap is the 100× error less accumulated per-item rounding in MYOB's
+stored figures, which we avoid by computing at full precision.
+
+**Still to do:** reconcile the aggregate against an average-cost valuation report
+run out of MYOB by Allied. That is their check, not ours, and it is the same
+month-end run that validates P1.
 
 ---
 
@@ -495,14 +536,14 @@ P0 sync + freshness ──> P1 stocktake-anchored ledger ──┬──> P2 val
 
 | # | Item | Size | Notes |
 |---|---|---|---|
-| P0 | Sync freshness + BOM + custom fields | S–M | Blocks everything. Do immediately. |
-| P1 | Stocktake-anchored ledger | **L** | Was M; the rewrite makes it the core of the product. |
-| P2 | Average-cost valuation | S | Trivial once P1 supplies on-hand. |
+| P0 | Sync freshness + BOM + custom fields | S–M | ✅ Shipped 18 Aug 2026. |
+| P1 | Stocktake-anchored ledger | **L** | ✅ Shipped 19 Aug 2026. Now the core of the product. |
+| P2 | Average-cost valuation | S | ✅ Shipped 19 Aug 2026. Caught a 100× MYOB error. |
 | P3 | As-at + rolling window + backfill | L | Snapshots, confidence tiers, 2-year backfill. |
 | P4 | Facets + tags | S–M | Reduced — no suppression logic. |
 | P5+P6 | Cart rebuild | XL | New persistence, fan-out, guard rails, xlsx. |
 
-**Recommended order: P0 → P1 → P2 → P3 → P4 → P5+P6.**
+**Recommended order: P0 → P1 → P2 → P3 → P4 → P5+P6.** P0, P1 and P2 are shipped; P3 is next and carries the only hard external deadline.
 
 P1 now sits directly behind P0 rather than beside P2, because on-hand is an input to valuation, cover, below-minimum flags and every purchasing suggestion. P2 follows immediately and is nearly free. P3 must not slip — it is the only item with a hard external deadline. The cart rebuild is the largest piece and should not start until the numbers beneath it are trusted, or it will be built twice.
 
