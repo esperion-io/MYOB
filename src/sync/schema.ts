@@ -82,6 +82,22 @@ const DDL: string[] = [
      quantities_as_of = COALESCE(quantities_as_of, synced_at)
    WHERE raw IS NOT NULL AND quantities_as_of IS NULL`,
 
+  /*
+   * One-time correction: the sync read `RestockingInformation.PrimarySupplier`,
+   * but MYOB's key is `Supplier`. Every item therefore stored a null supplier.
+   * `raw` already holds the right value, so repair it in place rather than
+   * waiting for the next full sync. Guarded to run only while the column is
+   * still empty everywhere.
+   */
+  `UPDATE myob_items SET
+     primary_supplier_uid  = raw->'BuyingDetails'->'RestockingInformation'->'Supplier'->>'UID',
+     primary_supplier_name = raw->'BuyingDetails'->'RestockingInformation'->'Supplier'->>'Name',
+     reorder_qty = COALESCE(
+       NULLIF(raw->'BuyingDetails'->'RestockingInformation'->>'DefaultOrderQuantity','')::double precision,
+       reorder_qty)
+   WHERE raw IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM myob_items x WHERE x.primary_supplier_uid IS NOT NULL)`,
+
   `CREATE INDEX IF NOT EXISTS idx_items_product_type ON myob_items (product_type)`,
   `CREATE INDEX IF NOT EXISTS idx_items_product_finish ON myob_items (product_finish)`,
 

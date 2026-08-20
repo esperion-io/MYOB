@@ -271,7 +271,16 @@ const ENTITIES: EntitySpec[] = [
       const rows = items.map((it) => {
         const buying = (it.BuyingDetails ?? {}) as Raw;
         const restock = (buying.RestockingInformation ?? {}) as Raw;
-        const supplier = ref(restock.PrimarySupplier ?? restock.PrimaryVendor);
+        /*
+         * MYOB names this key `Supplier`, not `PrimarySupplier`. Reading the
+         * wrong name silently produced null for every item and led to the
+         * recorded conclusion that Allied never set a primary supplier — in
+         * fact 2,008 of 3,101 items have one. Everything downstream then fell
+         * back to inferring a supplier from purchase-bill history.
+         */
+        const supplier = ref(
+          restock.Supplier ?? restock.PrimarySupplier ?? restock.PrimaryVendor,
+        );
         return [
           str(it.UID),
           str(it.Number),
@@ -289,7 +298,8 @@ const ENTITIES: EntitySpec[] = [
           num(it.CurrentValue),
           num(it.BaseSellingPrice),
           num(restock.MinimumLevelForRestockingAlert),
-          num(restock.DefaultReorderQuantity),
+          // MYOB's key is DefaultOrderQuantity; the older name never matched.
+          num(restock.DefaultOrderQuantity) ?? num(restock.DefaultReorderQuantity),
           supplier.uid,
           supplier.name,
           str(restock.SupplierItemNumber) ?? str(restock.VendorItemNumber),
