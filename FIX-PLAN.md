@@ -90,6 +90,31 @@ The four endpoints that move stock, and so make up the movement ledger, are:
 purpose — they represent intent, not movement, and counting them would
 double-count stock that has not arrived or not shipped.
 
+### 1.5c Correction — Allied DO set a primary supplier (2,008 items)
+
+**Found 19 Aug 2026.** An earlier finding recorded in `PLAN.md` — "the MYOB
+primary supplier field is unused on Allied's items (0 of 3,100 set)" — was
+**wrong, and the cause was our own bug**. The sync read
+`BuyingDetails.RestockingInformation.PrimarySupplier`; MYOB's key is `Supplier`.
+Every item therefore stored null.
+
+**2,008 of 3,101 items carry a MYOB-assigned supplier**, across 76 suppliers:
+ANZOR FASTENERS (370 items), HANOVA INTERNATIONAL (239), MACSIM FASTENERS (182),
+SHANGHAI SCREW-FAST (167), MILSONS (131), BREMICK NZ (68).
+
+Supplier resolution is now **65.3% direct from MYOB** rather than inferred from
+purchase-bill history for everything. The inference fallback stays for the
+remaining 1,062 items, but it is no longer standing in for data that was there
+all along. Fixed in `engine.ts`, backfilled from stored `raw` JSON, deployed.
+
+`RestockingInformation.DefaultOrderQuantity` had the same problem under the name
+`DefaultReorderQuantity` (5 items).
+
+**Lesson worth keeping:** a field-name mismatch produces a plausible, uniform
+answer — every item null — that reads as a finding about the client's data
+rather than a bug in ours. Any "this field is never populated" conclusion should
+be checked against the raw payload before it is written down.
+
 ### 1.6 Stocktakes in MYOB — how they actually appear
 
 This is new research, driven by the client's direction. Two findings shape the whole design.
@@ -521,6 +546,83 @@ Per client direction, Allied will tag multi-supplier items themselves rather tha
 - **Show the working** everywhere a number is derived. P1's audit trail is the template.
 - **Never require new item codes.** Tags and flags on existing SKUs only; P4 delivers the mechanism.
 - **Validate against real MYOB data.** Force through every code path: double debit/credit on PO receipt, non-supplier contacts in the card file, open POs with no identifiable supplier, the 8 negative (credit) bill lines, and the `SPWD20G` count case.
+
+---
+
+## Part 2b — Backlog (raised, not scheduled)
+
+### B1 — Let Allied choose what the average cost is based on
+
+**Raised 19 Aug 2026 while researching P2. Deliberately not built — Allied's
+direction was to leave average cost as it is for now.**
+
+Today stock value is *our* on hand × **MYOB's** `AverageCost`. That field is a
+moving weighted average with **no time window**: it spans the entire life of the
+item's stock, re-weighted by quantity on every receipt. Allied cannot configure
+how MYOB calculates it, and the API exposes no setting to change it — verified
+against the v2 documentation.
+
+The open question is whether Allied would rather value stock on a *recent* cost
+— the last 6 or 12 months of buying — instead of a lifetime average that still
+carries prices from years ago.
+
+#### What the API makes possible
+
+| Field | Writable? | Set on Allied's file |
+|---|---|---|
+| `AverageCost` | Read-only, MYOB-calculated | 1,000 of 1,006 stocked items |
+| `BuyingDetails.StandardCost` | **Writable** — the one native lever | 163 items |
+| `BuyingDetails.LastPurchasePrice` | Read-only | 2,125 items |
+| Purchase bill `UnitPrice` | Already mirrored here, every line | 389 items bought in last 12m |
+
+#### What each basis would value the stock at
+
+Measured across the same items at the same moment:
+
+| Basis | Total stock value |
+|---|---|
+| Our latest buy price | $861,063 |
+| **MYOB average cost (current)** | **$861,742** |
+| Our 6-month weighted average | $868,907 |
+| Our 12-month weighted average | $876,174 |
+| StandardCost where set, else average | $888,540 |
+| MYOB last purchase price | $892,739 |
+
+A spread of about **$31,700 (3.6%)** — material at month end, not enormous.
+
+#### The constraint that shapes the design
+
+**Coverage, not accuracy.** A rolling window can only price the items actually
+bought inside it:
+
+| Basis | Stocked items it can price |
+|---|---|
+| MYOB average cost | **1,000 of 1,006** |
+| Our 12-month weighted average | 389 |
+| Our 6-month weighted average | 276 |
+
+So a rolling average can never *replace* MYOB's — 60–70% of stocked items would
+fall back to it anyway. It can only sit on top as a preference.
+
+#### Proposed shape, if it is ever picked up
+
+A configurable cost basis with an explicit fallback chain, defaulting to today's
+behaviour so nothing changes unless Allied ask for it:
+
+1. Allied's own per-item override, if set
+2. MYOB `StandardCost`, if set
+3. Our rolling weighted average over a configurable window, where enough
+   purchases exist
+4. MYOB `AverageCost` — the backstop that always works
+
+Each item would show which rule priced it, so a hybrid valuation stays auditable.
+The UI would let Allied change the window and see the total move before
+committing.
+
+**Two caveats to put to the client first.** Any basis other than MYOB's average
+**will not reconcile to their MYOB valuation report**, which is currently the
+acceptance test for both P1 and P2. And a rolling average built from bill lines
+cannot see freight or landed costs that MYOB folds into its own average.
 
 ---
 
