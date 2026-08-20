@@ -1,4 +1,5 @@
 import { getPool } from "../db.js";
+import { BUSINESS_TODAY_SQL } from "../insights/businessDate.js";
 
 /**
  * Insights schema. Tables prefixed `myob_` are read-only mirrors of MYOB
@@ -595,7 +596,13 @@ const DDL: string[] = [
    $fn$`,
 
   // Today's position, so existing callers need no change.
-  `CREATE OR REPLACE VIEW item_position AS SELECT * FROM item_position_at(CURRENT_DATE)`,
+  /*
+   * Today's position. CURRENT_DATE would be the *database's* today, and the
+   * database runs in UTC — 12-13 hours behind New Zealand, so for much of each
+   * NZ day it names yesterday. Allied's calendar decides what "today" means.
+   */
+  `CREATE OR REPLACE VIEW item_position AS
+     SELECT * FROM item_position_at(${BUSINESS_TODAY_SQL})`,
 
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,

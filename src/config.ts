@@ -65,6 +65,15 @@ export const config = {
     excessCoverWeeks: Number(process.env.EXCESS_COVER_WEEKS || 26),
     /** Ignore excess worth less than this (NZD) to avoid noise. */
     excessMinValue: Number(process.env.EXCESS_MIN_VALUE || 250),
+    /**
+     * Allied is a New Zealand business: their month-end is a New Zealand
+     * calendar date, and MYOB stores transaction dates in local terms. The
+     * server and database both run in UTC, which is 12-13 hours behind, so any
+     * date derived from UTC is wrong for a chunk of every day. Every calendar
+     * date the platform produces — snapshot dates, "today", as-at defaults — is
+     * resolved in this zone instead.
+     */
+    businessTimeZone: optional("BUSINESS_TIMEZONE") || "Pacific/Auckland",
     /** Optional shared access key protecting dashboard APIs. */
     dashboardAccessKey: optional("DASHBOARD_ACCESS_KEY"),
   },

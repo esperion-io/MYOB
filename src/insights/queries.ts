@@ -1,3 +1,4 @@
+import { businessToday } from "./businessDate.js";
 import { config } from "../config.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
@@ -69,7 +70,7 @@ export function resolveWindow(o?: Partial<DemandWindow>): DemandWindow {
     asAt:
       typeof o?.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o.asAt)
         ? o.asAt
-        : new Date().toISOString().slice(0, 10),
+        : businessToday(),
     windowMonths,
     longMonths: Math.max(clampMonths(o?.longMonths, 12), windowMonths),
   };

@@ -2283,6 +2283,12 @@ async function renderData() {
         month-old quantities. Note: MYOB's "available" includes stock on order (verified against
         Allied's file: available = on hand − committed + on order), so it counts stock that has
         not arrived yet.</dd>
+        <dt>Dates and time zone</dt>
+        <dd>Every date shown — the as-at date, count dates, snapshot dates and the rolling window —
+        is a <strong>New Zealand calendar date</strong>, matching MYOB and Allied's own month-end.
+        The server and database run in UTC, which is 12–13 hours behind, so dates are converted
+        rather than taken from the server clock. Without that conversion a position captured at
+        6am on the 20th would have been filed under the 19th.</dd>
         <dt>Stock value</dt>
         <dd>Our on hand × the item's average cost from MYOB, which is Allied's standing valuation
         policy and what their month-end reporting uses. It is calculated here rather than read from

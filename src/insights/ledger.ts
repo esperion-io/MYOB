@@ -1,3 +1,4 @@
+import { businessToday } from "./businessDate.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 
@@ -333,7 +334,7 @@ export async function itemLedger(
 }> {
   await ensureInsightsSchema();
   const pool = getPool();
-  const end = asAt ?? new Date().toISOString().slice(0, 10);
+  const end = asAt ?? businessToday();
 
   const [anchorRes, itemRes] = await Promise.all([
     pool.query(
@@ -454,7 +455,7 @@ export async function establishOpeningBalance(params?: {
 }): Promise<{ asOf: string; itemsAnchored: number; alreadyExisted: boolean }> {
   await ensureInsightsSchema();
   const pool = getPool();
-  const asOf = params?.asOf ?? new Date().toISOString().slice(0, 10);
+  const asOf = params?.asOf ?? businessToday();
 
   const existing = await pool.query(
     `SELECT count_date::text AS d, COUNT(*)::int AS n
@@ -536,7 +537,7 @@ export interface OwnedPosition {
  */
 export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
   await ensureInsightsSchema();
-  const date = asAt ?? new Date().toISOString().slice(0, 10);
+  const date = asAt ?? businessToday();
   const result = await getPool().query(
     `WITH anchor AS (
        SELECT DISTINCT ON (item_uid) item_uid, count_date, counted_qty, source
@@ -676,7 +677,7 @@ export async function snapshotPositions(params?: {
   overwrite?: boolean;
 }): Promise<{ asAt: string; rows: number }> {
   await ensureInsightsSchema();
-  const asAt = params?.asAt ?? new Date().toISOString().slice(0, 10);
+  const asAt = params?.asAt ?? businessToday();
   const positions = await ownedPositions(asAt);
   const pool = getPool();
 

@@ -1,3 +1,4 @@
+import { businessToday } from "../insights/businessDate.js";
 import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
 import { config } from "../config.js";
@@ -215,7 +216,7 @@ insightsRouter.get("/purchasing.csv", async (_req, res) => {
       .type("text/csv")
       .set(
         "Content-Disposition",
-        `attachment; filename="allied-purchasing-${new Date().toISOString().slice(0, 10)}.csv"`,
+        `attachment; filename="allied-purchasing-${businessToday()}.csv"`,
       )
       .send(purchasingCsv(data));
   } catch (err) {
@@ -447,7 +448,7 @@ insightsRouter.get("/positions", async (req, res) => {
   try {
     const asAt = typeof req.query.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asAt)
       ? req.query.asAt
-      : new Date().toISOString().slice(0, 10);
+      : businessToday();
     const positions = await ownedPositions(asAt);
     res.json({
       asAt,
@@ -542,7 +543,7 @@ insightsRouter.post("/counts/import", async (req, res) => {
     const countDate =
       typeof req.body?.countDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.body.countDate)
         ? req.body.countDate
-        : new Date().toISOString().slice(0, 10);
+        : businessToday();
     res.json(
       await importCounts({
         rows,
