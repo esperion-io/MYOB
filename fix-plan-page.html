@@ -598,6 +598,62 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
 
   <hr />
 
+  <!-- ============= BACKLOG ============= -->
+  <section class="part">
+    <p class="part-label">Backlog</p>
+    <h2>Raised, not scheduled</h2>
+
+    <article class="card">
+      <h3><span class="pid">B1</span> Let Allied choose what the average cost is based on <span class="tag warn">Not built</span></h3>
+      <p class="dep">Raised 19 Aug 2026 during P2 · Client direction: leave average cost as it is for now</p>
+      <p>Stock value is currently <em>our</em> on hand × <strong>MYOB's</strong> <code>AverageCost</code>. That field is a
+      moving weighted average with <strong>no time window</strong> — it spans the whole life of the item's stock,
+      re-weighted on every receipt. Allied cannot configure how MYOB calculates it, and the API exposes no
+      setting to change it.</p>
+      <p>The open question is whether they would rather value stock on a <em>recent</em> cost — the last 6 or 12
+      months of buying — than a lifetime average still carrying prices from years ago.</p>
+
+      <h4>What each basis would value the stock at</h4>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Basis</th><th class="num">Total stock value</th></tr></thead>
+          <tbody>
+            <tr><td>Our latest buy price</td><td class="num">$861,063</td></tr>
+            <tr><td><strong>MYOB average cost (current)</strong></td><td class="num"><strong>$861,742</strong></td></tr>
+            <tr><td>Our 6-month weighted average</td><td class="num">$868,907</td></tr>
+            <tr><td>Our 12-month weighted average</td><td class="num">$876,174</td></tr>
+            <tr><td>StandardCost where set, else average</td><td class="num">$888,540</td></tr>
+            <tr><td>MYOB last purchase price</td><td class="num">$892,739</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A spread of about <strong>$31,700 — 3.6%</strong>. Material at month end, not enormous.</p>
+
+      <div class="evidence">
+        <p class="etitle">The constraint that decides the design is coverage, not accuracy</p>
+        <ul>
+          <li>MYOB average cost prices <strong>1,000 of 1,006</strong> stocked items.</li>
+          <li>Our 12-month weighted average prices <strong>389</strong>.</li>
+          <li>Our 6-month weighted average prices <strong>276</strong>.</li>
+        </ul>
+        <p style="margin:10px 0 0">Most items simply were not bought inside the window, so a rolling average can never
+        <em>replace</em> MYOB's — 60–70% would fall back to it anyway. It can only sit on top as a preference.</p>
+      </div>
+
+      <h4>Proposed shape, if picked up</h4>
+      <p>A configurable basis with an explicit fallback chain, defaulting to today's behaviour so nothing moves
+      unless Allied ask: their own per-item override → MYOB <code>StandardCost</code> → our rolling weighted
+      average over a chosen window → MYOB <code>AverageCost</code> as the backstop. Each item shows which rule
+      priced it, so a hybrid valuation stays auditable.</p>
+      <p><strong>Two caveats to put to the client first.</strong> Any basis other than MYOB's average
+      <strong>will not reconcile to their MYOB valuation report</strong>, which is the acceptance test for both P1
+      and P2. And a rolling average built from bill lines cannot see freight or landed costs that MYOB folds into
+      its own average.</p>
+    </article>
+  </section>
+
+  <hr />
+
   <!-- ================= PART 3 ================= -->
   <section class="part">
     <p class="part-label">Part 3</p>
