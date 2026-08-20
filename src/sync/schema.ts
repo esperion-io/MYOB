@@ -472,63 +472,130 @@ const DDL: string[] = [
      ON platform_daily_position (as_at_date)`,
 
   /*
-   * The platform's current position for every item — the single definition the
-   * whole product reads. on_hand comes from the anchored ledger, committed from
-   * our own open sale orders, on_order from our own unreceived purchase orders.
+   * The platform's position for every item **as at any date** — one definition
+   * the whole product reads, at today's date or a historical one.
    *
-   * MYOB's raw quantities appear here only as myob_* comparison columns. Nothing
-   * outside this view, the ledger and the sync may read them; a guard test
-   * enforces that, because silently reaching back to MYOB's figure is exactly
-   * the failure this work exists to remove.
+   * on_hand comes from the anchored ledger, committed from our own open sale
+   * orders, on_order from our own unreceived purchase orders. MYOB's raw
+   * quantities appear only as myob_* comparison columns; a guard test stops
+   * anything outside the sync, schema and ledger reading them.
+   *
+   * Three cases, distinguished by `basis`:
+   *   counted        — rolled forward from a physical count on or before the date
+   *   reconstructed  — rolled forward from the conversion balance, or backwards
+   *                    through it, which is ordinary reconstruction and valid
+   *   precedes_count — the date sits before a physical count, so no number is
+   *                    returned. A count absorbs drift no document explains, and
+   *                    reading back through one produces nonsense.
    */
-  `CREATE OR REPLACE VIEW item_position AS
-   WITH anchor AS (
-     SELECT DISTINCT ON (item_uid) item_uid, count_date, counted_qty, source
-     FROM platform_stock_count
-     WHERE count_date <= CURRENT_DATE
-     ORDER BY item_uid, count_date DESC,
-              (source <> 'opening_balance') DESC, id DESC
-   ),
-   since_anchor AS (
-     SELECT m.item_uid, SUM(m.qty)::double precision AS qty
-     FROM stock_movements m
-     JOIN anchor a ON a.item_uid = m.item_uid
-     WHERE m.moved_on > a.count_date AND m.moved_on <= CURRENT_DATE
-     GROUP BY m.item_uid
-   ),
-   our_committed AS (
-     SELECT l.item_uid, SUM(l.qty)::double precision AS qty
-     FROM myob_sale_order_lines l
-     JOIN myob_sale_orders o ON o.uid = l.order_uid
-     WHERE UPPER(COALESCE(o.status, '')) = 'OPEN' AND l.item_uid IS NOT NULL
-     GROUP BY l.item_uid
-   ),
-   our_on_order AS (
-     SELECT l.item_uid,
-            SUM(GREATEST(COALESCE(l.qty,0) - COALESCE(l.received_qty,0), 0))::double precision AS qty
-     FROM myob_purchase_order_lines l
-     JOIN myob_purchase_orders o ON o.uid = l.order_uid
-     WHERE UPPER(COALESCE(o.status, '')) = 'OPEN' AND l.item_uid IS NOT NULL
-     GROUP BY l.item_uid
+  `CREATE OR REPLACE FUNCTION item_position_at(p_as_at date)
+   RETURNS TABLE (
+     item_uid text, on_hand double precision, committed double precision,
+     free_stock double precision, on_order double precision,
+     anchor_date date, anchor_source text, anchor_qty double precision,
+     movements_since_anchor double precision, has_anchor boolean,
+     myob_on_hand double precision, myob_committed double precision,
+     divergence double precision, basis text
    )
-   SELECT i.uid AS item_uid,
-          (a.counted_qty + COALESCE(sa.qty, 0))::double precision AS on_hand,
-          COALESCE(oc.qty, 0)::double precision AS committed,
-          ((a.counted_qty + COALESCE(sa.qty, 0)) - COALESCE(oc.qty, 0))::double precision AS free_stock,
-          COALESCE(oo.qty, 0)::double precision AS on_order,
-          a.count_date AS anchor_date,
-          a.source AS anchor_source,
-          a.counted_qty::double precision AS anchor_qty,
-          COALESCE(sa.qty, 0)::double precision AS movements_since_anchor,
-          (a.item_uid IS NOT NULL) AS has_anchor,
-          i.qty_on_hand::double precision AS myob_on_hand,
-          i.qty_committed::double precision AS myob_committed,
-          ((a.counted_qty + COALESCE(sa.qty, 0)) - COALESCE(i.qty_on_hand, 0))::double precision AS divergence
-   FROM myob_items i
-   LEFT JOIN anchor a ON a.item_uid = i.uid
-   LEFT JOIN since_anchor sa ON sa.item_uid = i.uid
-   LEFT JOIN our_committed oc ON oc.item_uid = i.uid
-   LEFT JOIN our_on_order oo ON oo.item_uid = i.uid`,
+   LANGUAGE sql STABLE AS $fn$
+     WITH anchor AS (
+       SELECT DISTINCT ON (sc.item_uid)
+              sc.item_uid, sc.count_date, sc.counted_qty, sc.source
+       FROM platform_stock_count sc
+       WHERE sc.count_date <= p_as_at
+       ORDER BY sc.item_uid, sc.count_date DESC,
+                (sc.source <> 'opening_balance') DESC, sc.id DESC
+     ),
+     later_count AS (
+       SELECT DISTINCT ON (sc.item_uid) sc.item_uid
+       FROM platform_stock_count sc
+       WHERE sc.count_date > p_as_at AND sc.source <> 'opening_balance'
+       ORDER BY sc.item_uid, sc.count_date ASC
+     ),
+     opening AS (
+       SELECT DISTINCT ON (sc.item_uid) sc.item_uid, sc.count_date, sc.counted_qty
+       FROM platform_stock_count sc
+       WHERE sc.source = 'opening_balance'
+       ORDER BY sc.item_uid, sc.count_date ASC
+     ),
+     since_anchor AS (
+       SELECT m.item_uid, SUM(m.qty)::double precision AS qty
+       FROM stock_movements m JOIN anchor a ON a.item_uid = m.item_uid
+       WHERE m.moved_on > a.count_date AND m.moved_on <= p_as_at
+       GROUP BY m.item_uid
+     ),
+     back_from_opening AS (
+       SELECT m.item_uid, SUM(m.qty)::double precision AS qty
+       FROM stock_movements m JOIN opening o ON o.item_uid = m.item_uid
+       WHERE m.moved_on > p_as_at AND m.moved_on <= o.count_date
+       GROUP BY m.item_uid
+     ),
+     our_committed AS (
+       SELECT l.item_uid, SUM(l.qty)::double precision AS qty
+       FROM myob_sale_order_lines l
+       JOIN myob_sale_orders o ON o.uid = l.order_uid
+       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
+         AND l.item_uid IS NOT NULL AND o.date::date <= p_as_at
+       GROUP BY l.item_uid
+     ),
+     our_on_order AS (
+       SELECT l.item_uid,
+              SUM(GREATEST(COALESCE(l.qty,0) - COALESCE(l.received_qty,0), 0))::double precision AS qty
+       FROM myob_purchase_order_lines l
+       JOIN myob_purchase_orders o ON o.uid = l.order_uid
+       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
+         AND l.item_uid IS NOT NULL AND o.date::date <= p_as_at
+       GROUP BY l.item_uid
+     ),
+     resolved AS (
+       SELECT i.uid AS item_uid,
+              CASE
+                WHEN a.item_uid IS NOT NULL
+                  THEN a.counted_qty + COALESCE(sa.qty, 0)
+                WHEN lc.item_uid IS NOT NULL THEN NULL
+                WHEN op.item_uid IS NOT NULL
+                  THEN op.counted_qty - COALESCE(bo.qty, 0)
+                ELSE NULL
+              END::double precision AS on_hand,
+              COALESCE(oc.qty, 0)::double precision AS committed,
+              COALESCE(oo.qty, 0)::double precision AS on_order,
+              COALESCE(a.count_date, op.count_date) AS anchor_date,
+              CASE
+                WHEN a.item_uid IS NOT NULL THEN a.source
+                WHEN lc.item_uid IS NOT NULL THEN NULL
+                WHEN op.item_uid IS NOT NULL THEN 'opening_balance_rolled_back'
+              END AS anchor_source,
+              a.counted_qty::double precision AS anchor_qty,
+              COALESCE(sa.qty, 0)::double precision AS movements_since_anchor,
+              (a.item_uid IS NOT NULL) AS has_anchor,
+              i.qty_on_hand::double precision AS myob_on_hand,
+              i.qty_committed::double precision AS myob_committed,
+              CASE
+                WHEN a.item_uid IS NOT NULL AND a.source <> 'opening_balance' THEN 'counted'
+                WHEN lc.item_uid IS NOT NULL AND a.item_uid IS NULL THEN 'precedes_count'
+                WHEN a.item_uid IS NOT NULL OR op.item_uid IS NOT NULL THEN 'reconstructed'
+                ELSE 'no_opening_balance'
+              END AS basis
+       FROM myob_items i
+       LEFT JOIN anchor a ON a.item_uid = i.uid
+       LEFT JOIN later_count lc ON lc.item_uid = i.uid
+       LEFT JOIN opening op ON op.item_uid = i.uid
+       LEFT JOIN since_anchor sa ON sa.item_uid = i.uid
+       LEFT JOIN back_from_opening bo ON bo.item_uid = i.uid
+       LEFT JOIN our_committed oc ON oc.item_uid = i.uid
+       LEFT JOIN our_on_order oo ON oo.item_uid = i.uid
+     )
+     SELECT item_uid, on_hand, committed,
+            (on_hand - committed)::double precision AS free_stock,
+            on_order, anchor_date, anchor_source, anchor_qty,
+            movements_since_anchor, has_anchor, myob_on_hand, myob_committed,
+            (on_hand - COALESCE(myob_on_hand, 0))::double precision AS divergence,
+            basis
+     FROM resolved
+   $fn$`,
+
+  // Today's position, so existing callers need no change.
+  `CREATE OR REPLACE VIEW item_position AS SELECT * FROM item_position_at(CURRENT_DATE)`,
 
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,

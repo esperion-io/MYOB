@@ -45,24 +45,60 @@ export function autoRegion(country: string | null | undefined): SupplierRegion |
   return "Overseas — other";
 }
 
-const DEMAND_CTE = `
+/**
+ * Demand window options.
+ *
+ * `windowMonths` is the rolling window Allied choose — 6 by default, down from
+ * the 12 they had been using, because a 12-month average flattens their spiky
+ * demand profile. `longMonths` is a wider look-back used only for items with no
+ * activity inside the chosen window, so a genuine slow mover still gets a rate
+ * rather than a blank.
+ *
+ * Everything is measured up to `asAt`, not to today, so demand and stock
+ * position always describe the same moment.
+ */
+export interface DemandWindow {
+  asAt: string;
+  windowMonths: number;
+  longMonths: number;
+}
+
+export function resolveWindow(o?: Partial<DemandWindow>): DemandWindow {
+  const windowMonths = clampMonths(o?.windowMonths, 6);
+  return {
+    asAt:
+      typeof o?.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o.asAt)
+        ? o.asAt
+        : new Date().toISOString().slice(0, 10),
+    windowMonths,
+    longMonths: Math.max(clampMonths(o?.longMonths, 12), windowMonths),
+  };
+}
+
+/** Months are interpolated into SQL, so they must be whole and bounded. */
+function clampMonths(v: unknown, fallback: number): number {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n >= 1 && n <= 60 ? n : fallback;
+}
+
+const demandCte = (w: DemandWindow): string => `
   direct_demand AS (
     SELECT l.item_uid,
-           COALESCE(SUM(l.qty) FILTER (WHERE i.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS direct_90,
-           COALESCE(SUM(l.qty), 0)::float8 AS direct_365
+           COALESCE(SUM(l.qty) FILTER (WHERE i.date <= '${w.asAt}'::date AND i.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS direct_window,
+           COALESCE(SUM(l.qty), 0)::float8 AS direct_long
     FROM myob_sale_invoice_lines l
     JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
-    WHERE i.date >= NOW() - INTERVAL '365 days' AND l.item_uid IS NOT NULL
+    WHERE i.date <= '${w.asAt}'::date AND i.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths}) AND l.item_uid IS NOT NULL
     GROUP BY l.item_uid
   ),
   component_demand AS (
     SELECT bl.item_uid,
-           COALESCE(SUM(-bl.qty) FILTER (WHERE b.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS comp_90,
-           COALESCE(SUM(-bl.qty), 0)::float8 AS comp_365
+           COALESCE(SUM(-bl.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS comp_window,
+           COALESCE(SUM(-bl.qty), 0)::float8 AS comp_long
     FROM myob_build_lines bl
     JOIN myob_builds b ON b.uid = bl.build_uid
     WHERE bl.qty < 0 AND bl.item_uid IS NOT NULL
-      AND b.date >= NOW() - INTERVAL '365 days'
+      AND b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths})
     GROUP BY bl.item_uid
   ),
   incoming AS (
@@ -105,19 +141,19 @@ const DEMAND_CTE = `
   ),
   built_output AS (
     SELECT bl.item_uid,
-           COALESCE(SUM(bl.qty) FILTER (WHERE b.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS built_90
+           COALESCE(SUM(bl.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS built_window
     FROM myob_build_lines bl
     JOIN myob_builds b ON b.uid = bl.build_uid
     WHERE bl.qty > 0 AND bl.item_uid IS NOT NULL
-      AND b.date >= NOW() - INTERVAL '365 days'
+      AND b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths})
     GROUP BY bl.item_uid
   ),
   purchased_qty AS (
     SELECT l.item_uid,
-           COALESCE(SUM(l.qty) FILTER (WHERE b.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS bought_90
+           COALESCE(SUM(l.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS bought_window
     FROM myob_purchase_bill_lines l
     JOIN myob_purchase_bills b ON b.uid = l.bill_uid
-    WHERE l.item_uid IS NOT NULL AND b.date >= NOW() - INTERVAL '365 days'
+    WHERE l.item_uid IS NOT NULL AND b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths})
     GROUP BY l.item_uid
   ),
   -- Parent units sold in the last 90 days that were NOT built or bought in
@@ -128,7 +164,7 @@ const DEMAND_CTE = `
   parent_unexplained AS (
     SELECT b.parent_uid, b.component_uid, b.qty_per,
            GREATEST(
-             COALESCE(dd.direct_90, 0) - COALESCE(bo.built_90, 0) - COALESCE(pq.bought_90, 0),
+             COALESCE(dd.direct_window, 0) - COALESCE(bo.built_window, 0) - COALESCE(pq.bought_window, 0),
              0
            ) AS units
     FROM effective_bom b
@@ -138,7 +174,7 @@ const DEMAND_CTE = `
   ),
   potential_demand AS (
     SELECT component_uid AS item_uid,
-           SUM(units * qty_per)::float8 AS potential_90,
+           SUM(units * qty_per)::float8 AS potential_window,
            COUNT(*) FILTER (WHERE units > 0)::int AS potential_parents
     FROM parent_unexplained
     GROUP BY component_uid
@@ -170,7 +206,7 @@ const DEMAND_CTE = `
   )
 `;
 
-const ITEM_SELECT = `
+const itemSelect = (w: DemandWindow): string => `
   SELECT it.uid, it.number, it.name, it.description,
          it.is_active, it.is_bought, it.is_sold, it.is_inventoried,
          pos.on_hand, pos.committed, pos.free_stock, pos.on_order,
@@ -189,18 +225,18 @@ const ITEM_SELECT = `
          COALESCE(aa.assigned_count, 0) AS assigned_supplier_count,
          sup.country AS supplier_country,
          sm.region AS supplier_region_override,
-         COALESCE(dd.direct_90, 0) AS direct_90,
-         COALESCE(dd.direct_365, 0) AS direct_365,
-         COALESCE(cd.comp_90, 0) AS comp_90,
-         COALESCE(cd.comp_365, 0) AS comp_365,
+         COALESCE(dd.direct_window, 0) AS direct_window,
+         COALESCE(dd.direct_long, 0) AS direct_long,
+         COALESCE(cd.comp_window, 0) AS comp_window,
+         COALESCE(cd.comp_long, 0) AS comp_long,
          COALESCE(inc.qty, 0) AS incoming_qty,
          COALESCE(u.parent_count, 0) AS parent_count,
          COALESCE(ud.parent_count_deep, 0) AS parent_count_deep,
          COALESCE(p.component_count, 0) AS component_count,
-         COALESCE(pot.potential_90, 0) AS potential_90,
+         COALESCE(pot.potential_window, 0) AS potential_window,
          COALESCE(pot.potential_parents, 0) AS potential_parents
   FROM myob_items it
-  JOIN item_position pos ON pos.item_uid = it.uid
+  JOIN item_position_at('${w.asAt}'::date) pos ON pos.item_uid = it.uid
   LEFT JOIN direct_demand dd ON dd.item_uid = it.uid
   LEFT JOIN component_demand cd ON cd.item_uid = it.uid
   LEFT JOIN incoming inc ON inc.item_uid = it.uid
@@ -263,12 +299,18 @@ export interface ItemComputed {
   supplierRegionSource: "user" | "auto" | null;
   syncedAt: string | null;
   demand: {
-    direct90: number;
-    direct365: number;
-    component90: number;
-    component365: number;
+    /** Sales inside the chosen rolling window. */
+    directWindow: number;
+    /** Sales over the wider look-back, used when the window is empty. */
+    directLong: number;
+    componentWindow: number;
+    componentLong: number;
     weekly: number;
-    basis: "90d" | "365d" | "none";
+    basis: "window" | "long" | "none";
+    /** The window these figures were measured over, for labelling. */
+    windowMonths: number;
+    longMonths: number;
+    asAt: string;
   };
   incomingQty: number;
   parentCount: number;
@@ -281,7 +323,7 @@ export interface ItemComputed {
    * demand but deliberately excluded from weekly, cover, suggestion and risk.
    */
   potential: {
-    qty90: number;
+    qtyWindow: number;
     weekly: number;
     parentCount: number;
     understatesMeasured: boolean;
@@ -300,24 +342,29 @@ export interface ItemComputed {
   } | null;
 }
 
-function computeItem(row: Record<string, unknown>): ItemComputed {
+function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemComputed {
   const n = (v: unknown): number | null =>
     v == null ? null : Number.isFinite(Number(v)) ? Number(v) : null;
-  const direct90 = n(row.direct_90) ?? 0;
-  const direct365 = n(row.direct_365) ?? 0;
-  const comp90 = n(row.comp_90) ?? 0;
-  const comp365 = n(row.comp_365) ?? 0;
+  const directWindow = n(row.direct_window) ?? 0;
+  const directLong = n(row.direct_long) ?? 0;
+  const compWindow = n(row.comp_window) ?? 0;
+  const compLong = n(row.comp_long) ?? 0;
 
-  const total90 = direct90 + comp90;
-  const total365 = direct365 + comp365;
+  const totalWindow = directWindow + compWindow;
+  const totalLong = directLong + compLong;
+  // Weeks per month averaged over a year, so a 6-month window is 26.09 weeks
+  // rather than a rough 26 — the rate feeds cover and order quantities.
+  const weeksIn = (months: number) => (months * 365.25) / 12 / 7;
   let weekly = 0;
-  let basis: "90d" | "365d" | "none" = "none";
-  if (total90 > 0) {
-    weekly = total90 / (90 / 7);
-    basis = "90d";
-  } else if (total365 > 0) {
-    weekly = total365 / (365 / 7);
-    basis = "365d";
+  let basis: "window" | "long" | "none" = "none";
+  if (totalWindow > 0) {
+    weekly = totalWindow / weeksIn(win.windowMonths);
+    basis = "window";
+  } else if (totalLong > 0) {
+    // Nothing sold inside the chosen window, so fall back to the wider
+    // look-back rather than reporting a slow mover as having no demand at all.
+    weekly = totalLong / weeksIn(win.longMonths);
+    basis = "long";
   }
 
   // Every downstream figure — cover, below-minimum, suggestions, risk, sorting,
@@ -335,9 +382,9 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
 
   // Inferred pack-driven pull. Material when it would move the picture:
   // there is no measured demand at all, or it adds at least a quarter again.
-  const potential90 = n(row.potential_90) ?? 0;
+  const potentialWindow = n(row.potential_window) ?? 0;
   const understatesMeasured =
-    potential90 > 0 && (total90 <= 0 || potential90 >= total90 * 0.25);
+    potentialWindow > 0 && (totalWindow <= 0 || potentialWindow >= totalWindow * 0.25);
 
   const freeStock = onHand == null ? null : onHand - (committed ?? 0);
   const onOrder = n(row.on_order) ?? 0;
@@ -363,7 +410,9 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
     (row.inferred_supplier_uid as string) ??
     null;
   if (weekly > 0 && !supplierUid) flags.push("no_supplier");
-  if (basis === "365d") flags.push("slow_mover");
+  // No sales inside the chosen window at all — the rate came from the wider
+  // look-back, so treat it as a slow mover rather than a current seller.
+  if (basis === "long") flags.push("slow_mover");
   if (understatesMeasured) flags.push("understated_demand");
 
   const factors: { label: string; points: number }[] = [];
@@ -514,20 +563,23 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
         : null,
     syncedAt: row.synced_at ? new Date(row.synced_at as string).toISOString() : null,
     demand: {
-      direct90,
-      direct365,
-      component90: comp90,
-      component365: comp365,
+      directWindow,
+      directLong,
+      componentWindow: compWindow,
+      componentLong: compLong,
       weekly: Number(weekly.toFixed(3)),
       basis,
+      windowMonths: win.windowMonths,
+      longMonths: win.longMonths,
+      asAt: win.asAt,
     },
     incomingQty,
     parentCount,
     parentCountDeep: n(row.parent_count_deep) ?? 0,
     componentCount: n(row.component_count) ?? 0,
     potential: {
-      qty90: Number(potential90.toFixed(1)),
-      weekly: Number((potential90 / (90 / 7)).toFixed(3)),
+      qtyWindow: Number(potentialWindow.toFixed(1)),
+      weekly: Number((potentialWindow / ((win.windowMonths * 365.25) / 12 / 7)).toFixed(3)),
       parentCount: n(row.potential_parents) ?? 0,
       understatesMeasured,
     },
@@ -539,16 +591,24 @@ function computeItem(row: Record<string, unknown>): ItemComputed {
   };
 }
 
-let itemsCache: { at: number; items: ItemComputed[] } | null = null;
+let itemsCache: { key: string; at: number; items: ItemComputed[] } | null = null;
 
-export async function computedItems(force = false): Promise<ItemComputed[]> {
-  if (!force && itemsCache && Date.now() - itemsCache.at < 30_000) {
+export async function computedItems(
+  opts?: Partial<DemandWindow> | boolean,
+): Promise<ItemComputed[]> {
+  // Historic callers passed `force` as a boolean; keep that working.
+  const force = opts === true;
+  const win = resolveWindow(typeof opts === "object" ? opts : undefined);
+  const key = `${win.asAt}|${win.windowMonths}|${win.longMonths}`;
+  if (!force && itemsCache?.key === key && Date.now() - itemsCache.at < 30_000) {
     return itemsCache.items;
   }
   await ensureInsightsSchema();
-  const result = await getPool().query(`WITH ${DEMAND_CTE} ${ITEM_SELECT}`);
-  const items = result.rows.map(computeItem);
-  itemsCache = { at: Date.now(), items };
+  const result = await getPool().query(
+    `WITH ${demandCte(win)} ${itemSelect(win)}`,
+  );
+  const items = result.rows.map((r) => computeItem(r, win));
+  itemsCache = { key, at: Date.now(), items };
   return items;
 }
 
@@ -556,7 +616,7 @@ export function invalidateItemsCache(): void {
   itemsCache = null;
 }
 
-export interface ListParams {
+export interface ListParams extends Partial<DemandWindow> {
   q?: string;
   filter?: string;
   region?: string;
@@ -583,7 +643,7 @@ const SORT_VALUES: Record<string, (i: ItemComputed) => number | string | null> =
   weekly: (i) => i.demand.weekly,
   value: (i) => i.currentValue,
   excess: (i) => i.excess?.value ?? null,
-  potential: (i) => (i.potential.qty90 > 0 ? i.potential.qty90 : null),
+  potential: (i) => (i.potential.qtyWindow > 0 ? i.potential.qtyWindow : null),
   used_in: (i) => Math.max(i.parentCountDeep, i.parentCount),
 };
 
@@ -597,7 +657,8 @@ const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
 };
 
 export async function listItems(params: ListParams) {
-  const all = await computedItems();
+  const win = resolveWindow(params);
+  const all = await computedItems(win);
   const q = params.q?.trim().toLowerCase();
   let rows = all;
 
@@ -696,6 +757,7 @@ export async function listItems(params: ListParams) {
     total: rows.length,
     page,
     pageSize,
+    window: win,
     sort: sortKey,
     dir,
     targetCoverWeeks: config.insights.targetCoverWeeks,
@@ -703,8 +765,9 @@ export async function listItems(params: ListParams) {
   };
 }
 
-export async function overview() {
-  const items = await computedItems();
+export async function overview(opts?: Partial<DemandWindow>) {
+  const win = resolveWindow(opts);
+  const items = await computedItems(win);
   const pool = getPool();
 
   const active = items.filter((i) => i.isActive !== false);
@@ -977,16 +1040,17 @@ function computeBuildability(rows: BomTreeRow[], rootUid: string) {
   };
 }
 
-export async function itemDetail(uid: string) {
+export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
   await ensureInsightsSchema();
+  const win = resolveWindow(opts);
   const pool = getPool();
 
   const itemResult = await pool.query(
-    `WITH ${DEMAND_CTE} ${ITEM_SELECT} WHERE it.uid = $1`,
+    `WITH ${demandCte(win)} ${itemSelect(win)} WHERE it.uid = $1`,
     [uid],
   );
   if (!itemResult.rows.length) return null;
-  const item = computeItem(itemResult.rows[0]);
+  const item = computeItem(itemResult.rows[0], win);
 
   const [monthly, movements, commitments, incoming, purchases, rels, freshness, potentialParents] =
     await Promise.all([
@@ -1157,8 +1221,9 @@ export async function productsList(params: { q?: string; page?: number }) {
   };
 }
 
-export async function purchasing() {
-  const items = await computedItems();
+export async function purchasing(opts?: Partial<DemandWindow>) {
+  const win = resolveWindow(opts);
+  const items = await computedItems(win);
   const rows = items
     .filter((i) => i.suggestion != null || i.flags.includes("below_min"))
     .sort((a, b) => b.risk.score - a.risk.score);
@@ -1223,7 +1288,7 @@ export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): str
           i.minLevel ?? "",
           i.averageCost ?? "", i.currentValue == null ? "" : i.currentValue.toFixed(2),
           i.demand.weekly, i.demand.basis,
-          i.coverWeeks ?? "", i.potential.qty90 || "",
+          i.coverWeeks ?? "", i.potential.qtyWindow || "",
           i.suggestion?.qty ?? 0,
           ((i.suggestion?.qty ?? 0) * (i.averageCost ?? 0)).toFixed(2),
           i.risk.score, esc(i.flags.join(" ")),

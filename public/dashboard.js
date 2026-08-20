@@ -507,6 +507,8 @@ function route() {
     counts: renderCounts,
     data: renderData,
   };
+  const bar = document.getElementById("controls");
+  if (bar) bar.hidden = !VIEWS_USING_WINDOW.has(view);
   (views[view] || renderOverview)().catch((err) => {
     main.innerHTML = `<div class="notice fail">${esc(err.message)}</div>
       <p class="muted">If no data has been synced yet, open <a href="#/data">Data &amp; Sync</a> and run a full sync.</p>`;
@@ -522,11 +524,110 @@ function itemLink(uid, label) {
   return `<a href="#/item/${esc(uid)}">${esc(label)}</a>`;
 }
 
+
+/* ================= P3: as-at date and rolling window =================
+ *
+ * Two controls, kept deliberately distinct. `asAt` selects a moment — what was
+ * physically on the shelf that day. `windowMonths` selects a period — what sold
+ * over it. The client's month-end process asks the first question; their demand
+ * analysis asks the second. Presenting them as one date range produces figures
+ * that reconcile to nothing.
+ *
+ * Default window is 6 months: Allied had been using 12, which flattens their
+ * spiky demand profile.
+ */
+const VIEWS_USING_WINDOW = new Set(["overview", "inventory", "item", "purchasing", "products"]);
+
+/*
+ * Dates here are calendar dates, not instants, so they must be formatted from
+ * local parts. `toISOString()` converts to UTC first, which in New Zealand
+ * (UTC+12/+13) rolls the date back a day — "last month end" came out as 30 July
+ * instead of 31, and "today" would be yesterday for half of each morning.
+ */
+function isoLocal(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function todayLocal() {
+  return isoLocal(new Date());
+}
+
+function lastMonthEnd() {
+  const d = new Date();
+  return isoLocal(new Date(d.getFullYear(), d.getMonth(), 0));
+}
+
+const windowState = {
+  asAt: localStorage.getItem("afAsAt") || todayLocal(),
+  windowMonths: Number(localStorage.getItem("afWindowMonths")) || 6,
+};
+
+/** Append the two controls to any endpoint that respects them. */
+function withWindow(url) {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}asAt=${encodeURIComponent(windowState.asAt)}&windowMonths=${windowState.windowMonths}`;
+}
+
+/** True when the selected date is not today — used to warn on stale-looking views. */
+function isHistorical() {
+  return windowState.asAt !== todayLocal();
+}
+
+function windowLabel() {
+  const m = windowState.windowMonths;
+  return m === 12 ? "12 months" : `${m} months`;
+}
+
+function initWindowControls() {
+  const bar = document.getElementById("controls");
+  const asAt = document.getElementById("ctl-asat");
+  const win = document.getElementById("ctl-window");
+  const today = todayLocal();
+
+  asAt.value = windowState.asAt;
+  asAt.max = today;
+  win.value = String(windowState.windowMonths);
+
+  asAt.addEventListener("change", () => {
+    windowState.asAt = asAt.value || today;
+    localStorage.setItem("afAsAt", windowState.asAt);
+    route();
+  });
+  win.addEventListener("change", () => {
+    windowState.windowMonths = Number(win.value);
+    localStorage.setItem("afWindowMonths", String(windowState.windowMonths));
+    route();
+  });
+  document.getElementById("ctl-monthend").addEventListener("click", () => {
+    asAt.value = lastMonthEnd();
+    asAt.dispatchEvent(new Event("change"));
+  });
+  document.getElementById("ctl-reset").addEventListener("click", () => {
+    asAt.value = today;
+    win.value = "6";
+    windowState.asAt = today;
+    windowState.windowMonths = 6;
+    localStorage.setItem("afAsAt", today);
+    localStorage.setItem("afWindowMonths", "6");
+    route();
+  });
+  bar.hidden = false;
+}
+
+/** Banner shown on every view whose numbers are not "as at today". */
+function historicalNotice() {
+  if (!isHistorical()) return "";
+  return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>,
+    reconstructed from the anchored ledger. Sales and demand cover the ${windowLabel()} up to that date.
+    Average cost is today's — MYOB exposes no cost history, so historical valuations are an approximation.</div>`;
+}
+
 /* ---------- overview ---------- */
 
 async function renderOverview() {
   main.innerHTML = '<p class="loading">Loading overview…</p>';
-  const data = await fetchJson("/api/insights/overview");
+  const data = await fetchJson(withWindow("/api/insights/overview"));
   const k = data.kpis;
 
   if (!k.totalSkus) {
@@ -544,6 +645,7 @@ async function renderOverview() {
   const rel = Object.fromEntries((data.relationships || []).map((r) => [r.source, r.count]));
 
   main.innerHTML = `
+    ${historicalNotice()}
     <div class="page-head">
       <div>
         <h1>Overview</h1>
@@ -786,7 +888,7 @@ async function loadInventoryTable() {
     page: String(invState.page),
   });
   if (invState.dir) params.set("dir", invState.dir);
-  const data = await fetchJson(`/api/insights/items?${params}`);
+  const data = await fetchJson(withWindow(`/api/insights/items?${params}`));
   invItems = new Map(data.items.map((i) => [i.uid, i]));
   invTargetCover = data.targetCoverWeeks ?? null;
   invLastDir = data.dir ?? "desc";
@@ -934,13 +1036,13 @@ function expandPanelHtml(i) {
     <h3>Demand &amp; cover</h3>
     ${kvRow("Weekly demand", `${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"} <span class="muted">(${i.demand.basis === "none" ? "no activity" : i.demand.basis + " basis"})</span>`)}
     ${kvRow(`Cover${invTargetCover ? ` (target ${invTargetCover}w)` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
-    ${kvRow("Direct sales 90d / 365d", `${qty(i.demand.direct90)} / ${qty(i.demand.direct365)}`)}
-    ${kvRow("Via builds 90d / 365d", `${qty(i.demand.component90)} / ${qty(i.demand.component365)}`)}
+    ${kvRow(`Direct sales · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.directWindow)} / ${qty(i.demand.directLong)}`)}
+    ${kvRow(`Via builds · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.componentWindow)} / ${qty(i.demand.componentLong)}`)}
     ${
-      i.potential.qty90 > 0
+      i.potential.qtyWindow > 0
         ? kvRow(
             `Potential from packs 90d <span class="muted">(not in totals)</span>`,
-            `<span class="potential-val" title="Packs/kits that sold more than were built or bought in 90 days, × qty per. Inferred, not a MYOB movement.">+${qty(i.potential.qty90)} <span class="muted">· ${i.potential.parentCount} product(s)</span></span>`,
+            `<span class="potential-val" title="Packs/kits that sold more than were built or bought inside the selected window, × qty per. Inferred, not a MYOB movement.">+${qty(i.potential.qtyWindow)} <span class="muted">· ${i.potential.parentCount} product(s)</span></span>`,
           )
         : ""
     }
@@ -1003,7 +1105,7 @@ async function loadExpandExtras(uid, el) {
   try {
     let detail = itemDetailCache.get(uid);
     if (!detail) {
-      detail = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}`);
+      detail = await fetchJson(withWindow(`/api/insights/items/${encodeURIComponent(uid)}`));
       itemDetailCache.set(uid, detail);
     }
     const moves = (detail.movements || []).slice(0, 5);
@@ -1138,7 +1240,7 @@ function buildabilityHtml(b) {
 
 async function renderItem(uid) {
   main.innerHTML = '<p class="loading">Loading item…</p>';
-  const d = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}`);
+  const d = await fetchJson(withWindow(`/api/insights/items/${encodeURIComponent(uid)}`));
   const i = d.item;
   const s = i.suggestion;
 
@@ -1166,13 +1268,13 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">Open PO incoming</span><span class="f-value">${qty(i.incomingQty)}</span></div>
       <div class="fact src-platform" title="${i.parentCountDeep > i.parentCount ? `${i.parentCount} directly, ${i.parentCountDeep - i.parentCount} more via sub-assemblies` : "Direct parents"}"><span class="f-label">Used in products</span><span class="f-value">${i.parentCountDeep || i.parentCount}${i.parentCountDeep > i.parentCount ? `<span class="muted" style="font-size:0.7rem"> (${i.parentCount} direct)</span>` : ""}</span></div>
       ${
-        i.potential.qty90 > 0
-          ? `<div class="fact src-inferred"><span class="f-label">Potential pack pull 90d</span><span class="f-value">+${qty(i.potential.qty90)}</span></div>`
+        i.potential.qtyWindow > 0
+          ? `<div class="fact src-inferred"><span class="f-label">Potential pack pull</span><span class="f-value">+${qty(i.potential.qtyWindow)}</span></div>`
           : ""
       }
     </div>
     <p class="src-legend"><span class="sw myob"></span>MYOB fact &nbsp; <span class="sw platform"></span>Platform analysis
-      ${i.potential.qty90 > 0 ? '&nbsp; <span class="sw inferred"></span>Inferred (not a MYOB movement)' : ""}
+      ${i.potential.qtyWindow > 0 ? '&nbsp; <span class="sw inferred"></span>Inferred (not a MYOB movement)' : ""}
       (synced ${ago(i.syncedAt)}) · MYOB "Available" includes stock on order; free stock = on hand − committed</p>
 
     <div class="two-col" style="margin-top:1.1rem">
@@ -1182,8 +1284,8 @@ async function renderItem(uid) {
           <p class="hint">Dark = direct sales (invoice lines). Orange = consumed by builds of finished products. These are separate MYOB movements — never double counted.</p>
           <div class="bars">${demandBarsHtml(d.monthlyDemand)}</div>
           <p class="hint" style="margin-top:0.6rem">
-            90-day: ${qty(i.demand.direct90)} direct + ${qty(i.demand.component90)} via builds ·
-            365-day: ${qty(i.demand.direct365)} direct + ${qty(i.demand.component365)} via builds ·
+            Last ${i.demand.windowMonths} months: ${qty(i.demand.directWindow)} direct + ${qty(i.demand.componentWindow)} via builds ·
+            Last ${i.demand.longMonths} months: ${qty(i.demand.directLong)} direct + ${qty(i.demand.componentLong)} via builds ·
             rate basis: ${i.demand.basis}
           </p>
         </section>
@@ -1217,7 +1319,7 @@ async function renderItem(uid) {
                   </tbody>
                 </table></div>
                 <p class="hint" style="margin-top:0.6rem">Total potential pull:
-                <strong>+${qty(i.potential.qty90)}</strong> over 90 days (~${i.potential.weekly.toFixed(1)}/week)
+                <strong>+${qty(i.potential.qtyWindow)}</strong> over the window (~${i.potential.weekly.toFixed(1)}/week)
                 versus measured weekly demand of ${i.demand.weekly.toFixed(1)}.</p>
               </section>`
             : ""
@@ -1944,7 +2046,7 @@ async function loadSuppliersTable() {
 
 async function renderPurchasing() {
   main.innerHTML = '<p class="loading">Building purchasing view…</p>';
-  const data = await fetchJson("/api/insights/purchasing");
+  const data = await fetchJson(withWindow("/api/insights/purchasing"));
   const csvUrl = `/api/insights/purchasing.csv${accessKey() ? `?key=${encodeURIComponent(accessKey())}` : ""}`;
 
   main.innerHTML = `
@@ -2277,6 +2379,7 @@ if (urlKey) {
   history.replaceState({}, "", location.pathname + location.hash);
 }
 
+initWindowControls();
 route();
 pollSyncChip();
 setInterval(pollSyncChip, 60_000);
@@ -2338,7 +2441,7 @@ async function renderCounts() {
             <input type="number" id="count-qty" step="any" min="0" placeholder="e.g. 1250" />
           </label>
           <label>Count date
-            <input type="date" id="count-date" value="${new Date().toISOString().slice(0, 10)}" />
+            <input type="date" id="count-date" value="${todayLocal()}" />
           </label>
           <label>Note (optional)
             <input type="text" id="count-note" placeholder="Counted by…" />
@@ -2354,7 +2457,7 @@ async function renderCounts() {
         before anything is saved, so a mistake halfway down cannot leave the ledger half-updated.</p>
         <textarea id="count-bulk" rows="8" placeholder="BN1675G, 420&#10;N12S16, 18449&#10;WR16503G, 31000"></textarea>
         <div class="form-row">
-          <label>Count date <input type="date" id="count-bulk-date" value="${new Date().toISOString().slice(0, 10)}" /></label>
+          <label>Count date <input type="date" id="count-bulk-date" value="${todayLocal()}" /></label>
           <button class="btn" id="count-bulk-check">Check</button>
           <button class="btn primary" id="count-bulk-save" disabled>Save counts</button>
         </div>

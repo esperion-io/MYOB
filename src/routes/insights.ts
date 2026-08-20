@@ -64,6 +64,29 @@ export function dashboardGuard(
   res.status(401).json({ error: "Dashboard access key required." });
 }
 
+
+/**
+ * The two P3 controls, read from the query string.
+ *
+ * They are deliberately separate: `asAt` is a moment (what was physically on
+ * the shelf that day) and `window` is a period (what sold over it). Conflating
+ * them produces figures that reconcile to nothing.
+ */
+function windowParams(req: Request): {
+  asAt?: string;
+  windowMonths?: number;
+  longMonths?: number;
+} {
+  return {
+    asAt:
+      typeof req.query.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asAt)
+        ? req.query.asAt
+        : undefined,
+    windowMonths: req.query.windowMonths ? Number(req.query.windowMonths) : undefined,
+    longMonths: req.query.longMonths ? Number(req.query.longMonths) : undefined,
+  };
+}
+
 function requireDb(res: Response): boolean {
   if (!hasDatabaseUrl()) {
     res.status(503).json({
@@ -109,10 +132,10 @@ insightsRouter.get("/sync/status", async (_req, res) => {
 
 // ---- Insights ----
 
-insightsRouter.get("/overview", async (_req, res) => {
+insightsRouter.get("/overview", async (req, res) => {
   if (!requireDb(res)) return;
   try {
-    res.json(await overview());
+    res.json(await overview(windowParams(req)));
   } catch (err) {
     send500(res, err);
   }
@@ -130,6 +153,7 @@ insightsRouter.get("/items", async (req, res) => {
         dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
         page: Number(req.query.page) || 1,
         pageSize: Number(req.query.pageSize) || 50,
+        ...windowParams(req),
       }),
     );
   } catch (err) {
@@ -140,7 +164,7 @@ insightsRouter.get("/items", async (req, res) => {
 insightsRouter.get("/items/:uid", async (req, res) => {
   if (!requireDb(res)) return;
   try {
-    const detail = await itemDetail(req.params.uid);
+    const detail = await itemDetail(req.params.uid, windowParams(req));
     if (!detail) {
       res.status(404).json({ error: "Item not found in synced data." });
       return;
@@ -174,10 +198,10 @@ insightsRouter.get("/products", async (req, res) => {
   }
 });
 
-insightsRouter.get("/purchasing", async (_req, res) => {
+insightsRouter.get("/purchasing", async (req, res) => {
   if (!requireDb(res)) return;
   try {
-    res.json(await purchasing());
+    res.json(await purchasing(windowParams(req)));
   } catch (err) {
     send500(res, err);
   }

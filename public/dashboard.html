@@ -42,9 +42,38 @@
         </div>
       </aside>
 
-      <main class="main" id="main">
-        <p class="loading">Loading…</p>
-      </main>
+      <div class="main-wrap">
+        <!--
+          The two P3 controls. Deliberately separate and visually distinct:
+          an as-at date is a moment (what was on the shelf that day), a rolling
+          window is a period (what sold over it). They are not interchangeable.
+        -->
+        <div class="controls" id="controls" hidden>
+          <div class="control control-asat">
+            <label for="ctl-asat">Stock position as at</label>
+            <input type="date" id="ctl-asat" />
+            <button class="btn small" id="ctl-monthend" type="button">Last month end</button>
+            <p class="control-note">A moment in time — on hand, committed, free, value.</p>
+          </div>
+          <div class="control control-window">
+            <label for="ctl-window">Sales &amp; demand over the last</label>
+            <select id="ctl-window">
+              <option value="3">3 months</option>
+              <option value="6" selected>6 months</option>
+              <option value="12">12 months</option>
+              <option value="24">24 months</option>
+            </select>
+            <p class="control-note">A period — consumption, weekly rate, cover, suggestions.</p>
+          </div>
+          <div class="control control-reset">
+            <button class="btn small" id="ctl-reset" type="button">Reset</button>
+          </div>
+        </div>
+
+        <main class="main" id="main">
+          <p class="loading">Loading…</p>
+        </main>
+      </div>
     </div>
 
     <aside class="drawer" id="help-drawer" hidden aria-label="Glossary">

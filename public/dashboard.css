@@ -720,3 +720,32 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
   background: none; color: inherit; cursor: pointer;
 }
 .picker-row:hover, .picker-row:focus-visible { background: var(--surface-2, rgba(0,0,0,0.04)); }
+
+/* ---------- P3: as-at date vs rolling window ----------
+   The two controls are styled differently on purpose. They are not
+   interchangeable: one selects a moment, the other a period. Making them look
+   alike is how people end up comparing a stock level to a date range. */
+.main-wrap { display: flex; flex-direction: column; min-width: 0; }
+.controls {
+  display: flex; flex-wrap: wrap; gap: 1rem 1.6rem; align-items: flex-start;
+  padding: 0.85rem 1.6rem; border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.controls[hidden] { display: none; }
+.control { display: grid; grid-template-columns: auto auto auto; gap: 0.4rem 0.5rem; align-items: center; }
+.control label {
+  font-size: 0.72rem; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--muted); grid-column: 1 / -1;
+}
+.control input[type="date"], .control select {
+  font: inherit; padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink);
+}
+.control-note { grid-column: 1 / -1; margin: 0; font-size: 0.72rem; color: var(--muted); }
+/* A moment: square edges, solid left rule. */
+.control-asat input[type="date"] { border-left: 3px solid var(--brand, #b8622a); border-radius: 3px; }
+/* A period: pill, to read as a span rather than a point. */
+.control-window select { border-radius: 999px; padding-left: 0.8rem; padding-right: 0.8rem; }
+.control-reset { align-self: end; }
+@media (max-width: 700px) { .controls { padding: 0.75rem 1rem; gap: 0.8rem; } }
