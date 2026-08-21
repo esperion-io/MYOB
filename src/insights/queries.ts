@@ -2083,3 +2083,168 @@ export async function removeItemTag(itemUid: string, tag: string): Promise<void>
     [itemUid, tag],
   );
 }
+
+/* ---- Seeding multi-supplier tagging from real purchase history ---- */
+
+export interface SupplierSuggestion {
+  itemUid: string;
+  itemNumber: string | null;
+  itemName: string | null;
+  productFinish: string | null;
+  suppliers: {
+    supplierUid: string;
+    supplierName: string | null;
+    bills: number;
+    qty: number;
+    value: number;
+    sharePct: number;
+    lastBought: string;
+    isMyobPrimary: boolean;
+    preferred: boolean;
+  }[];
+}
+
+/**
+ * Items Allied have genuinely bought from more than one supplier, read from
+ * purchase-bill history.
+ *
+ * The multi-supplier cart (P6) has nothing to work with until items carry more
+ * than one supplier, and asking Allied to tag 264 items by hand is work they
+ * have already done once — every one of those sourcing decisions is recorded in
+ * their own purchase history.
+ *
+ * Two thresholds keep it honest rather than noisy:
+ *
+ *  - **share** — a supplier must account for at least `minSharePct` of that
+ *    item's purchase spend. BN12110G has eight suppliers on paper, but two of
+ *    them are single top-ups of 34 and 12 units at 0.1% of spend. Those are not
+ *    sourcing options, they are what someone grabbed when they ran short.
+ *  - **recency** — bought within `withinYears`, so a supplier Allied stopped
+ *    using years ago is not presented as a live choice.
+ *
+ * This is inference from history, not a statement of fact, so every row is
+ * labelled as such and Allied can remove any of them.
+ */
+export async function suggestSuppliersFromHistory(opts?: {
+  minSharePct?: number;
+  withinYears?: number;
+}): Promise<SupplierSuggestion[]> {
+  await ensureInsightsSchema();
+  const minShare = opts?.minSharePct ?? 5;
+  const withinYears = opts?.withinYears ?? 2;
+
+  const result = await getPool().query(
+    `WITH buys AS (
+       SELECT l.item_uid, b.supplier_uid,
+              COUNT(*)::int AS bills,
+              SUM(l.qty)::float8 AS qty,
+              SUM(COALESCE(l.total, 0))::float8 AS value,
+              MAX(b.date)::date AS last_bought
+       FROM myob_purchase_bill_lines l
+       JOIN myob_purchase_bills b ON b.uid = l.bill_uid
+       WHERE l.item_uid IS NOT NULL AND b.supplier_uid IS NOT NULL AND l.qty > 0
+       GROUP BY 1, 2
+     ),
+     shared AS (
+       SELECT *,
+              100.0 * value / NULLIF(SUM(value) OVER (PARTITION BY item_uid), 0) AS share_pct
+       FROM buys
+     ),
+     qualifying AS (
+       SELECT * FROM shared
+       WHERE share_pct >= $1
+         AND last_bought > (CURRENT_DATE - make_interval(years => $2))
+     ),
+     multi AS (
+       SELECT item_uid FROM qualifying GROUP BY item_uid HAVING COUNT(*) > 1
+     )
+     SELECT q.item_uid, i.number AS item_number, i.name AS item_name,
+            i.product_finish, q.supplier_uid, s.name AS supplier_name,
+            q.bills, q.qty, q.value, q.share_pct, q.last_bought::text AS last_bought,
+            (i.primary_supplier_uid = q.supplier_uid) AS is_myob_primary
+     FROM qualifying q
+     JOIN multi m ON m.item_uid = q.item_uid
+     JOIN myob_items i ON i.uid = q.item_uid
+     LEFT JOIN myob_suppliers s ON s.uid = q.supplier_uid
+     ORDER BY i.number, q.value DESC`,
+    [minShare, withinYears],
+  );
+
+  const byItem = new Map<string, SupplierSuggestion>();
+  for (const r of result.rows) {
+    const uid = r.item_uid as string;
+    if (!byItem.has(uid)) {
+      byItem.set(uid, {
+        itemUid: uid,
+        itemNumber: r.item_number as string | null,
+        itemName: r.item_name as string | null,
+        productFinish: r.product_finish as string | null,
+        suppliers: [],
+      });
+    }
+    byItem.get(uid)!.suppliers.push({
+      supplierUid: r.supplier_uid as string,
+      supplierName: r.supplier_name as string | null,
+      bills: r.bills as number,
+      qty: Number(r.qty),
+      value: Number(r.value),
+      sharePct: Number(Number(r.share_pct).toFixed(1)),
+      lastBought: r.last_bought as string,
+      isMyobPrimary: Boolean(r.is_myob_primary),
+      preferred: false,
+    });
+  }
+
+  // Preferred is MYOB's own primary supplier where Allied have set one — that is
+  // their stated choice. Otherwise the supplier they have spent the most with.
+  for (const s of byItem.values()) {
+    const chosen = s.suppliers.find((x) => x.isMyobPrimary) ?? s.suppliers[0];
+    if (chosen) chosen.preferred = true;
+  }
+  return [...byItem.values()];
+}
+
+/**
+ * Write the suggestions into `platform_item_suppliers`.
+ *
+ * Never overwrites a row Allied created: existing pairs keep their preferred
+ * flag and notes. Seeding is a starting point, not an authority.
+ */
+export async function applySupplierSuggestions(opts?: {
+  minSharePct?: number;
+  withinYears?: number;
+}): Promise<{ items: number; links: number; skippedExisting: number }> {
+  const suggestions = await suggestSuppliersFromHistory(opts);
+  const pool = getPool();
+
+  // One statement rather than a round-trip per link: 641 sequential inserts
+  // against a remote database took minutes and timed out.
+  const rows = suggestions.flatMap((s) =>
+    s.suppliers.map((sup) => [
+      s.itemUid,
+      sup.supplierUid,
+      sup.preferred,
+      `Suggested from purchase history: ${sup.bills} bill(s), ${Math.round(sup.qty)} units, ${sup.sharePct}% of spend, last bought ${sup.lastBought}.`,
+    ]),
+  );
+  if (!rows.length) return { items: 0, links: 0, skippedExisting: 0 };
+
+  const values: unknown[] = [];
+  const tuples = rows
+    .map((r, i) => {
+      values.push(...r);
+      const b = i * 4;
+      return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},NOW())`;
+    })
+    .join(",");
+  const res = await pool.query(
+    `INSERT INTO platform_item_suppliers
+       (item_uid, supplier_uid, is_preferred, notes, updated_at)
+     VALUES ${tuples}
+     ON CONFLICT (item_uid, supplier_uid) DO NOTHING`,
+    values,
+  );
+  const links = res.rowCount ?? 0;
+  invalidateItemsCache();
+  return { items: suggestions.length, links, skippedExisting: rows.length - links };
+}

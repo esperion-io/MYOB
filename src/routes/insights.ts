@@ -26,6 +26,8 @@ import {
   addItemTag,
   facetValues,
   removeItemTag,
+  applySupplierSuggestions,
+  suggestSuppliersFromHistory,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 import {
@@ -627,6 +629,41 @@ insightsRouter.delete("/items/:uid/tags", async (req, res) => {
     }
     await removeItemTag(req.params.uid, tag);
     res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/**
+ * Items Allied have bought from more than one supplier, read from their own
+ * purchase history. GET previews; POST writes them into the item supplier list.
+ */
+insightsRouter.get("/supplier-suggestions", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const suggestions = await suggestSuppliersFromHistory({
+      minSharePct: req.query.minSharePct ? Number(req.query.minSharePct) : undefined,
+      withinYears: req.query.withinYears ? Number(req.query.withinYears) : undefined,
+    });
+    res.json({
+      items: suggestions.length,
+      links: suggestions.reduce((a, s) => a + s.suppliers.length, 0),
+      suggestions,
+    });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.post("/supplier-suggestions/apply", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(
+      await applySupplierSuggestions({
+        minSharePct: req.body?.minSharePct ? Number(req.body.minSharePct) : undefined,
+        withinYears: req.body?.withinYears ? Number(req.body.withinYears) : undefined,
+      }),
+    );
   } catch (err) {
     send500(res, err);
   }
