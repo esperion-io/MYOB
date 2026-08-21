@@ -610,6 +610,28 @@ const DDL: string[] = [
   `CREATE OR REPLACE VIEW item_position AS
      SELECT * FROM item_position_at(${BUSINESS_TODAY_SQL})`,
 
+  /*
+   * ---- P4: Allied's own free-text tags -----------------------------------
+   *
+   * Many per item, user-created, filterable. This is also how the brief's
+   * "never require new item codes" rule is honoured: Allied carry a backlog of
+   * dead codes in MYOB that cannot be deleted and will not create new ones, so
+   * every classification problem has to be solvable against the existing SKU.
+   *
+   * Tags are platform data and never written to MYOB. Stored lower-cased for
+   * matching with the original casing kept for display, so "Slow Movers" and
+   * "slow movers" are one tag rather than two.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_item_tags (
+    item_uid TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (item_uid, tag_key)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_item_tags_key ON platform_item_tags (tag_key)`,
+
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_bill_lines_item ON myob_purchase_bill_lines (item_uid)`,

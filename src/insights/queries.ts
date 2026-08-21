@@ -217,6 +217,8 @@ const itemSelect = (w: DemandWindow): string => `
          it.average_cost, it.current_value, it.base_selling_price,
          it.min_level, it.reorder_qty,
          it.primary_supplier_uid, it.primary_supplier_name, it.supplier_item_number,
+         it.product_type, it.product_finish,
+         COALESCE(tg.tags, ARRAY[]::text[]) AS tags,
          it.synced_at,
          ds.supplier_uid AS inferred_supplier_uid,
          ds.supplier_name AS inferred_supplier_name,
@@ -238,6 +240,10 @@ const itemSelect = (w: DemandWindow): string => `
          COALESCE(pot.potential_parents, 0) AS potential_parents
   FROM myob_items it
   JOIN item_position_at('${w.asAt}'::date) pos ON pos.item_uid = it.uid
+  LEFT JOIN (
+    SELECT item_uid, ARRAY_AGG(tag ORDER BY tag) AS tags
+    FROM platform_item_tags GROUP BY item_uid
+  ) tg ON tg.item_uid = it.uid
   LEFT JOIN direct_demand dd ON dd.item_uid = it.uid
   LEFT JOIN component_demand cd ON cd.item_uid = it.uid
   LEFT JOIN incoming inc ON inc.item_uid = it.uid
@@ -293,6 +299,11 @@ export interface ItemComputed {
   supplierName: string | null;
   supplierSource: "allied" | "myob" | "inferred" | null;
   supplierItemNumber: string | null;
+  /** MYOB CustomList1/2, kept as independent facets — never concatenated. */
+  productType: string | null;
+  productFinish: string | null;
+  /** Allied's own free-text tags. */
+  tags: string[];
   /** How many suppliers Allied has recorded for this item (0 = none yet). */
   supplierCount: number;
   /** Platform label: user override, else auto from MYOB address country. */
@@ -549,6 +560,9 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
         : row.inferred_supplier_uid
           ? "inferred"
           : null,
+    productType: (row.product_type as string) ?? null,
+    productFinish: (row.product_finish as string) ?? null,
+    tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
     supplierItemNumber:
       (row.assigned_supplier_item_number as string) ??
       (row.supplier_item_number as string) ??
@@ -619,6 +633,10 @@ export function invalidateItemsCache(): void {
 
 export interface ListParams extends Partial<DemandWindow> {
   q?: string;
+  /** Independent facets — never combined into one compound category. */
+  productType?: string;
+  productFinish?: string;
+  tag?: string;
   filter?: string;
   region?: string;
   sort?: string;
@@ -669,6 +687,33 @@ export async function listItems(params: ListParams) {
         .toLowerCase()
         .includes(q),
     );
+  }
+
+  /*
+   * Independent facets. Product type and finish are separate dimensions and are
+   * never combined into one label: Allied currently stack them by hand into
+   * compound categories like "bolt and nut stainless" purely to keep the list
+   * workable, and that workaround must not be rebuilt here. Finish is a
+   * commercial dimension — stainless is high value, bought from two suppliers
+   * and managed far more closely than galvanised.
+   *
+   * "(not set)" is a selectable value rather than a hidden one, so the 113 items
+   * with no finish and 53 with no type stay reachable instead of vanishing.
+   */
+  const NOT_SET = "(not set)";
+  if (params.productType) {
+    rows = rows.filter((r) =>
+      params.productType === NOT_SET ? !r.productType : r.productType === params.productType,
+    );
+  }
+  if (params.productFinish) {
+    rows = rows.filter((r) =>
+      params.productFinish === NOT_SET ? !r.productFinish : r.productFinish === params.productFinish,
+    );
+  }
+  if (params.tag) {
+    const wanted = params.tag.trim().toLowerCase();
+    rows = rows.filter((r) => r.tags.some((t) => t.toLowerCase() === wanted));
   }
 
   if (params.region) {
@@ -1965,4 +2010,76 @@ export async function bomBlindspots() {
     total: result.rows.length ? Number(result.rows[0].total_count) : 0,
     items: result.rows.map(({ total_count, ...r }) => r),
   };
+}
+
+
+/**
+ * Every value each facet actually holds, with counts — the input to the filter
+ * menus.
+ *
+ * Nothing is suppressed. The brief assumed only galvanised and stainless were
+ * live, but the data disagrees (ZINC PLATED alone is on 381 items), so the
+ * choice of what matters is Allied's to make from real numbers rather than ours
+ * to hardcode. Items with no value are surfaced as "(not set)" so they stay
+ * reachable.
+ */
+export async function facetValues(): Promise<{
+  productType: { value: string; items: number; withStock: number }[];
+  productFinish: { value: string; items: number; withStock: number }[];
+  tags: { value: string; items: number }[];
+}> {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const facet = async (column: "product_type" | "product_finish") => {
+    const r = await pool.query(
+      `SELECT COALESCE(NULLIF(i.${column}, ''), '(not set)') AS value,
+              COUNT(*)::int AS items,
+              COUNT(*) FILTER (WHERE p.on_hand > 0)::int AS with_stock
+       FROM myob_items i
+       LEFT JOIN item_position p ON p.item_uid = i.uid
+       GROUP BY 1 ORDER BY 2 DESC`,
+    );
+    return r.rows.map((x) => ({
+      value: x.value as string,
+      items: x.items as number,
+      withStock: x.with_stock as number,
+    }));
+  };
+  const tags = await pool.query(
+    `SELECT t.tag AS value, COUNT(*)::int AS items
+     FROM platform_item_tags t
+     GROUP BY t.tag ORDER BY 2 DESC, 1`,
+  );
+  return {
+    productType: await facet("product_type"),
+    productFinish: await facet("product_finish"),
+    tags: tags.rows.map((x) => ({ value: x.value as string, items: x.items as number })),
+  };
+}
+
+/** Add a tag to an item. Case-insensitive, so one tag cannot become two. */
+export async function addItemTag(params: {
+  itemUid: string;
+  tag: string;
+  createdBy?: string | null;
+}): Promise<{ tag: string }> {
+  await ensureInsightsSchema();
+  const tag = params.tag.trim().replace(/\s+/g, " ");
+  if (!tag) throw new Error("Tag cannot be empty.");
+  if (tag.length > 60) throw new Error("Tag must be 60 characters or fewer.");
+  await getPool().query(
+    `INSERT INTO platform_item_tags (item_uid, tag_key, tag, created_by)
+     VALUES ($1, LOWER($2), $2, $3)
+     ON CONFLICT (item_uid, tag_key) DO UPDATE SET tag = EXCLUDED.tag`,
+    [params.itemUid, tag, params.createdBy ?? null],
+  );
+  return { tag };
+}
+
+export async function removeItemTag(itemUid: string, tag: string): Promise<void> {
+  await ensureInsightsSchema();
+  await getPool().query(
+    `DELETE FROM platform_item_tags WHERE item_uid = $1 AND tag_key = LOWER($2)`,
+    [itemUid, tag],
+  );
 }

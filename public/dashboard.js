@@ -109,7 +109,22 @@ const FLAG_LABELS = {
   min_above_demand: ["Min level above demand", "warn"],
 };
 
-const invState = { q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1 };
+/*
+ * Facet menu values, fetched once. Declared here rather than beside
+ * loadFacetMenus() at the foot of the file: `let` bindings are hoisted but not
+ * initialised, and the menus load during the first render, so a late
+ * declaration put this in the temporal dead zone and the menus silently came
+ * back empty.
+ */
+let facetCache = null;
+
+const invState = {
+  q: "", filter: "all", region: "", sort: "risk", dir: "", page: 1,
+  // Independent facets. Kept as separate fields, never combined into one
+  // compound category — Allied already do that by hand in MYOB and the whole
+  // point of P4 is to stop them having to.
+  productType: "", productFinish: "", tag: "",
+};
 
 /** One-click answers to the questions staff actually ask. */
 const INVENTORY_PRESETS = [
@@ -465,6 +480,9 @@ function applyInventoryQuery(queryString) {
   invState.region = p.get("region") ?? "";
   invState.sort = p.get("sort") ?? "risk";
   invState.dir = p.get("dir") ?? "";
+  invState.productType = p.get("productType") ?? "";
+  invState.productFinish = p.get("productFinish") ?? "";
+  invState.tag = p.get("tag") ?? "";
   invState.page = Number(p.get("page")) || 1;
 }
 
@@ -475,6 +493,9 @@ function inventoryHash() {
   if (invState.region) p.set("region", invState.region);
   if (invState.sort && invState.sort !== "risk") p.set("sort", invState.sort);
   if (invState.dir) p.set("dir", invState.dir);
+  if (invState.productType) p.set("productType", invState.productType);
+  if (invState.productFinish) p.set("productFinish", invState.productFinish);
+  if (invState.tag) p.set("tag", invState.tag);
   if (invState.page > 1) p.set("page", String(invState.page));
   const qs = p.toString();
   return `#/inventory${qs ? `?${qs}` : ""}`;
@@ -840,7 +861,11 @@ async function renderInventory() {
         <option value="Overseas — other">Region: Overseas — other</option>
         <option value="none">Region: unlabelled</option>
       </select>
+      <select id="inv-type" aria-label="Product type"><option value="">All product types</option></select>
+      <select id="inv-finish" aria-label="Product finish"><option value="">All finishes</option></select>
+      <select id="inv-tag" aria-label="Tag"><option value="">All tags</option></select>
     </div>
+    <div id="inv-facet-note" class="hint" hidden></div>
     <div id="inv-table"><p class="loading">Loading items…</p></div>`;
 
   const q = document.getElementById("inv-q");
@@ -848,6 +873,7 @@ async function renderInventory() {
   const region = document.getElementById("inv-region");
   filter.value = invState.filter;
   region.value = invState.region;
+  loadFacetMenus();
 
   main.querySelectorAll("[data-preset]").forEach((btn) =>
     btn.addEventListener("click", () => {
@@ -919,6 +945,9 @@ async function loadInventoryTable() {
     page: String(invState.page),
   });
   if (invState.dir) params.set("dir", invState.dir);
+  if (invState.productType) params.set("productType", invState.productType);
+  if (invState.productFinish) params.set("productFinish", invState.productFinish);
+  if (invState.tag) params.set("tag", invState.tag);
   const data = await fetchJson(withWindow(`/api/insights/items?${params}`));
   invItems = new Map(data.items.map((i) => [i.uid, i]));
   invTargetCover = data.targetCoverWeeks ?? null;
@@ -1508,6 +1537,18 @@ async function renderItem(uid) {
           }
         </section>
 
+        <section class="panel" id="item-tags">
+          <h2>Tags</h2>
+          <p class="hint">Allied's own labels — "slow movers", "from China", "needs attention".
+          Many per item, filterable from the Inventory page, and never written to MYOB.
+          Tags are how a product gets reclassified without inventing a new item code.</p>
+          <div id="item-tag-list"></div>
+          <div class="form-row">
+            <input type="text" id="item-tag-new" placeholder="Add a tag…" maxlength="60" />
+            <button class="btn" id="item-tag-add" type="button">Add</button>
+          </div>
+        </section>
+
         <section class="panel" id="item-ledger">
           <h2>How this stock figure was reached</h2>
           <p class="loading">Loading the trail…</p>
@@ -1548,6 +1589,7 @@ async function renderItem(uid) {
       </div>
     </div>`;
 
+  renderItemTags(uid, d.item.tags ?? []);
   loadItemLedger(uid);
   loadItemSuppliers(uid);
 }
@@ -2753,3 +2795,163 @@ const LEDGER_KIND_LABEL = {
   build: "Build",
   adjustment: "Adjustment",
 };
+
+/* ================= P4: independent facets and tags =================
+ *
+ * Product type and finish are two separate dimensions and are never combined
+ * into one label. Allied currently stack them by hand into compound categories
+ * like "bolt and nut stainless", purely to keep the list small enough to work
+ * with — a workaround, not a requirement, and rebuilding it here would defeat
+ * the point.
+ *
+ * Finish is commercial, not cosmetic: stainless is high value, bought from only
+ * two suppliers and watched far more closely than galvanised, so isolating "all
+ * stainless" or "stainless washers only" drives real purchasing decisions.
+ *
+ * Nothing is suppressed. The brief assumed only galvanised and stainless were
+ * live; the data says otherwise (ZINC PLATED is on 381 items, 108 of them
+ * holding stock), so the counts are shown and Allied decide what matters.
+ */
+async function loadFacetMenus() {
+  const type = document.getElementById("inv-type");
+  const finish = document.getElementById("inv-finish");
+  const tag = document.getElementById("inv-tag");
+  if (!type || !finish || !tag) return;
+  try {
+    facetCache = facetCache ?? (await fetchJson("/api/insights/facets"));
+    const fill = (el, values, allLabel, prefix) => {
+      el.innerHTML =
+        `<option value="">${allLabel}</option>` +
+        values
+          .map(
+            (v) =>
+              `<option value="${esc(v.value)}">${prefix}${esc(v.value)} (${qty(v.items)})</option>`,
+          )
+          .join("");
+    };
+    fill(type, facetCache.productType, "All product types", "");
+    fill(finish, facetCache.productFinish, "All finishes", "");
+    fill(
+      tag,
+      facetCache.tags,
+      facetCache.tags.length ? "All tags" : "No tags yet",
+      "#",
+    );
+    type.value = invState.productType;
+    finish.value = invState.productFinish;
+    tag.value = invState.tag;
+
+    const wire = (el, key) =>
+      el.addEventListener("change", () => {
+        invState[key] = el.value;
+        invState.page = 1;
+        syncInventoryUrl();
+        loadInventoryTable();
+        showFacetNote();
+      });
+    wire(type, "productType");
+    wire(finish, "productFinish");
+    wire(tag, "tag");
+    showFacetNote();
+  } catch (err) {
+    // The table still works without facets, but a silent catch here hid a real
+    // bug once already, so say what went wrong rather than quietly doing nothing.
+    console.error("Facet menus failed to load:", err);
+    const note = document.getElementById("inv-facet-note");
+    if (note) {
+      note.hidden = false;
+      note.innerHTML = `<span class="muted">Filter menus unavailable: ${esc(err.message)}</span>`;
+    }
+  }
+}
+
+/** Spell out the active combination, so a two-facet filter is never ambiguous. */
+function showFacetNote() {
+  const el = document.getElementById("inv-facet-note");
+  if (!el) return;
+  const bits = [];
+  if (invState.productFinish) bits.push(`<strong>${esc(invState.productFinish)}</strong>`);
+  if (invState.productType) bits.push(`<strong>${esc(invState.productType)}</strong>`);
+  if (invState.tag) bits.push(`tagged <strong>#${esc(invState.tag)}</strong>`);
+  if (!bits.length) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = `Showing ${bits.join(" · ")} —
+    <button class="btn small" id="facet-clear" type="button">Clear facets</button>`;
+  document.getElementById("facet-clear").addEventListener("click", () => {
+    invState.productType = "";
+    invState.productFinish = "";
+    invState.tag = "";
+    invState.page = 1;
+    document.getElementById("inv-type").value = "";
+    document.getElementById("inv-finish").value = "";
+    document.getElementById("inv-tag").value = "";
+    syncInventoryUrl();
+    loadInventoryTable();
+    showFacetNote();
+  });
+}
+
+/** Tag chips with removal, plus the add box. Re-rendered in place after edits. */
+function renderItemTags(uid, tags) {
+  const list = document.getElementById("item-tag-list");
+  const input = document.getElementById("item-tag-new");
+  const add = document.getElementById("item-tag-add");
+  if (!list || !input || !add) return;
+
+  const draw = (current) => {
+    list.innerHTML = current.length
+      ? current
+          .map(
+            (t) =>
+              `<span class="tag-chip"><a href="#/inventory?tag=${encodeURIComponent(t)}"
+                 title="Show every item tagged #${esc(t)}">#${esc(t)}</a>
+               <button class="tag-x" data-tag="${esc(t)}" title="Remove this tag" type="button">×</button></span>`,
+          )
+          .join("")
+      : '<p class="muted">No tags yet.</p>';
+    list.querySelectorAll(".tag-x").forEach((b) =>
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          await fetchJson(
+            `/api/insights/items/${encodeURIComponent(uid)}/tags?tag=${encodeURIComponent(b.dataset.tag)}`,
+            { method: "DELETE" },
+          );
+          facetCache = null; // the tag menu counts have moved
+          draw(current.filter((t) => t !== b.dataset.tag));
+        } catch (err) {
+          alert(err.message);
+          b.disabled = false;
+        }
+      }),
+    );
+  };
+  draw([...tags]);
+
+  const submit = async () => {
+    const value = input.value.trim();
+    if (!value) return;
+    add.disabled = true;
+    try {
+      const r = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}/tags`, {
+        method: "POST",
+        body: JSON.stringify({ tag: value }),
+      });
+      input.value = "";
+      facetCache = null;
+      const next = [...new Set([...tags, r.tag])].sort();
+      tags = next;
+      draw(next);
+    } catch (err) {
+      alert(err.message);
+    }
+    add.disabled = false;
+  };
+  add.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+}

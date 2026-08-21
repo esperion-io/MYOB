@@ -23,6 +23,9 @@ import {
   setSupplierMeta,
   supplierOptions,
   suppliersList,
+  addItemTag,
+  facetValues,
+  removeItemTag,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 import {
@@ -155,6 +158,9 @@ insightsRouter.get("/items", async (req, res) => {
         dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
         page: Number(req.query.page) || 1,
         pageSize: Number(req.query.pageSize) || 50,
+        productType: typeof req.query.productType === "string" ? req.query.productType : undefined,
+        productFinish: typeof req.query.productFinish === "string" ? req.query.productFinish : undefined,
+        tag: typeof req.query.tag === "string" ? req.query.tag : undefined,
         ...windowParams(req),
       }),
     );
@@ -581,6 +587,46 @@ insightsRouter.get("/positions.csv", async (req, res) => {
       .type("text/csv; charset=utf-8")
       .setHeader("Content-Disposition", `attachment; filename="${out.filename}"`)
       .send(out.csv);
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Values behind the facet menus — nothing suppressed, counts included. */
+insightsRouter.get("/facets", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await facetValues());
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Allied's own tags on an item. Never written to MYOB. */
+insightsRouter.post("/items/:uid/tags", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const tag = typeof req.body?.tag === "string" ? req.body.tag : "";
+    if (!tag.trim()) {
+      res.status(400).json({ error: "tag is required." });
+      return;
+    }
+    res.json(await addItemTag({ itemUid: req.params.uid, tag, createdBy: "dashboard" }));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.delete("/items/:uid/tags", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const tag = typeof req.query.tag === "string" ? req.query.tag : "";
+    if (!tag) {
+      res.status(400).json({ error: "tag is required." });
+      return;
+    }
+    await removeItemTag(req.params.uid, tag);
+    res.json({ ok: true });
   } catch (err) {
     send500(res, err);
   }
