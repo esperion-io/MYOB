@@ -624,11 +624,28 @@ function exportPositionUrl() {
   }`;
 }
 
-function historicalNotice() {
+/**
+ * Shown only when the numbers need a caveat.
+ *
+ * On hand reconstructs cleanly from the ledger at any date. Committed does not:
+ * MYOB records an order's status now, never when it changed, so for a date with
+ * no stored snapshot we can only count orders still open today — which
+ * understates what was actually committed back then. The warning appears on
+ * exactly those dates and disappears once a snapshot covers them, so it will
+ * stop showing on month-ends from the first full month onward.
+ */
+function historicalNotice(d) {
   if (!isHistorical()) return "";
+  const committed = d && d.hasSnapshot === false
+    ? ` <strong>Committed is understated for this date</strong> — it counts only orders still open today,
+       because MYOB does not record when an order was fulfilled. Daily snapshots
+       ${d.snapshotsFrom ? `began on ${dateFmt(d.snapshotsFrom)}` : "have not started yet"}; from then on
+       committed is exact.`
+    : "";
   return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>,
-    reconstructed from the anchored ledger. Sales and demand cover the ${windowLabel()} up to that date.
-    Average cost is today's — MYOB exposes no cost history, so historical valuations are an approximation.</div>`;
+    ${d && d.hasSnapshot ? "from the snapshot stored that day" : "reconstructed from the anchored ledger"}.
+    Sales and demand cover the ${windowLabel()} up to that date.
+    Average cost is today's — MYOB exposes no cost history, so historical valuations are an approximation.${committed}</div>`;
 }
 
 /* ---------- overview ---------- */
@@ -653,7 +670,7 @@ async function renderOverview() {
   const rel = Object.fromEntries((data.relationships || []).map((r) => [r.source, r.count]));
 
   main.innerHTML = `
-    ${historicalNotice()}
+    ${historicalNotice(data)}
     <div class="page-head">
       <div>
         <h1>Overview</h1>

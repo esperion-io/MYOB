@@ -769,6 +769,21 @@ export async function listItems(params: ListParams) {
 export async function overview(opts?: Partial<DemandWindow>) {
   const win = resolveWindow(opts);
   const items = await computedItems(win);
+  /*
+   * Whether the chosen date has a stored snapshot decides how far the figures
+   * can be trusted. On hand reconstructs cleanly from the ledger either way,
+   * but committed cannot: MYOB records an order's status now, never when it
+   * changed, so for a date with no snapshot we can only count orders still open
+   * today and the figure is understated. This flag lets the UI say so on
+   * exactly the dates where it is true, and stay quiet everywhere else — which
+   * it will, permanently, once snapshots cover the month-ends Allied use.
+   */
+  const snap = await getPool().query(
+    `SELECT EXISTS (SELECT 1 FROM platform_daily_position WHERE as_at_date = $1::date) AS has_snapshot,
+            MIN(as_at_date)::text AS snapshots_from
+     FROM platform_daily_position`,
+    [win.asAt],
+  );
   const pool = getPool();
 
   const active = items.filter((i) => i.isActive !== false);
@@ -896,6 +911,9 @@ export async function overview(opts?: Partial<DemandWindow>) {
     freshness: freshness.rows[0] ?? null,
     targetCoverWeeks: config.insights.targetCoverWeeks,
     excessCoverWeeks: config.insights.excessCoverWeeks,
+    window: win,
+    hasSnapshot: Boolean(snap.rows[0]?.has_snapshot),
+    snapshotsFrom: (snap.rows[0]?.snapshots_from as string) ?? null,
   };
 }
 
