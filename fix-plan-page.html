@@ -205,12 +205,12 @@
 <div class="wrap">
 
   <header class="masthead">
-    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v2.2</p>
+    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v2.4</p>
     <h1>Allied Priority Fix Plan</h1>
     <p class="standfirst">Implementation plan for the six client priorities, rebuilt around a stocktake-anchored stock ledger — plus one blocking defect found while verifying the numbers.</p>
     <div class="meta">
-      <span><b>Revised</b> 19 Aug 2026</span>
-      <span><b>Status</b> P0, P1, P2 shipped · P3–P6 proposed</span>
+      <span><b>Revised</b> 21 Aug 2026</span>
+      <span><b>Status</b> P0–P4 shipped · P5+P6 remaining</span>
       <span><b>Verified against</b> Live MYOB file, 3,100 items</span>
     </div>
   </header>
@@ -224,6 +224,8 @@
       <li><strong>P0 shipped 18 Aug.</strong> The sync no longer serves stale quantities, and MYOB's Bill of Materials was verified as genuinely maintained and promoted to the primary recipe source.</li>
       <li><strong>P1 shipped 19 Aug.</strong> On hand, committed, free, on order and available are all computed here from Allied's own documents. Committed already disagrees with MYOB on 27 items, $2,402 at stake. Counts, divergence and a full audit trail are on screen.</li>
       <li><strong>P2 shipped 19 Aug.</strong> Stock value is our on hand × average cost — which caught a MYOB valuation error of exactly 100×: SW101616G4 recorded at $3.36 instead of $336.00.</li>
+      <li><strong>P3 shipped 21 Aug.</strong> An as-at date and a rolling window that move independently, a month-end spreadsheet export, and a New Zealand time correction that was misdating the snapshot trail by a day.</li>
+      <li><strong>P4 shipped 21 Aug.</strong> Product type and finish as independent facets — "stainless washers" is 89 items from two filters, with no compound category anywhere — plus Allied's own free-text tags.</li>
     </ul>
   </div>
 
@@ -499,8 +501,8 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
     </article>
 
     <article class="card">
-      <h3><span class="pid">P3</span> Point-in-time date vs rolling window <span class="tag warn">Hard deadline</span></h3>
-      <p class="dep">Depends on P0 and P1 · Tied to the August inventory run</p>
+      <h3><span class="pid">P3</span> Point-in-time date vs rolling window <span class="tag good">Shipped 21 Aug</span></h3>
+      <p class="dep">The August month-end deadline is cleared · Also caught a live NZ-time dating fault</p>
 
       <h4>Direct answer: yes, we start saving data</h4>
       <p>From the moment P3 ships we persist an immutable daily record, so any date from then on is an <strong>exact read</strong> rather than a reconstruction, and any window can be selected over it. Three things get stored:</p>
@@ -547,8 +549,18 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
     </article>
 
     <article class="card">
-      <h3><span class="pid">P4</span> Independent facets plus free-text tags</h3>
-      <p class="dep">Depends on P0 · Simplified by client direction — no suppression work</p>
+      <h3><span class="pid">P4</span> Independent facets plus free-text tags <span class="tag good">Shipped 21 Aug</span></h3>
+      <p class="dep">Two independent facets return 89 stainless washers · Nothing suppressed</p>
+      <div class="evidence">
+        <p class="etitle">Live, and the brief's acceptance test passes</p>
+        <ul>
+          <li>Product type and finish are <strong>separate filters</strong>. No compound category anywhere.</li>
+          <li>Menus carry item <em>and</em> in-stock counts, so Allied judge from real numbers: GALVANIZED 1,251 (520 in stock), STAINLESS STEEL 1,063 (263), <strong>ZINC PLATED 381 (108)</strong>.</li>
+          <li>Nothing suppressed — that ZINC PLATED row is why. Items with no value show as "(not set)".</li>
+          <li>Free-text tags, many per item, case-insensitive, never written to MYOB — how a product gets reclassified without a new item code.</li>
+          <li>Facet state is in the URL, so "stainless washers" is a link you can send.</li>
+        </ul>
+      </div>
       <ol>
         <li><code>product_type</code> and <code>product_finish</code> as <strong>independent</strong> filterable, sortable columns. Never concatenated. No compound categories anywhere.</li>
         <li><strong>Show every value that exists</strong>, including ZINC PLATED, OTHER, BRASS and blank. Allied filters for themselves — no hardcoded allow-list, no hidden values, no standing maintenance burden.</li>
@@ -649,6 +661,38 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
       <strong>will not reconcile to their MYOB valuation report</strong>, which is the acceptance test for both P1
       and P2. And a rolling average built from bill lines cannot see freight or landed costs that MYOB folds into
       its own average.</p>
+    </article>
+
+    <article class="card">
+      <h3><span class="pid">B2</span> Independent valuation check via MYOB's Balance Sheet <span class="tag warn">Parked</span></h3>
+      <p class="dep">Raised 21 Aug 2026 from the P3 spike · Needs Allied to re-authorise</p>
+      <p>When the platform reports stock worth $895,040 as at 31 July, nothing independent confirms it. The only
+      check is Allied running their own month-end — the very work this tool exists to remove.</p>
+      <p>MYOB's Balance Sheet carries an <strong>Inventory asset account</strong>: a single stock total produced by
+      MYOB's accounting engine, by a completely different route from the item-level data we mirror. Comparing the
+      two would be an automated second opinion on every historical valuation.</p>
+
+      <div class="evidence">
+        <p class="etitle">Why it is parked — tested 21 Aug 2026</p>
+        <ul>
+          <li><code>Inventory/Item</code> → 3,103 rows</li>
+          <li><code>GeneralLedger/Account</code> → <strong>401</strong></li>
+          <li><code>Report/BalanceSheetSummary</code> → <strong>401</strong></li>
+          <li><code>Report/ProfitAndLossSummary</code> → <strong>401</strong></li>
+        </ul>
+        <p style="margin:10px 0 0">Same token. A permission problem, not a parameter one: reports and the general
+        ledger sit behind the <strong><code>sme-general-ledger</code></strong> scope, which this connection was
+        never granted, and an existing token cannot gain scope.</p>
+      </div>
+
+      <h4>What it would take</h4>
+      <p>Add <code>sme-general-ledger</code> to the scopes, have <strong>Allied re-authorise</strong>, then test
+      whether the report accepts an as-at date at all — unknown, the docs do not say, and untestable until the
+      scope exists.</p>
+      <p><strong>The judgement call.</strong> This widens our access from inventory to Allied's general ledger — a
+      broader permission over their financial accounts than anything the platform holds today. Worth raising only
+      if they want the automated check; their own MYOB valuation report already provides it manually. A
+      convenience, not a dependency.</p>
     </article>
   </section>
 
