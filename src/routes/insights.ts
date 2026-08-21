@@ -28,6 +28,8 @@ import {
   removeItemTag,
   applySupplierSuggestions,
   suggestSuppliersFromHistory,
+  applySupplierRegions,
+  suggestSupplierRegions,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 import {
@@ -664,6 +666,39 @@ insightsRouter.post("/supplier-suggestions/apply", async (req, res) => {
         withinYears: req.body?.withinYears ? Number(req.body.withinYears) : undefined,
       }),
     );
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/**
+ * Where each supplier is, inferred from the details on their MYOB card.
+ * GET previews with the evidence behind each conclusion; POST stores the
+ * confident ones. Conflicting or unevidenced suppliers are always left unset.
+ */
+insightsRouter.get("/supplier-regions", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const all = await suggestSupplierRegions();
+    res.json({
+      confident: all.filter((s) => s.region && !s.conflict).length,
+      conflicting: all.filter((s) => s.conflict),
+      // Only trading suppliers matter here: a supplier with no bills and no
+      // region costs nothing, one with real spend distorts the region split.
+      unresolvedTrading: all
+        .filter((s) => !s.region && s.bills > 0)
+        .sort((a, b) => b.purchaseValue - a.purchaseValue),
+      suggestions: all,
+    });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.post("/supplier-regions/apply", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await applySupplierRegions());
   } catch (err) {
     send500(res, err);
   }

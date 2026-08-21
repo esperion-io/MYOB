@@ -2248,3 +2248,169 @@ export async function applySupplierSuggestions(opts?: {
   invalidateItemsCache();
   return { items: suggestions.length, links, skippedExisting: rows.length - links };
 }
+
+/* ---- Inferring supplier region from the details Allied already hold ---- */
+
+export interface RegionSuggestion {
+  supplierUid: string;
+  name: string | null;
+  region: SupplierRegion | null;
+  /** Each signal that fired, so the conclusion can be checked rather than trusted. */
+  evidence: string[];
+  /** Left null when signals conflict or none fire — never guessed. */
+  conflict: boolean;
+  bills: number;
+  purchaseValue: number;
+}
+
+/**
+ * Work out where a supplier is from the details already on their MYOB card.
+ *
+ * Only 37 of 292 suppliers have a country set, but 242 have an email, 276 a
+ * phone and 250 a city — and for a New Zealand wholesaler those are strong
+ * signals. `accounts@anzor.co.nz` with an Auckland address and an 09 number is
+ * not ambiguous.
+ *
+ * Signals are gathered independently and only agreed conclusions are kept.
+ * Where they disagree — an Auckland branch of an Australian firm carrying a
+ * .com.au address — the region is left unset rather than guessed, because a
+ * wrong region silently misstates Allied's China-versus-NZ exposure, which is
+ * one of the questions the Overview exists to answer.
+ */
+export async function suggestSupplierRegions(): Promise<RegionSuggestion[]> {
+  await ensureInsightsSchema();
+  const result = await getPool().query(
+    `SELECT s.uid, s.name, s.country, s.city, s.email, s.phone,
+            COALESCE(b.bills, 0)::int AS bills,
+            COALESCE(b.value, 0)::float8 AS purchase_value,
+            m.region AS existing_region
+     FROM myob_suppliers s
+     LEFT JOIN (
+       SELECT supplier_uid, COUNT(*)::int AS bills, SUM(COALESCE(total, 0)) AS value
+       FROM myob_purchase_bills WHERE supplier_uid IS NOT NULL GROUP BY 1
+     ) b ON b.supplier_uid = s.uid
+     LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
+     ORDER BY COALESCE(b.value, 0) DESC`,
+  );
+
+  const NZ_CITIES = [
+    "auckland", "wellington", "christchurch", "hamilton", "tauranga", "dunedin",
+    "napier", "palmerston north", "nelson", "rotorua", "whangarei", "invercargill",
+    "new plymouth", "manukau", "north shore", "waitakere", "rolleston", "porirua",
+    "hastings", "gisborne", "timaru", "blenheim", "masterton", "levin", "pukekohe",
+    "papakura", "takanini", "penrose", "onehunga", "mt wellington", "east tamaki",
+  ];
+  const AU_CITIES = [
+    "sydney", "melbourne", "brisbane", "perth", "adelaide", "canberra",
+    "newcastle", "wollongong", "geelong", "gold coast", "darwin", "hobart",
+  ];
+  const CN_CITIES = [
+    "shanghai", "beijing", "shenzhen", "guangzhou", "ningbo", "qingdao",
+    "tianjin", "hangzhou", "suzhou", "dongguan", "xiamen", "wenzhou", "handan",
+    "shandong", "jiangsu", "zhejiang", "hebei",
+  ];
+
+  return result.rows.map((r) => {
+    const evidence: string[] = [];
+    const votes = new Set<SupplierRegion>();
+    const add = (region: SupplierRegion, why: string) => {
+      votes.add(region);
+      evidence.push(why);
+    };
+
+    const country = (r.country as string | null)?.trim();
+    if (country) {
+      // autoRegion matches exact names; Allied's values are inconsistently cased
+      // and include a typo ("Tawain"), so normalise before asking.
+      const normalised = country.toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+      const reg =
+        normalised.includes("new zealand") ? "NZ"
+        : normalised.includes("australia") ? "Australia"
+        : normalised.includes("china") ? "China"
+        : autoRegion(normalised) ?? "Overseas — other";
+      add(reg as SupplierRegion, `Country on the MYOB card: ${country}`);
+    }
+
+    const email = ((r.email as string | null) ?? "").toLowerCase();
+    if (email.includes("@")) {
+      if (/\.nz(\b|$)/.test(email)) add("NZ", `Email domain ends .nz (${email})`);
+      else if (/\.au(\b|$)/.test(email)) add("Australia", `Email domain ends .au (${email})`);
+      else if (/\.cn(\b|$)/.test(email)) add("China", `Email domain ends .cn (${email})`);
+    }
+
+    const phone = ((r.phone as string | null) ?? "").replace(/[^\d+]/g, "");
+    if (phone) {
+      if (/^\+?64/.test(phone)) add("NZ", `Phone begins +64 (${r.phone})`);
+      else if (/^\+?61/.test(phone)) add("Australia", `Phone begins +61 (${r.phone})`);
+      else if (/^\+?86/.test(phone)) add("China", `Phone begins +86 (${r.phone})`);
+      // Bare NZ landline/mobile prefixes, which is how Allied record local numbers.
+      else if (/^0(3|4|6|7|9|21|22|27)/.test(phone)) add("NZ", `New Zealand dialling code (${r.phone})`);
+    }
+
+    const city = ((r.city as string | null) ?? "").toLowerCase().trim();
+    if (city) {
+      if (NZ_CITIES.some((c) => city.includes(c))) add("NZ", `City is in New Zealand: ${r.city}`);
+      else if (AU_CITIES.some((c) => city.includes(c))) add("Australia", `City is in Australia: ${r.city}`);
+      else if (CN_CITIES.some((c) => city.includes(c))) add("China", `City is in China: ${r.city}`);
+    }
+
+    const conflict = votes.size > 1;
+    return {
+      supplierUid: r.uid as string,
+      name: r.name as string | null,
+      region: conflict || votes.size === 0 ? null : [...votes][0],
+      evidence,
+      conflict,
+      bills: r.bills as number,
+      purchaseValue: Number(r.purchase_value),
+    };
+  });
+}
+
+/**
+ * Store the confident conclusions. Anything conflicting or unevidenced is left
+ * alone, and a region Allied set by hand is never overwritten.
+ */
+export async function applySupplierRegions(): Promise<{
+  assigned: number;
+  skippedConflict: number;
+  skippedNoSignal: number;
+  skippedExisting: number;
+}> {
+  const suggestions = await suggestSupplierRegions();
+  const pool = getPool();
+  const confident = suggestions.filter((s) => s.region && !s.conflict);
+  if (!confident.length) {
+    return {
+      assigned: 0,
+      skippedConflict: suggestions.filter((s) => s.conflict).length,
+      skippedNoSignal: suggestions.filter((s) => !s.region && !s.conflict).length,
+      skippedExisting: 0,
+    };
+  }
+
+  const values: unknown[] = [];
+  const tuples = confident
+    .map((s, i) => {
+      values.push(s.supplierUid, s.region);
+      const b = i * 2;
+      return `($${b + 1},$${b + 2},NOW())`;
+    })
+    .join(",");
+  const res = await pool.query(
+    `INSERT INTO platform_supplier_meta (supplier_uid, region, updated_at)
+     VALUES ${tuples}
+     ON CONFLICT (supplier_uid) DO UPDATE SET
+       region = COALESCE(platform_supplier_meta.region, EXCLUDED.region),
+       updated_at = CASE WHEN platform_supplier_meta.region IS NULL THEN NOW()
+                         ELSE platform_supplier_meta.updated_at END`,
+    values,
+  );
+  invalidateItemsCache();
+  return {
+    assigned: res.rowCount ?? 0,
+    skippedConflict: suggestions.filter((s) => s.conflict).length,
+    skippedNoSignal: suggestions.filter((s) => !s.region && !s.conflict).length,
+    skippedExisting: confident.length - (res.rowCount ?? 0),
+  };
+}
