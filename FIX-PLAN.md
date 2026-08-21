@@ -459,7 +459,26 @@ Together these mean the client can select any as-at date and any rolling window,
 2. All derived metrics — weekly demand, weeks of cover, below-minimum flags, purchasing suggestions — respect the selected window. Today it is hard-coded at 90/365 days throughout `queries.ts`; it becomes a parameter.
 3. **Committed as-at.** Spike first: check whether `Sale/Invoice/Item` references the originating `Sale/Order`. If it does, an order was open on *D* when `order.date ≤ D < invoice.date` and committed reconstructs properly. If it does not, show as-at *on hand* only, state plainly that committed cannot be reconstructed before snapshots began, and **do not fabricate it**.
 4. **Average cost as-at** uses today's average cost against historical quantity, explicitly labelled as an approximation. MYOB exposes no cost history.
-5. **Validation control:** check whether `Report/BalanceSheetSummary` accepts an as-at date. If so it gives an independent inventory-asset control total for a reconstructed valuation. 30-minute spike.
+5. **Validation control — spike done 21 Aug 2026. Result: blocked on a scope.**
+   `Report/BalanceSheetSummary` and every `GeneralLedger/*` endpoint return
+   **401** on the token we hold, while `Inventory/Item` returns 3,103 rows on
+   that same token. It is a permission problem, not a parameter one: reports and
+   the general ledger sit behind the **`sme-general-ledger`** scope, which this
+   connection was never granted.
+
+   Obtaining it needs `sme-general-ledger` added to `MYOB_SCOPES` **and Allied
+   re-authorising**, since an existing token cannot gain scope. That is a client
+   decision rather than a code change: it widens our access from inventory to
+   their general ledger — a broader permission over their financial accounts
+   than anything the platform holds today.
+
+   Whether the report even accepts an as-at date remains unknown; the docs do
+   not say and it cannot be tested until the scope exists.
+
+   **Recommendation:** raise it with Allied only if they want an *automated*
+   second opinion on historical valuations. Their own MYOB valuation report
+   already provides the manual check, so this is a convenience, not a
+   dependency.
 
 #### Backdating — how far, and how
 
