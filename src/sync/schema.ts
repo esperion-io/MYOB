@@ -361,6 +361,12 @@ const DDL: string[] = [
    * not movement. Counting them would double-count stock that has not arrived
    * or has not shipped.
    *
+   * NOTE ON TIME ZONES: MYOB returns transaction dates at midnight with no zone,
+   * and they are stored as timestamptz, so they sit at midnight UTC. Casting
+   * with a bare ::date would use whatever session timezone happens to be set;
+   * pinning it to UTC makes the calendar date match what MYOB actually sent,
+   * regardless of who is querying from where.
+   *
    * NOTE ON DATES: MYOB returns transaction dates with no time component (0 of
    * 1,314 adjustments carry one), so same-day ordering is unknowable. The ledger
    * therefore treats a physical count as the last word on its date — movements
@@ -368,25 +374,25 @@ const DDL: string[] = [
    */
   `CREATE OR REPLACE VIEW stock_movements AS
      SELECT h.uid AS doc_uid, 'bill'::text AS kind, h.number AS doc_number,
-            h.date::date AS moved_on, l.item_uid, l.qty::double precision AS qty,
+            (h.date AT TIME ZONE 'UTC')::date AS moved_on, l.item_uid, l.qty::double precision AS qty,
             h.supplier_name AS party, NULL::text AS memo
      FROM myob_purchase_bill_lines l
      JOIN myob_purchase_bills h ON h.uid = l.bill_uid
      WHERE l.item_uid IS NOT NULL AND l.qty IS NOT NULL
      UNION ALL
-     SELECT h.uid, 'invoice', h.number, h.date::date, l.item_uid,
+     SELECT h.uid, 'invoice', h.number, (h.date AT TIME ZONE 'UTC')::date, l.item_uid,
             (-l.qty)::double precision, h.customer_name, NULL
      FROM myob_sale_invoice_lines l
      JOIN myob_sale_invoices h ON h.uid = l.invoice_uid
      WHERE l.item_uid IS NOT NULL AND l.qty IS NOT NULL
      UNION ALL
-     SELECT h.uid, 'build', h.number, h.date::date, l.item_uid,
+     SELECT h.uid, 'build', h.number, (h.date AT TIME ZONE 'UTC')::date, l.item_uid,
             l.qty::double precision, NULL, h.memo
      FROM myob_build_lines l
      JOIN myob_builds h ON h.uid = l.build_uid
      WHERE l.item_uid IS NOT NULL AND l.qty IS NOT NULL
      UNION ALL
-     SELECT h.uid, 'adjustment', h.number, h.date::date, l.item_uid,
+     SELECT h.uid, 'adjustment', h.number, (h.date AT TIME ZONE 'UTC')::date, l.item_uid,
             l.qty::double precision, NULL, COALESCE(NULLIF(l.memo, ''), h.memo)
      FROM myob_adjustment_lines l
      JOIN myob_adjustments h ON h.uid = l.adjustment_uid

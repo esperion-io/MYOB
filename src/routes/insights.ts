@@ -31,6 +31,7 @@ import {
   itemLedger,
   divergenceReport,
   importCounts,
+  positionExport,
   ownedPositions,
   recordManualCount,
   snapshotDates,
@@ -562,6 +563,24 @@ insightsRouter.get("/divergence", async (_req, res) => {
   if (!requireDb(res)) return;
   try {
     res.json(await divergenceReport());
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** The as-at stock position as a spreadsheet — the month-end deliverable. */
+insightsRouter.get("/positions.csv", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const asAt =
+      typeof req.query.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.asAt)
+        ? req.query.asAt
+        : undefined;
+    const out = await positionExport(asAt);
+    res
+      .type("text/csv; charset=utf-8")
+      .setHeader("Content-Disposition", `attachment; filename="${out.filename}"`)
+      .send(out.csv);
   } catch (err) {
     send500(res, err);
   }

@@ -616,6 +616,14 @@ function initWindowControls() {
 }
 
 /** Banner shown on every view whose numbers are not "as at today". */
+/** Download URL for the as-at position, carrying the access key like other exports. */
+function exportPositionUrl() {
+  const key = accessKey();
+  return `/api/insights/positions.csv?asAt=${encodeURIComponent(windowState.asAt)}${
+    key ? `&key=${encodeURIComponent(key)}` : ""
+  }`;
+}
+
 function historicalNotice() {
   if (!isHistorical()) return "";
   return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>,
@@ -650,6 +658,12 @@ async function renderOverview() {
       <div>
         <h1>Overview</h1>
         <p class="page-sub">Position facts from MYOB · analysis by this platform · target cover ${data.targetCoverWeeks} weeks</p>
+      </div>
+      <div class="head-actions">
+        <a class="btn" id="export-position" href="${exportPositionUrl()}"
+           title="Every stocked item as at the selected date, with the reference point each figure was measured from">
+          Export stock position (${dateFmt(windowState.asAt)})
+        </a>
       </div>
     </div>
 

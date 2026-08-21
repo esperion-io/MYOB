@@ -905,3 +905,88 @@ export async function divergenceReport(): Promise<Record<string, unknown>> {
     items: r.rows,
   };
 }
+
+/**
+ * The as-at stock position as a spreadsheet, for Allied's month-end run.
+ *
+ * The audit trail travels with the numbers: every row carries the anchor its
+ * on-hand figure was measured from, that anchor's date and kind, and MYOB's own
+ * figures beside ours. A number the client cannot trace is a number they will
+ * not act on, and this is the file they will sit next to their own analysis.
+ *
+ * Emitted as CSV with a UTF-8 BOM so Excel opens it directly without an import
+ * step and without mangling non-ASCII supplier names.
+ */
+export async function positionExport(asAt?: string): Promise<{
+  filename: string;
+  csv: string;
+  rows: number;
+}> {
+  await ensureInsightsSchema();
+  const date = asAt ?? businessToday();
+  const result = await getPool().query(
+    `SELECT i.number, i.name, i.product_type, i.product_finish,
+            i.is_active, i.primary_supplier_name, i.supplier_item_number,
+            p.on_hand, p.committed, p.free_stock, p.on_order,
+            i.average_cost, (p.on_hand * COALESCE(i.average_cost, 0)) AS stock_value,
+            i.min_level, p.basis, p.anchor_date::text AS anchor_date,
+            p.anchor_source, p.anchor_qty, p.movements_since_anchor,
+            p.myob_on_hand, p.myob_committed, p.divergence
+     FROM item_position_at($1::date) p
+     JOIN myob_items i ON i.uid = p.item_uid
+     WHERE i.is_inventoried
+     ORDER BY i.number`,
+    [date],
+  );
+
+  const anchorLabel: Record<string, string> = {
+    opening_balance: "Opening balance",
+    opening_balance_rolled_back: "Opening balance (rolled back)",
+    myob_adjustment: "Stocktake in MYOB",
+    manual: "Count entered by Allied",
+    csv_import: "Count imported by Allied",
+  };
+  const basisLabel: Record<string, string> = {
+    counted: "Anchored to a physical count",
+    reconstructed: "Reconstructed from the ledger",
+    precedes_count: "Before the last count — not reported",
+    no_opening_balance: "No reference point",
+  };
+
+  const esc = (v: unknown): string => {
+    if (v == null) return "";
+    const s = typeof v === "number" ? String(Number(v.toFixed(4))) : String(v);
+    return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+  };
+
+  const header = [
+    "Item number", "Item name", "Product type", "Product finish", "Active",
+    "Supplier", "Supplier item no",
+    "On hand", "Committed", "Free stock", "On order",
+    "Average cost", "Stock value", "Min level",
+    "How it was reached", "Reference point", "Reference date", "Reference qty",
+    "Movements since", "MYOB on hand", "MYOB committed", "Difference vs MYOB",
+  ];
+
+  const lines = [header.join(",")];
+  for (const r of result.rows) {
+    lines.push([
+      esc(r.number), esc(r.name), esc(r.product_type), esc(r.product_finish),
+      r.is_active ? "Yes" : "No",
+      esc(r.primary_supplier_name), esc(r.supplier_item_number),
+      esc(r.on_hand), esc(r.committed), esc(r.free_stock), esc(r.on_order),
+      esc(r.average_cost), esc(r.stock_value), esc(r.min_level),
+      esc(basisLabel[r.basis as string] ?? r.basis),
+      esc(anchorLabel[r.anchor_source as string] ?? r.anchor_source),
+      esc(r.anchor_date), esc(r.anchor_qty), esc(r.movements_since_anchor),
+      esc(r.myob_on_hand), esc(r.myob_committed), esc(r.divergence),
+    ].join(","));
+  }
+
+  return {
+    filename: `allied-stock-position-${date}.csv`,
+    // BOM first: without it Excel guesses the encoding and mangles accents.
+    csv: `﻿${lines.join("\r\n")}\r\n`,
+    rows: result.rows.length,
+  };
+}
