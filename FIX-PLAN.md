@@ -1,6 +1,6 @@
 # Allied Priority Fix Plan — v2
 
-**Status:** P0 shipped 18 Aug 2026. P1 and P2 shipped 19 Aug 2026. P3–P6 proposed. Revised after client direction on stocktake-anchored stock maths.
+**Status:** P0 shipped 18 Aug 2026. P1 and P2 shipped 19 Aug 2026. P3 shipped 21 Aug 2026. P4–P6 proposed. Revised after client direction on stocktake-anchored stock maths.
 
 **What changed in v2**
 
@@ -10,6 +10,7 @@
 - **P0 shipped 18 Aug** — the sync no longer serves stale quantities, and MYOB's Bill of Materials was verified as genuinely maintained and promoted to the primary recipe source.
 - **P1 shipped 19 Aug** — on hand, committed, free, on order and available are all computed here from Allied's own documents; counts, divergence and the audit trail are on screen.
 - **P2 shipped 19 Aug** — stock value is our on hand × average cost, which caught a MYOB valuation error of exactly 100×.
+- **P3 shipped 21 Aug** — an as-at date and a rolling window, genuinely independent; a NZ-time correction that was misdating the snapshot trail; and the month-end spreadsheet export.
 
 ---
 
@@ -430,7 +431,7 @@ month-end run that validates P1.
 
 ---
 
-### P3 — Point-in-time date vs rolling window
+### P3 — Point-in-time date vs rolling window ✅ SHIPPED 21 Aug 2026
 
 Depends on P0 and P1. Hard external deadline: the August inventory run.
 
@@ -453,7 +454,81 @@ Together these mean the client can select any as-at date and any rolling window,
 
 **31 July 2026 will always be reconstructed** — no snapshot existed. That is fine and it is accurate, but it must be labelled honestly for the August run.
 
-#### Build
+#### What shipped
+
+**Two controls that cannot be mistaken for each other.** An as-at date selects a
+moment (what was on the shelf that day); a rolling window selects a period (what
+sold over it). They are styled differently on purpose — the date carries a solid
+rule, the window is a pill — each with a line saying what it governs. Default
+window is **6 months**, down from the 12 Allied had been using, which flattens
+their spiky demand.
+
+Proven independent, live:
+
+| Setting | Stock value | Weekly demand |
+|---|---|---|
+| 6-month window | $867,636 | 69,078 |
+| 12-month window | **$867,636** unchanged | 60,916 |
+| 3-month window | **$867,636** unchanged | 76,323 |
+| As-at 31 Jul, 6-month | **$895,040** | 62,479 |
+
+**One definition of position at any date.** `item_position` became
+`item_position_at(date)`, serving today and any historical date including the
+roll-back through the conversion balance. The view calls it with the business
+date, so every existing caller was untouched.
+
+**Demand parameterised.** The fixed 90/365-day columns became window/long,
+measured up to the as-at date rather than to now, with the weekly rate dividing
+by the real number of weeks in the chosen window. Items with no sales inside the
+window still fall back to the wider look-back and are flagged slow movers.
+Everything downstream — cover, below-minimum, suggestions, risk, sorting,
+filters — follows both controls.
+
+**Month-end export.** Every stocked item as at the chosen date: on hand,
+committed, free, on order, average cost, stock value, and the audit trail
+alongside — how each figure was reached, the reference point, its date and
+quantity, movements since, and MYOB's own figures. CSV with a UTF-8 BOM so Excel
+opens it directly. Verified live: 3,064 rows for 31 July.
+
+**A committed caveat that switches itself off.** On hand reconstructs cleanly at
+any date; committed cannot, because MYOB records an order's status now and never
+when it changed. For a date with no snapshot we can only count orders still open
+today, which understates it. The warning shows on exactly those dates and
+vanishes once a snapshot covers them — so from 31 Aug onward, the month-ends
+Allied actually use will never show it.
+
+#### The timezone correction — found while testing, and it was live
+
+Allied are a New Zealand business; the app and database run in **UTC**, 12–13
+hours behind. Every calendar date generated from the server clock was wrong for
+roughly half of each NZ day. This was not theoretical: the snapshot written at
+18:21 UTC on 19 Aug was stored as `2026-08-19` when Auckland was already 06:21 on
+**20 August**. NZ 19 August had no snapshot at all, while two rows were both
+captured on NZ 20 August. On a month-end valuation that off-by-one is exactly
+the error that costs trust.
+
+Fixed with a configurable `BUSINESS_TIMEZONE` (default `Pacific/Auckland`)
+covering snapshot dates, opening-balance dates, as-at defaults, ledger end dates,
+export filenames and the `item_position` view. The browser had the same fault —
+`toISOString()` made "last month end" return 30 July instead of 31.
+
+**Storage was not changed and did not need to be.** Timestamps stay `timestamptz`
+in UTC, which is correct: an instant is the same moment everywhere. Only
+*calendar dates* — `as_at_date`, `count_date`, `moved_on`, `anchor_date` — carry
+no timezone, and those are now decided by Allied's calendar. The controls say
+"All dates are New Zealand time" and the glossary explains why.
+
+#### Data reset, 21 Aug 2026
+
+Because Allied had not yet seen this version, the mirrored data was cleared and
+rebuilt so no misdated rows survived. Deleted and re-fetched: all 16 `myob_*`
+mirror tables, `platform_bom` (derived rows), `platform_stock_count` (opening
+balances), `platform_daily_position` (12,248 rows), `sync_state`, `sync_runs`.
+Preserved untouched: `connections` (the MYOB OAuth link), `platform_item_suppliers`,
+`platform_supplier_meta`. Full resync took 4m05s. Snapshot and opening balance
+now both date correctly to NZ 21 Aug.
+
+#### Original build list
 
 1. **Two visually and functionally distinct controls:** an **as-at date** (default: most recent month end) governing stock position, and a **rolling window** (default: **6 months**, down from 12) governing sales, consumption and demand.
 2. All derived metrics — weekly demand, weeks of cover, below-minimum flags, purchasing suggestions — respect the selected window. Today it is hard-coded at 90/365 days throughout `queries.ts`; it becomes a parameter.
@@ -645,6 +720,52 @@ cannot see freight or landed costs that MYOB folds into its own average.
 
 ---
 
+### B2 — Independent valuation check via MYOB's Balance Sheet
+
+**Raised 21 Aug 2026 from the P3 spike. Parked until it can be arranged with
+Allied.**
+
+When the platform reports stock worth $895,040 as at 31 July, nothing
+independent confirms it. The only check is Allied running their own month-end —
+which is the very work this tool exists to remove.
+
+MYOB's Balance Sheet carries an **Inventory asset account**: a single stock total
+produced by MYOB's accounting engine, by a completely different route from the
+item-level data we mirror. Comparing the two would be an automated second
+opinion on every historical valuation.
+
+#### Why it is parked
+
+Tested 21 Aug 2026. Every relevant endpoint returns **401** on a token that reads
+`Inventory/Item` perfectly well:
+
+| Endpoint | Result |
+|---|---|
+| `Inventory/Item` | 3,103 rows |
+| `GeneralLedger/Account` | **401** |
+| `Report/BalanceSheetSummary` | **401** |
+| `Report/ProfitAndLossSummary` | **401** |
+
+A permission problem, not a parameter one. Reports and the general ledger sit
+behind the **`sme-general-ledger`** scope, which this connection was never
+granted, and an existing token cannot gain scope.
+
+#### What it would take
+
+1. Add `sme-general-ledger` to `MYOB_SCOPES`.
+2. **Allied re-authorise** through the OAuth consent screen.
+3. Then test whether the report actually accepts an as-at date — unknown, the
+   docs do not say, and untestable until the scope exists.
+
+#### The judgement call
+
+This widens our access from inventory to **Allied's general ledger** — a broader
+permission over their financial accounts than anything the platform holds today.
+Worth raising only if they want the automated check; their own MYOB valuation
+report already provides it manually. A convenience, not a dependency.
+
+---
+
 ## Part 3 — Sequencing
 
 ```
@@ -660,11 +781,11 @@ P0 sync + freshness ──> P1 stocktake-anchored ledger ──┬──> P2 val
 | P0 | Sync freshness + BOM + custom fields | S–M | ✅ Shipped 18 Aug 2026. |
 | P1 | Stocktake-anchored ledger | **L** | ✅ Shipped 19 Aug 2026. Now the core of the product. |
 | P2 | Average-cost valuation | S | ✅ Shipped 19 Aug 2026. Caught a 100× MYOB error. |
-| P3 | As-at + rolling window + backfill | L | Snapshots, confidence tiers, 2-year backfill. |
+| P3 | As-at + rolling window + export | L | ✅ Shipped 21 Aug 2026. Also caught a live NZ-time dating fault. |
 | P4 | Facets + tags | S–M | Reduced — no suppression logic. |
 | P5+P6 | Cart rebuild | XL | New persistence, fan-out, guard rails, xlsx. |
 
-**Recommended order: P0 → P1 → P2 → P3 → P4 → P5+P6.** P0, P1 and P2 are shipped; P3 is next and carries the only hard external deadline.
+**Recommended order: P0 → P1 → P2 → P3 → P4 → P5+P6.** P0–P3 are shipped, which clears the August month-end deadline. P4 is next; P5+P6 is the largest remaining piece.
 
 P1 now sits directly behind P0 rather than beside P2, because on-hand is an input to valuation, cover, below-minimum flags and every purchasing suggestion. P2 follows immediately and is nearly free. P3 must not slip — it is the only item with a hard external deadline. The cart rebuild is the largest piece and should not start until the numbers beneath it are trusted, or it will be built twice.
 
