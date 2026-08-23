@@ -35,6 +35,8 @@ export interface CartLine {
   /** Measured order-to-delivery, not a promise. Null when never measured. */
   leadTimeDays: number | null;
   leadTimeOrders: number;
+  /** Same-day order/bill pairs ignored — see supplier_lead_time for why. */
+  leadTimeSameDayExcluded: number;
   /** What this supplier last charged, and their average. */
   lastCost: number | null;
   averageCost: number | null;
@@ -75,6 +77,14 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   estimatedCost: number;
   /** Items sitting under more than one supplier with no decision made yet. */
   unresolvedDuplicates: number;
+  /** Choices already made, so they can be reviewed and reversed. */
+  decisions: {
+    itemUid: string;
+    number: string | null;
+    name: string | null;
+    kind: "selected" | "split";
+    suppliers: { supplierUid: string; supplierName: string; qty: number }[];
+  }[];
 }> {
   await ensureInsightsSchema();
   const pool = getPool();
@@ -91,6 +101,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
       totalItems: 0,
       estimatedCost: 0,
       unresolvedDuplicates: 0,
+      decisions: [],
     };
   }
   const uids = needing.map((i) => i.uid);
@@ -144,7 +155,11 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   const lead = new Map(
     leadTimes.rows.map((r) => [
       r.supplier_uid as string,
-      { days: r.median_lead_days as number | null, orders: r.orders_measured as number },
+      {
+        days: r.median_lead_days as number | null,
+        orders: r.orders_measured as number,
+        sameDayExcluded: r.same_day_excluded as number,
+      },
     ]),
   );
   const lastCost = new Map(
@@ -246,6 +261,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         supplierSource: o.source,
         leadTimeDays: lt?.days ?? null,
         leadTimeOrders: lt?.orders ?? 0,
+        leadTimeSameDayExcluded: lt?.sameDayExcluded ?? 0,
         lastCost: lastCost.get(key) ?? null,
         averageCost: item.averageCost,
         onHand: item.qtyOnHand,
@@ -296,6 +312,33 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   );
   for (const g of suppliers) g.lines.sort((a, b) => b.estCost - a.estCost);
 
+  // Everything already decided, grouped per item, so the UI can show what was
+  // chosen and offer to reverse it. A decision nobody can review or undo is one
+  // people hesitate to make.
+  const decisions = new Map<string, {
+    itemUid: string; number: string | null; name: string | null;
+    kind: "selected" | "split";
+    suppliers: { supplierUid: string; supplierName: string; qty: number }[];
+  }>();
+  for (const g of suppliers)
+    for (const l of g.lines) {
+      if (l.state !== "selected" && l.state !== "split") continue;
+      const e = decisions.get(l.itemUid) ?? {
+        itemUid: l.itemUid,
+        number: l.number,
+        name: l.name,
+        kind: l.state,
+        suppliers: [],
+      };
+      e.kind = l.state;
+      e.suppliers.push({
+        supplierUid: g.supplierUid,
+        supplierName: g.supplierName,
+        qty: l.qty,
+      });
+      decisions.set(l.itemUid, e);
+    }
+
   return {
     generatedAt: new Date().toISOString(),
     suppliers,
@@ -303,6 +346,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
     totalItems: needing.length,
     estimatedCost: suppliers.reduce((a, g) => a + g.estimatedCost, 0),
     unresolvedDuplicates,
+    decisions: [...decisions.values()],
   };
 }
 
@@ -458,4 +502,15 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
     csv: `﻿${lines.join("\r\n")}\r\n`,
     unresolvedDuplicates: cart.unresolvedDuplicates,
   };
+}
+
+
+/**
+ * Reverse a decision, putting the item back under every supplier tagged against
+ * it. Deleting the rows is enough: with no cart row the fan-out offers all the
+ * options again, which is exactly the state before the choice was made.
+ */
+export async function undoCartDecision(itemUid: string): Promise<void> {
+  await ensureInsightsSchema();
+  await getPool().query(`DELETE FROM platform_purchase_cart WHERE item_uid = $1`, [itemUid]);
 }

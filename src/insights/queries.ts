@@ -49,11 +49,16 @@ export function autoRegion(country: string | null | undefined): SupplierRegion |
 /**
  * Demand window options.
  *
- * `windowMonths` is the rolling window Allied choose — 6 by default, down from
- * the 12 they had been using, because a 12-month average flattens their spiky
- * demand profile. `longMonths` is a wider look-back used only for items with no
- * activity inside the chosen window, so a genuine slow mover still gets a rate
- * rather than a blank.
+ * `windowMonths` is the rolling window Allied choose, 6 by default: a 12-month
+ * average flattens their spiky demand profile, so the shorter window is the
+ * one that reflects how the business actually moves. Wider views are one click
+ * away in the control bar.
+ *
+ * `longMonths` is a wider look-back used only for items with no activity inside
+ * the chosen window, so a genuine slow mover still gets a rate rather than a
+ * blank. It must stay strictly wider than the window or that fallback can never
+ * fire and nothing is ever detected as a slow mover — hence twice the window,
+ * floored at 12 months.
  *
  * Everything is measured up to `asAt`, not to today, so demand and stock
  * position always describe the same moment.
@@ -64,15 +69,20 @@ export interface DemandWindow {
   longMonths: number;
 }
 
+export const DEFAULT_WINDOW_MONTHS = 6;
+
 export function resolveWindow(o?: Partial<DemandWindow>): DemandWindow {
-  const windowMonths = clampMonths(o?.windowMonths, 6);
+  const windowMonths = clampMonths(o?.windowMonths, DEFAULT_WINDOW_MONTHS);
   return {
     asAt:
       typeof o?.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o.asAt)
         ? o.asAt
         : businessToday(),
     windowMonths,
-    longMonths: Math.max(clampMonths(o?.longMonths, 12), windowMonths),
+    longMonths: Math.max(
+      clampMonths(o?.longMonths, 12),
+      Math.min(windowMonths * 2, 60),
+    ),
   };
 }
 
@@ -675,6 +685,28 @@ const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
   on_hand: "asc",
 };
 
+/**
+ * Whether the selected date has a stored daily snapshot.
+ *
+ * On hand reconstructs cleanly from the ledger either way, but committed
+ * cannot: MYOB records an order's status now, never when it changed, so for a
+ * date with no snapshot we can only count orders still open today and the
+ * figure is understated. Every view that reports an as-at position returns
+ * this so the UI can say so on exactly the dates where it is true.
+ */
+async function snapshotState(asAt: string) {
+  const snap = await getPool().query(
+    `SELECT EXISTS (SELECT 1 FROM platform_daily_position WHERE as_at_date = $1::date) AS has_snapshot,
+            MIN(as_at_date)::text AS snapshots_from
+     FROM platform_daily_position`,
+    [asAt],
+  );
+  return {
+    hasSnapshot: Boolean(snap.rows[0]?.has_snapshot),
+    snapshotsFrom: (snap.rows[0]?.snapshots_from as string) ?? null,
+  };
+}
+
 export async function listItems(params: ListParams) {
   const win = resolveWindow(params);
   const all = await computedItems(win);
@@ -804,6 +836,7 @@ export async function listItems(params: ListParams) {
     page,
     pageSize,
     window: win,
+    ...(await snapshotState(win.asAt)),
     sort: sortKey,
     dir,
     targetCoverWeeks: config.insights.targetCoverWeeks,
@@ -814,21 +847,7 @@ export async function listItems(params: ListParams) {
 export async function overview(opts?: Partial<DemandWindow>) {
   const win = resolveWindow(opts);
   const items = await computedItems(win);
-  /*
-   * Whether the chosen date has a stored snapshot decides how far the figures
-   * can be trusted. On hand reconstructs cleanly from the ledger either way,
-   * but committed cannot: MYOB records an order's status now, never when it
-   * changed, so for a date with no snapshot we can only count orders still open
-   * today and the figure is understated. This flag lets the UI say so on
-   * exactly the dates where it is true, and stay quiet everywhere else — which
-   * it will, permanently, once snapshots cover the month-ends Allied use.
-   */
-  const snap = await getPool().query(
-    `SELECT EXISTS (SELECT 1 FROM platform_daily_position WHERE as_at_date = $1::date) AS has_snapshot,
-            MIN(as_at_date)::text AS snapshots_from
-     FROM platform_daily_position`,
-    [win.asAt],
-  );
+  const snap = await snapshotState(win.asAt);
   const pool = getPool();
 
   const active = items.filter((i) => i.isActive !== false);
@@ -866,7 +885,7 @@ export async function overview(opts?: Partial<DemandWindow>) {
              MAX(u.depth)::int AS max_depth
       FROM up u
       JOIN myob_items i ON i.uid = u.item_uid
-      JOIN item_position p ON p.item_uid = u.item_uid
+      JOIN item_position_at('${win.asAt}'::date) p ON p.item_uid = u.item_uid
       WHERE COALESCE(p.free_stock, 0) < u.qty_per
       GROUP BY u.item_uid, i.number, i.name, p.free_stock
       ORDER BY blocked_parents DESC
@@ -890,8 +909,10 @@ export async function overview(opts?: Partial<DemandWindow>) {
       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
       GROUP BY s.country, m.region
     `),
-    // Largest stock adjustments in the last 30 days by absolute value — the
-    // write-offs, stocktake corrections and reversals worth a second look.
+    // Largest stock adjustments in the 30 days to the selected date, by
+    // absolute value — the write-offs, stocktake corrections and reversals
+    // worth a second look. Anchored to asAt so a historical view does not list
+    // adjustments that had not happened yet.
     pool.query(`
       SELECT a.number, a.date, a.memo AS doc_memo, al.memo AS line_memo,
              al.qty::float8 AS qty,
@@ -900,7 +921,9 @@ export async function overview(opts?: Partial<DemandWindow>) {
       FROM myob_adjustment_lines al
       JOIN myob_adjustments a ON a.uid = al.adjustment_uid
       JOIN myob_items i ON i.uid = al.item_uid
-      WHERE a.date >= NOW() - INTERVAL '30 days' AND al.qty <> 0
+      WHERE a.date <= '${win.asAt}'::date
+        AND a.date >= '${win.asAt}'::date - INTERVAL '30 days'
+        AND al.qty <> 0
       ORDER BY value DESC
       LIMIT 10
     `),
@@ -957,12 +980,11 @@ export async function overview(opts?: Partial<DemandWindow>) {
     targetCoverWeeks: config.insights.targetCoverWeeks,
     excessCoverWeeks: config.insights.excessCoverWeeks,
     window: win,
-    hasSnapshot: Boolean(snap.rows[0]?.has_snapshot),
-    snapshotsFrom: (snap.rows[0]?.snapshots_from as string) ?? null,
+    ...snap,
   };
 }
 
-async function relationshipRows(uid: string) {
+async function relationshipRows(uid: string, asAt: string) {
   const pool = getPool();
   const [components, whereUsed] = await Promise.all([
     pool.query(
@@ -974,7 +996,7 @@ async function relationshipRows(uid: string) {
               (SELECT COUNT(*)::int FROM effective_bom x WHERE x.parent_uid = b.component_uid) AS sub_components
        FROM effective_bom b
        JOIN myob_items i ON i.uid = b.component_uid
-       JOIN item_position p ON p.item_uid = b.component_uid
+       JOIN item_position_at('${asAt}'::date) p ON p.item_uid = b.component_uid
        LEFT JOIN platform_bom d ON d.parent_uid = b.parent_uid
          AND d.component_uid = b.component_uid AND d.source = 'derived' AND b.source = 'user'
        WHERE b.parent_uid = $1
@@ -989,7 +1011,7 @@ async function relationshipRows(uid: string) {
               (SELECT COUNT(*)::int FROM effective_bom x WHERE x.component_uid = b.parent_uid) AS used_higher
        FROM effective_bom b
        JOIN myob_items i ON i.uid = b.parent_uid
-       JOIN item_position p ON p.item_uid = b.parent_uid
+       JOIN item_position_at('${asAt}'::date) p ON p.item_uid = b.parent_uid
        WHERE b.component_uid = $1
        ORDER BY b.qty_per DESC`,
       [uid],
@@ -998,9 +1020,9 @@ async function relationshipRows(uid: string) {
   return { components: components.rows, whereUsed: whereUsed.rows };
 }
 
-export async function relationships(uid: string) {
+export async function relationships(uid: string, opts?: Partial<DemandWindow>) {
   await ensureInsightsSchema();
-  return relationshipRows(uid);
+  return relationshipRows(uid, resolveWindow(opts).asAt);
 }
 
 /** Depth cap for BOM explosion; also the cycle guard for malformed data. */
@@ -1011,7 +1033,7 @@ const BOM_MAX_DEPTH = 6;
  * Returns the tree (for display) and the flattened base requirement per unit,
  * which is what "buildable if sub-assemblies are built first" rests on.
  */
-async function explodeBom(uid: string): Promise<BomTreeRow[]> {
+async function explodeBom(uid: string, asAt: string): Promise<BomTreeRow[]> {
   const result = await getPool().query(
     `WITH RECURSIVE tree AS (
        SELECT b.parent_uid, b.component_uid, b.qty_per::float8 AS qty_per,
@@ -1034,7 +1056,7 @@ async function explodeBom(uid: string): Promise<BomTreeRow[]> {
             EXISTS (SELECT 1 FROM effective_bom c WHERE c.parent_uid = t.component_uid) AS has_children
      FROM tree t
      JOIN myob_items i ON i.uid = t.component_uid
-     JOIN item_position p ON p.item_uid = t.component_uid
+     JOIN item_position_at('${asAt}'::date) p ON p.item_uid = t.component_uid
      ORDER BY t.depth, t.qty_total DESC`,
     [uid],
   );
@@ -1115,40 +1137,50 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
   );
   if (!itemResult.rows.length) return null;
   const item = computeItem(itemResult.rows[0], win);
+  const chartMonths = Math.max(12, win.windowMonths);
 
   const [monthly, movements, commitments, incoming, purchases, rels, freshness, potentialParents] =
     await Promise.all([
+      // The bar chart ends at the selected date and spans at least a year, or
+      // the whole window when that is wider — so the chart and the window
+      // figures underneath it always describe the same stretch of time.
       pool.query(
         `SELECT month, SUM(direct)::float8 AS direct, SUM(component)::float8 AS component FROM (
            SELECT date_trunc('month', i.date) AS month, l.qty AS direct, 0 AS component
            FROM myob_sale_invoice_lines l JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
-           WHERE l.item_uid = $1 AND i.date >= NOW() - INTERVAL '365 days'
+           WHERE l.item_uid = $1
+             AND i.date <= '${win.asAt}'::date
+             AND i.date >= '${win.asAt}'::date - make_interval(months => ${chartMonths})
            UNION ALL
            SELECT date_trunc('month', b.date), 0, -bl.qty
            FROM myob_build_lines bl JOIN myob_builds b ON b.uid = bl.build_uid
-           WHERE bl.item_uid = $1 AND bl.qty < 0 AND b.date >= NOW() - INTERVAL '365 days'
+           WHERE bl.item_uid = $1 AND bl.qty < 0
+             AND b.date <= '${win.asAt}'::date
+             AND b.date >= '${win.asAt}'::date - make_interval(months => ${chartMonths})
          ) x GROUP BY month ORDER BY month`,
         [uid],
       ),
+      // Capped at the selected date: movements after it would contradict the
+      // on-hand figure in the header, which is reconstructed to that date.
       pool.query(
         `SELECT * FROM (
            SELECT 'sale' AS kind, i.number AS doc, i.date, -l.qty::float8 AS delta,
                   i.customer_name AS counterparty, l.description
            FROM myob_sale_invoice_lines l JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
-           WHERE l.item_uid = $1
+           WHERE l.item_uid = $1 AND i.date <= '${win.asAt}'::date
            UNION ALL
            SELECT 'purchase', b.number, b.date, l.qty::float8,
                   b.supplier_name, l.description
            FROM myob_purchase_bill_lines l JOIN myob_purchase_bills b ON b.uid = l.bill_uid
-           WHERE l.item_uid = $1
+           WHERE l.item_uid = $1 AND b.date <= '${win.asAt}'::date
            UNION ALL
            SELECT 'build', b.number, b.date, bl.qty::float8, b.memo, NULL
            FROM myob_build_lines bl JOIN myob_builds b ON b.uid = bl.build_uid
-           WHERE bl.item_uid = $1
+           WHERE bl.item_uid = $1 AND b.date <= '${win.asAt}'::date
            UNION ALL
            SELECT 'adjustment', a.number, a.date, al.qty::float8, a.memo, al.memo
            FROM myob_adjustment_lines al JOIN myob_adjustments a ON a.uid = al.adjustment_uid
-           WHERE al.item_uid = $1
+           WHERE al.item_uid = $1 AND a.date <= '${win.asAt}'::date
          ) m ORDER BY date DESC NULLS LAST LIMIT 60`,
         [uid],
       ),
@@ -1170,10 +1202,11 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
       pool.query(
         `SELECT b.date, b.supplier_name, l.qty::float8 AS qty, l.unit_price::float8 AS unit_price
          FROM myob_purchase_bill_lines l JOIN myob_purchase_bills b ON b.uid = l.bill_uid
-         WHERE l.item_uid = $1 ORDER BY b.date DESC LIMIT 15`,
+         WHERE l.item_uid = $1 AND b.date <= '${win.asAt}'::date
+         ORDER BY b.date DESC LIMIT 15`,
         [uid],
       ),
-      relationshipRows(uid),
+      relationshipRows(uid, win.asAt),
       pool.query(`SELECT entity, last_synced_at FROM sync_state ORDER BY entity`),
       // Which packs/kits drive this component's potential demand, and the
       // sold/built/bought arithmetic behind each one. Uses the same window as
@@ -1203,9 +1236,9 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
            GROUP BY l.item_uid
          )
          SELECT eb.parent_uid AS uid, i.number, i.name, eb.qty_per::float8 AS qty_per,
-                COALESCE(s.qty, 0) AS sold_90,
-                COALESCE(bt.qty, 0) AS built_90,
-                COALESCE(bo.qty, 0) AS bought_90,
+                COALESCE(s.qty, 0) AS sold_window,
+                COALESCE(bt.qty, 0) AS built_window,
+                COALESCE(bo.qty, 0) AS bought_window,
                 GREATEST(COALESCE(s.qty,0) - COALESCE(bt.qty,0) - COALESCE(bo.qty,0), 0) AS unexplained_units,
                 GREATEST(COALESCE(s.qty,0) - COALESCE(bt.qty,0) - COALESCE(bo.qty,0), 0) * eb.qty_per AS potential_qty
          FROM effective_bom eb
@@ -1222,7 +1255,7 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
 
   // Buildability from free stock, two ways: sub-assemblies as they sit today,
   // or exploded to base components assuming sub-assemblies get built first.
-  const tree = rels.components.length ? await explodeBom(uid) : [];
+  const tree = rels.components.length ? await explodeBom(uid, win.asAt) : [];
   const buildability = rels.components.length
     ? {
         ...computeBuildability(tree, uid),
@@ -1244,12 +1277,21 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
     buildability,
     potentialParents: potentialParents.rows,
     freshness: freshness.rows,
+    window: win,
+    chartMonths,
+    ...(await snapshotState(win.asAt)),
   };
 }
 
-export async function productsList(params: { q?: string; page?: number }) {
+export async function productsList(
+  params: { q?: string; page?: number } & Partial<DemandWindow>,
+) {
   await ensureInsightsSchema();
+  const win = resolveWindow(params);
   const pool = getPool();
+  // Stock is read at the selected date and sales over the selected window, the
+  // same as every other view. Read from today's position instead, this page
+  // quietly contradicted the inventory page it links to.
   const result = await pool.query(`
     WITH parent_build AS (
       SELECT b.parent_uid,
@@ -1259,7 +1301,7 @@ export async function productsList(params: { q?: string; page?: number }) {
              MIN(b.confidence)::float8 AS min_confidence
       FROM effective_bom b
       JOIN myob_items ci ON ci.uid = b.component_uid
-      JOIN item_position cp ON cp.item_uid = b.component_uid
+      JOIN item_position_at('${win.asAt}'::date) cp ON cp.item_uid = b.component_uid
       GROUP BY b.parent_uid
     )
     SELECT p.*, i.number, i.name,
@@ -1269,11 +1311,13 @@ export async function productsList(params: { q?: string; page?: number }) {
               FROM myob_sale_invoice_lines l
               JOIN myob_sale_invoices si ON si.uid = l.invoice_uid
              WHERE l.item_uid = p.parent_uid
-               AND si.date >= NOW() - INTERVAL '90 days') AS sold_90
+               AND si.date <= '${win.asAt}'::date
+               AND si.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+            ) AS sold_window
     FROM parent_build p
     JOIN myob_items i ON i.uid = p.parent_uid
-    JOIN item_position ip ON ip.item_uid = p.parent_uid
-    ORDER BY sold_90 DESC NULLS LAST
+    JOIN item_position_at('${win.asAt}'::date) ip ON ip.item_uid = p.parent_uid
+    ORDER BY sold_window DESC NULLS LAST
   `);
 
   let rows = result.rows;
@@ -1289,6 +1333,7 @@ export async function productsList(params: { q?: string; page?: number }) {
     total: rows.length,
     page,
     pageSize,
+    window: win,
     parents: rows.slice((page - 1) * pageSize, page * pageSize),
     // Only ~500 of 3,100 items have a recipe, so a search that matches a real
     // item still comes back empty here. Say which it is rather than leaving
@@ -1476,8 +1521,9 @@ export async function dataStatus() {
  * MYOB facts (name, address, activity) + platform labels (region, lead time,
  * notes) + derived promised lead time (median PO date → promised date).
  */
-export async function suppliersList(params: { q?: string }) {
+export async function suppliersList(params: { q?: string } & Partial<DemandWindow>) {
   await ensureInsightsSchema();
+  const win = resolveWindow(params);
   const pool = getPool();
   const result = await pool.query(`
     SELECT s.uid, s.name, s.display_id, s.is_active, s.city, s.country,
@@ -1486,9 +1532,15 @@ export async function suppliersList(params: { q?: string }) {
            m.updated_at AS meta_updated_at,
            (SELECT COUNT(*)::int FROM myob_items i WHERE i.primary_supplier_uid = s.uid) AS primary_items,
            (SELECT COALESCE(SUM(b.total), 0)::float8 FROM myob_purchase_bills b
-             WHERE b.supplier_uid = s.uid AND b.date >= NOW() - INTERVAL '365 days') AS purchase_value_365,
+             WHERE b.supplier_uid = s.uid
+               AND b.date <= '${win.asAt}'::date
+               AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+           ) AS purchase_value_window,
            (SELECT COUNT(*)::int FROM myob_purchase_bills b
-             WHERE b.supplier_uid = s.uid AND b.date >= NOW() - INTERVAL '365 days') AS bills_365,
+             WHERE b.supplier_uid = s.uid
+               AND b.date <= '${win.asAt}'::date
+               AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+           ) AS bills_window,
            po.open_value AS open_po_value, po.open_count AS open_po_count,
            lead.promised_days, lead.lead_po_count
     FROM myob_suppliers s
@@ -1508,7 +1560,7 @@ export async function suppliersList(params: { q?: string }) {
         AND o.date IS NOT NULL AND o.promised_date IS NOT NULL
         AND o.promised_date > o.date
     ) lead ON TRUE
-    ORDER BY purchase_value_365 DESC NULLS LAST, s.name
+    ORDER BY purchase_value_window DESC NULLS LAST, s.name
   `);
 
   // Items supplied per supplier under the effective rule (MYOB primary when
@@ -1541,6 +1593,7 @@ export async function suppliersList(params: { q?: string }) {
   }
   return {
     total: rows.length,
+    window: win,
     regions: SUPPLIER_REGIONS,
     suppliers: rows,
   };
@@ -2010,39 +2063,46 @@ export async function bomImport(
 }
 
 /**
- * Blind-spot worklist: items that sold in the last year, look like assembled
- * products (name/number heuristic — labelled as such in the UI), and have no
- * known composition in the effective BOM.
+ * Blind-spot worklist: items that sold inside the wider look-back, look like
+ * assembled products (name/number heuristic — labelled as such in the UI), and
+ * have no known composition in the effective BOM. Sits on the Products page,
+ * so it answers to the same date and window controls as everything there.
  */
-export async function bomBlindspots() {
+export async function bomBlindspots(opts?: Partial<DemandWindow>) {
   await ensureInsightsSchema();
+  const win = resolveWindow(opts);
   const result = await getPool().query(`
     WITH sold AS (
       SELECT l.item_uid,
-             COALESCE(SUM(l.qty) FILTER (WHERE si.date >= NOW() - INTERVAL '90 days'), 0)::float8 AS sold_90,
-             COALESCE(SUM(l.qty), 0)::float8 AS sold_365
+             COALESCE(SUM(l.qty) FILTER (
+               WHERE si.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+             ), 0)::float8 AS sold_window,
+             COALESCE(SUM(l.qty), 0)::float8 AS sold_long
       FROM myob_sale_invoice_lines l
       JOIN myob_sale_invoices si ON si.uid = l.invoice_uid
-      WHERE si.date >= NOW() - INTERVAL '365 days' AND l.item_uid IS NOT NULL
+      WHERE si.date <= '${win.asAt}'::date
+        AND si.date >= '${win.asAt}'::date - make_interval(months => ${win.longMonths})
+        AND l.item_uid IS NOT NULL
       GROUP BY l.item_uid
     )
     SELECT i.uid, i.number, i.name,
            COALESCE(p.free_stock, 0)::float8 AS stock_free,
-           s.sold_90, s.sold_365,
+           s.sold_window, s.sold_long,
            COUNT(*) OVER ()::int AS total_count
     FROM myob_items i
-    JOIN item_position p ON p.item_uid = i.uid
-    JOIN sold s ON s.item_uid = i.uid AND s.sold_365 > 0
+    JOIN item_position_at('${win.asAt}'::date) p ON p.item_uid = i.uid
+    JOIN sold s ON s.item_uid = i.uid AND s.sold_long > 0
     WHERE i.is_active IS NOT FALSE
       AND COALESCE(i.is_sold, TRUE)
       AND NOT EXISTS (SELECT 1 FROM effective_bom b WHERE b.parent_uid = i.uid)
       AND (i.name ~* '(pack|kit|dressing|assembl)' OR i.number ~* '^(BP|DS)')
-    ORDER BY s.sold_90 DESC, s.sold_365 DESC
+    ORDER BY s.sold_window DESC, s.sold_long DESC
     LIMIT 100
   `);
   return {
+    window: win,
     heuristic:
-      "Active items sold in the last 365 days whose name contains pack/kit/dressing/assembly (or number starts BP/DS) and that have no known composition.",
+      `Active items sold in the ${win.longMonths} months to ${win.asAt} whose name contains pack/kit/dressing/assembly (or number starts BP/DS) and that have no known composition.`,
     total: result.rows.length ? Number(result.rows[0].total_count) : 0,
     items: result.rows.map(({ total_count, ...r }) => r),
   };

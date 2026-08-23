@@ -667,25 +667,49 @@ const DDL: string[] = [
   /*
    * Measured supplier lead time: purchase order raised to goods billed.
    *
-   * Promised dates are set on only 30 orders, but 1,153 of 1,265 converted
-   * orders can be matched to their bill by number and supplier, which gives what
-   * actually happened rather than what was promised. The median resists the
-   * zero-day rows that appear when an order and bill are entered together.
+   * Promised dates exist on only 30 orders, but 1,153 of 1,265 converted orders
+   * match their bill by number and supplier, which gives what actually happened
+   * rather than what was promised.
    *
-   * This is the number behind the brief's sourcing trade-off: the same product
-   * from a local warehouse in days, or cheaper from the factory in months.
+   * SAME-DAY PAIRS ARE EXCLUDED, and this is the whole accuracy of the figure.
+   * 31% of matched pairs are billed on the day the order was raised — 359 of
+   * 1,158. A container cannot cross from China in zero days, so those rows are
+   * not a wait at all: the paperwork was entered after the goods turned up.
+   *
+   * Leaving them in does not merely add noise, it dominates the answer, because
+   * for several suppliers they are most of the sample. HOBSON has 13 pairs, 7 of
+   * them same-day, so the plain median was 0 days. HANOVA read 40 days against a
+   * real 83, TONG MING 18 against 42. Planning a reorder against 40 days when
+   * the goods take 83 is how a stockout happens.
+   *
+   * The trade-off is deliberate: excluding same-day slightly overstates local
+   * suppliers Allied genuinely buy from over the counter (Specialised Washers
+   * moves from 2 days to 4). Overstating a two-day local wait is harmless;
+   * understating a three-month import is not.
+   *
+   * `orders_measured` counts only the pairs actually used, and
+   * `same_day_excluded` is reported so a thin or heavily-filtered measurement is
+   * visible rather than implied.
    */
-  `CREATE OR REPLACE VIEW supplier_lead_time AS
-   SELECT o.supplier_uid,
-          COUNT(*)::int AS orders_measured,
-          PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY (b.date::date - o.date::date))::int AS median_lead_days,
-          MAX(b.date::date - o.date::date)::int AS slowest_lead_days,
-          MAX(o.date)::date AS last_ordered
-   FROM myob_purchase_orders o
-   JOIN myob_purchase_bills b
-     ON b.number = o.number AND b.supplier_uid = o.supplier_uid
-   WHERE b.date >= o.date AND o.supplier_uid IS NOT NULL
-   GROUP BY o.supplier_uid`,
+  // Columns changed shape, and CREATE OR REPLACE cannot rename or reorder them.
+  `DROP VIEW IF EXISTS supplier_lead_time`,
+  `CREATE VIEW supplier_lead_time AS
+   WITH pairs AS (
+     SELECT o.supplier_uid, (b.date::date - o.date::date) AS days
+     FROM myob_purchase_orders o
+     JOIN myob_purchase_bills b
+       ON b.number = o.number AND b.supplier_uid = o.supplier_uid
+     WHERE b.date >= o.date AND o.supplier_uid IS NOT NULL
+   )
+   SELECT supplier_uid,
+          COUNT(*) FILTER (WHERE days > 0)::int AS orders_measured,
+          COUNT(*) FILTER (WHERE days = 0)::int AS same_day_excluded,
+          PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days)
+            FILTER (WHERE days > 0)::int AS median_lead_days,
+          MAX(days) FILTER (WHERE days > 0)::int AS slowest_lead_days
+   FROM pairs
+   GROUP BY supplier_uid
+   HAVING COUNT(*) FILTER (WHERE days > 0) > 0`,
 
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,

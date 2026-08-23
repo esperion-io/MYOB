@@ -7,6 +7,7 @@ import type { CartState } from "../insights/cart.js";
 import {
   cartExport,
   purchaseCart,
+  undoCartDecision,
   resetCart,
   selectCartSupplier,
   setCartLine,
@@ -201,7 +202,7 @@ insightsRouter.get("/items/:uid", async (req, res) => {
 insightsRouter.get("/relationships/:uid", async (req, res) => {
   if (!requireDb(res)) return;
   try {
-    res.json(await relationships(req.params.uid));
+    res.json(await relationships(req.params.uid, windowParams(req)));
   } catch (err) {
     send500(res, err);
   }
@@ -214,6 +215,7 @@ insightsRouter.get("/products", async (req, res) => {
       await productsList({
         q: typeof req.query.q === "string" ? req.query.q : undefined,
         page: Number(req.query.page) || 1,
+        ...windowParams(req),
       }),
     );
   } catch (err) {
@@ -263,6 +265,7 @@ insightsRouter.get("/suppliers", async (req, res) => {
     res.json(
       await suppliersList({
         q: typeof req.query.q === "string" ? req.query.q : undefined,
+        ...windowParams(req),
       }),
     );
   } catch (err) {
@@ -400,10 +403,10 @@ insightsRouter.post("/bom/import", async (req, res) => {
   }
 });
 
-insightsRouter.get("/bom/blindspots", async (_req, res) => {
+insightsRouter.get("/bom/blindspots", async (req, res) => {
   if (!requireDb(res)) return;
   try {
-    res.json(await bomBlindspots());
+    res.json(await bomBlindspots(windowParams(req)));
   } catch (err) {
     send500(res, err);
   }
@@ -801,6 +804,22 @@ insightsRouter.get("/cart.csv", async (req, res) => {
       .type("text/csv; charset=utf-8")
       .setHeader("Content-Disposition", `attachment; filename="${out.filename}"`)
       .send(out.csv);
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Reverse a supplier choice or split; the item returns to all its suppliers. */
+insightsRouter.post("/cart/undo", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const itemUid = req.body?.itemUid;
+    if (typeof itemUid !== "string" || !itemUid) {
+      res.status(400).json({ error: "itemUid is required." });
+      return;
+    }
+    await undoCartDecision(itemUid);
+    res.json({ ok: true });
   } catch (err) {
     send500(res, err);
   }

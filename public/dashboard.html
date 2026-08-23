@@ -66,9 +66,14 @@
             <p class="control-note">A period — consumption, weekly rate, cover, suggestions.</p>
           </div>
           <div class="control control-reset">
-            <button class="btn small" id="ctl-reset" type="button">Reset</button>
-            <p class="control-note tz-note">All dates are New&nbsp;Zealand time</p>
+            <button class="btn small" id="ctl-reset" type="button">Reset to default</button>
+            <p class="control-note tz-note">Today &middot; 6 months. All dates are New&nbsp;Zealand time</p>
           </div>
+          <!-- Says, on every page that obeys these controls, exactly what they
+               are set to. Filled by renderControlState(); "default" when both
+               sit at their resting values, otherwise the live setting plus a
+               one-click way back. -->
+          <p class="controls-state" id="ctl-state"></p>
         </div>
 
         <main class="main" id="main">

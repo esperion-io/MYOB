@@ -38,7 +38,7 @@ const TERMS = {
   weekly_demand: {
     label: "Weekly demand",
     short: "Average units used per week — direct sales plus components consumed by builds.",
-    long: "Trailing 90-day rate of direct sales plus components consumed by MYOB build transactions. If nothing moved in 90 days but did within the year, the 365-day rate is used and the item is tagged a slow mover.",
+    long: "Rate of direct sales plus components consumed by MYOB build transactions, measured over the window chosen at the top of the page and up to the date chosen beside it. If nothing moved inside that window but did in the wider look-back (twice the window), the slower rate is used and the item is tagged a slow mover.",
   },
   cover: {
     label: "Cover",
@@ -93,7 +93,7 @@ const FLAG_HELP = {
   stock_no_cost: "Stock is on hand but its average cost is zero, so any value or excess figure understates reality.",
   inactive_with_stock: "The item is marked inactive in MYOB but still holds stock.",
   no_supplier: "The item has demand but no supplier recorded, in MYOB or here, and none in purchase history.",
-  slow_mover: "Nothing moved in the last 90 days, so the slower 365-day rate is used for demand and cover.",
+  slow_mover: "Nothing moved inside the selected window, so the slower rate from the wider look-back is used for demand and cover.",
   understated_demand: "Packs holding this item sold without being rebuilt, so the demand and cover figures shown for it are lower than the real usage. Open the item to see which packs and how many units.",
   min_above_demand: "This item is both overstocked against demand and suggested for reorder, because the MYOB minimum level sits far above what demand justifies — worth reviewing the minimum itself.",
 };
@@ -299,10 +299,16 @@ const MOVEMENT_KIND = {
 };
 
 /** 12 trailing months of direct + component demand as stacked bar columns. */
-function demandBarsHtml(monthlyDemand, barHeight = 100) {
+/**
+ * Monthly demand bars, anchored to the selected as-at date rather than to
+ * today. Anchored to today, a historical view drew empty months for time that
+ * had not happened yet and cut off the months that actually held the data.
+ */
+function demandBarsHtml(monthlyDemand, barHeight = 100, monthCount = 12) {
   const months = [];
-  for (let m = 11; m >= 0; m--) {
-    const date = new Date();
+  const [ay, am] = windowState.asAt.split("-").map(Number);
+  for (let m = monthCount - 1; m >= 0; m--) {
+    const date = new Date(ay, am - 1, 1);
     date.setMonth(date.getMonth() - m, 1);
     const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
     const row = (monthlyDemand || []).find((r) => String(r.month).slice(0, 7) === key);
@@ -557,7 +563,19 @@ function itemLink(uid, label) {
  * Default window is 6 months: Allied had been using 12, which flattens their
  * spiky demand profile.
  */
-const VIEWS_USING_WINDOW = new Set(["overview", "inventory", "item", "purchasing", "products"]);
+/*
+ * Views whose figures answer to the two controls. The bar is shown on exactly
+ * these — if a page reads the controls its readers must be able to see and
+ * change them, and if it ignores them the bar must not imply otherwise.
+ */
+const VIEWS_USING_WINDOW = new Set([
+  "overview",
+  "inventory",
+  "item",
+  "purchasing",
+  "products",
+  "suppliers",
+]);
 
 /*
  * Dates here are calendar dates, not instants, so they must be formatted from
@@ -579,10 +597,27 @@ function lastMonthEnd() {
   return isoLocal(new Date(d.getFullYear(), d.getMonth(), 0));
 }
 
+/*
+ * Resting state of the two controls: stock as at today, demand over the last
+ * 6 months. Anything else is a deliberate choice by the reader, and every view
+ * that obeys the controls says so on screen while it is in force.
+ *
+ * Must match DEFAULT_WINDOW_MONTHS in src/insights/queries.ts — the server
+ * applies its own default to requests that omit the parameter, so a mismatch
+ * would leave the bar claiming one period while the figures used another.
+ */
+const WINDOW_DEFAULTS = { windowMonths: 6 };
+
 const windowState = {
   asAt: localStorage.getItem("afAsAt") || todayLocal(),
-  windowMonths: Number(localStorage.getItem("afWindowMonths")) || 6,
+  windowMonths:
+    Number(localStorage.getItem("afWindowMonths")) || WINDOW_DEFAULTS.windowMonths,
 };
+
+/** True when both controls sit at their defaults. */
+function windowIsDefault() {
+  return !isHistorical() && windowState.windowMonths === WINDOW_DEFAULTS.windowMonths;
+}
 
 /** Append the two controls to any endpoint that respects them. */
 function withWindow(url) {
@@ -613,27 +648,63 @@ function initWindowControls() {
   asAt.addEventListener("change", () => {
     windowState.asAt = asAt.value || today;
     localStorage.setItem("afAsAt", windowState.asAt);
+    renderControlState();
     route();
   });
   win.addEventListener("change", () => {
     windowState.windowMonths = Number(win.value);
     localStorage.setItem("afWindowMonths", String(windowState.windowMonths));
+    renderControlState();
     route();
   });
   document.getElementById("ctl-monthend").addEventListener("click", () => {
     asAt.value = lastMonthEnd();
     asAt.dispatchEvent(new Event("change"));
   });
-  document.getElementById("ctl-reset").addEventListener("click", () => {
-    asAt.value = today;
-    win.value = "6";
-    windowState.asAt = today;
-    windowState.windowMonths = 6;
-    localStorage.setItem("afAsAt", today);
-    localStorage.setItem("afWindowMonths", "6");
-    route();
-  });
+  document.getElementById("ctl-reset").addEventListener("click", resetWindow);
+  renderControlState();
   bar.hidden = false;
+}
+
+/** Put both controls back to today / 6 months and re-render. */
+function resetWindow() {
+  const today = todayLocal();
+  const months = String(WINDOW_DEFAULTS.windowMonths);
+  const asAt = document.getElementById("ctl-asat");
+  const win = document.getElementById("ctl-window");
+  if (asAt) asAt.value = today;
+  if (win) win.value = months;
+  windowState.asAt = today;
+  windowState.windowMonths = WINDOW_DEFAULTS.windowMonths;
+  localStorage.setItem("afAsAt", today);
+  localStorage.setItem("afWindowMonths", months);
+  renderControlState();
+  route();
+}
+
+/**
+ * The standing statement of what the controls are set to. Kept in the control
+ * bar itself rather than in each page, so it is in the same place whichever
+ * view is open, and always visible while a non-default setting is in force.
+ */
+function renderControlState() {
+  const el = document.getElementById("ctl-state");
+  if (!el) return;
+  if (windowIsDefault()) {
+    el.className = "controls-state";
+    el.innerHTML = `<span class="badge idle">Default</span> Every figure on this page is stock
+      <strong>as at today</strong> and sales over the <strong>last
+      ${WINDOW_DEFAULTS.windowMonths} months</strong>.`;
+    return;
+  }
+  el.className = "controls-state changed";
+  el.innerHTML = `<span class="badge brand">Custom view</span> Every figure on this page &mdash; stock,
+    demand, cover, buildability, suggestions &mdash; is
+    <strong>as at ${dateFmt(windowState.asAt)}</strong> over the
+    <strong>last ${windowLabel()}</strong>.
+    <button class="linkish" id="ctl-state-reset" type="button">Back to today &middot;
+    ${WINDOW_DEFAULTS.windowMonths} months</button>`;
+  el.querySelector("#ctl-state-reset")?.addEventListener("click", resetWindow);
 }
 
 /** Banner shown on every view whose numbers are not "as at today". */
@@ -663,8 +734,13 @@ function historicalNotice(d) {
        ${d.snapshotsFrom ? `began on ${dateFmt(d.snapshotsFrom)}` : "have not started yet"}; from then on
        committed is exact.`
     : "";
-  return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>,
-    ${d && d.hasSnapshot ? "from the snapshot stored that day" : "reconstructed from the anchored ledger"}.
+  // Provenance is only claimed where the caller knows it. A view that does not
+  // report the snapshot flag says nothing rather than guessing.
+  const source =
+    d && typeof d.hasSnapshot === "boolean"
+      ? `, ${d.hasSnapshot ? "from the snapshot stored that day" : "reconstructed from the anchored ledger"}`
+      : "";
+  return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>${source}.
     Sales and demand cover the ${windowLabel()} up to that date.
     Average cost is today's — MYOB exposes no cost history, so historical valuations are an approximation.${committed}</div>`;
 }
@@ -957,6 +1033,7 @@ async function loadInventoryTable() {
 
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
   container.innerHTML = `
+    ${historicalNotice(data)}
     <p class="view-summary">${esc(activeViewSummary(data.total))}</p>
     <div class="table-wrap"><table>
       <thead><tr>
@@ -1059,6 +1136,24 @@ function toggleExpandRow(tr) {
   loadExpandExtras(item.uid, tr.nextElementSibling.querySelector(".expand-extra"));
 }
 
+/**
+ * Scroll an element into view, smoothly where the browser honours it. Some
+ * embedded webviews ignore `behavior: "smooth"` entirely, and a jump control
+ * that silently does nothing is worse than an abrupt one — so if nothing has
+ * moved shortly after, fall back to an instant jump.
+ */
+function scrollIntoViewSafely(el, block = "start") {
+  if (!el) return;
+  const before = window.scrollY;
+  const offset = block === "center" ? window.innerHeight / 3 : 12;
+  const target = Math.max(el.getBoundingClientRect().top + before - offset, 0);
+  el.scrollIntoView({ behavior: "smooth", block });
+  setTimeout(() => {
+    const moved = Math.abs(window.scrollY - before) > 2;
+    if (!moved && Math.abs(target - before) > 2) window.scrollTo(0, target);
+  }, 300);
+}
+
 /* ---------- pack pull (inferred demand) ---------- */
 
 /**
@@ -1084,15 +1179,24 @@ function packPull(i) {
 
 /** The single plain-English sentence that explains the figure. */
 function packPullSentence(pp) {
-  const packs = `${pp.parentCount} pack${pp.parentCount === 1 ? "" : "s"}`;
+  const one = pp.parentCount === 1;
+  const packs = `${pp.parentCount} pack${one ? "" : "s"}`;
+  const them = one ? "it" : "them";
   if (pp.upliftPct == null)
-    return `${packs} containing this item sold without being rebuilt. Replacing them would need about
-      <strong>${qty(pp.units)} units</strong> of this item — and because nothing else moved, its demand and
-      cover currently read as if it were never used at all.`;
-  return `${packs} containing this item sold without being rebuilt. Replacing them would need about
+    return `${packs} containing this item sold without being rebuilt. Replacing ${them} would need about
+      <strong>${qty(pp.units)} units</strong> of this item &mdash; and because nothing else moved, its demand
+      and cover currently read as if it were never used at all.`;
+  // Past a few hundred percent the figure stops reading as a percentage and
+  // starts reading as a typo, so say it as a multiple instead.
+  const size =
+    pp.upliftPct >= 300
+      ? `<strong>${Math.round(pp.weekly / pp.measuredWeekly)}&times; the ${pp.measuredWeekly.toFixed(1)} a week
+         measured here</strong>`
+      : `roughly <strong>${pp.upliftPct}% on top</strong> of the ${pp.measuredWeekly.toFixed(1)} a week
+         measured here`;
+  return `${packs} containing this item sold without being rebuilt. Replacing ${them} would need about
     <strong>${qty(pp.units)} more units</strong> over the last ${pp.months} months
-    (~${pp.weekly.toFixed(1)} a week) &mdash; roughly <strong>${pp.upliftPct}% on top</strong> of the
-    ${pp.measuredWeekly.toFixed(1)} a week measured here.`;
+    (~${pp.weekly.toFixed(1)} a week) &mdash; ${size}.`;
 }
 
 /** Measured vs potential weekly demand, to size the gap at a glance. */
@@ -1179,9 +1283,9 @@ function packPullPanel(i, parents) {
             .map(
               (p) => `<tr>
                 <td>${itemLink(p.uid, p.number ?? "—")}<br /><span class="muted">${esc((p.name ?? "").slice(0, 40))}</span></td>
-                <td class="num">${qty(p.sold_90)}</td>
-                <td class="num">${qty(p.built_90)}</td>
-                <td class="num">${qty(p.bought_90)}</td>
+                <td class="num">${qty(p.sold_window)}</td>
+                <td class="num">${qty(p.built_window)}</td>
+                <td class="num">${qty(p.bought_window)}</td>
                 <td class="num">${qty(p.unexplained_units)}</td>
                 <td class="num">${qty(p.qty_per)}</td>
                 <td class="num"><strong>+${qty(p.potential_qty)}</strong></td>
@@ -1303,8 +1407,8 @@ async function loadExpandExtras(uid, el) {
     el.innerHTML = `
       <div class="expand-extra-grid">
         <div>
-          <h3>Demand — last 12 months</h3>
-          <div class="bars small">${demandBarsHtml(detail.monthlyDemand, 48)}</div>
+          <h3>Demand — ${detail.chartMonths ?? 12} months to ${dateFmt(windowState.asAt)}</h3>
+          <div class="bars small">${demandBarsHtml(detail.monthlyDemand, 48, detail.chartMonths ?? 12)}</div>
         </div>
         <div>
           <h3>Latest movements (MYOB evidence)</h3>
@@ -1436,6 +1540,7 @@ async function renderItem(uid) {
   const s = i.suggestion;
 
   main.innerHTML = `
+    ${historicalNotice(d)}
     <div class="item-head">
       <p class="crumbs"><a href="#/inventory">&larr; Inventory</a></p>
       <h1 class="item-title">${esc(i.number ?? "—")} · ${esc(i.name ?? "")}</h1>
@@ -1476,9 +1581,9 @@ async function renderItem(uid) {
     <div class="two-col" style="margin-top:1.1rem">
       <div>
         <section class="panel">
-          <h2>Demand — last 12 months</h2>
+          <h2>Demand — ${d.chartMonths ?? 12} months to ${dateFmt(windowState.asAt)}</h2>
           <p class="hint">Dark = direct sales (invoice lines). Orange = consumed by builds of finished products. These are separate MYOB movements — never double counted.</p>
-          <div class="bars">${demandBarsHtml(d.monthlyDemand)}</div>
+          <div class="bars">${demandBarsHtml(d.monthlyDemand, 100, d.chartMonths ?? 12)}</div>
           <p class="hint" style="margin-top:0.6rem">
             Last ${i.demand.windowMonths} months: ${qty(i.demand.directWindow)} direct + ${qty(i.demand.componentWindow)} via builds ·
             Last ${i.demand.longMonths} months: ${qty(i.demand.directLong)} direct + ${qty(i.demand.componentLong)} via builds ·
@@ -1699,7 +1804,7 @@ async function renderItem(uid) {
   // Hash links would be swallowed by the router, so in-page jumps scroll by hand.
   main.querySelectorAll("[data-scroll-to]").forEach((el) =>
     el.addEventListener("click", () =>
-      document.getElementById(el.dataset.scrollTo)?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      scrollIntoViewSafely(document.getElementById(el.dataset.scrollTo)),
     ),
   );
 
@@ -1890,6 +1995,7 @@ async function wireSupplierPicker(panel, onPick) {
 
 async function renderProducts() {
   main.innerHTML = `
+    ${historicalNotice()}
     <div class="page-head">
       <div>
         <h1>Products &amp; BOM</h1>
@@ -1956,7 +2062,7 @@ function startBomEntry(number) {
   document.getElementById("bom-commit").disabled = true;
   document.getElementById("bom-msg").textContent =
     `Replace COMPONENT-NUMBER with what ${number} is made of, one line per component, then check the rows.`;
-  box.scrollIntoView({ behavior: "smooth", block: "center" });
+  scrollIntoViewSafely(box, "center");
   box.focus();
   // Select the placeholder so typing the real component number replaces it.
   const at = box.value.lastIndexOf("COMPONENT-NUMBER");
@@ -2037,20 +2143,22 @@ async function loadBlindspots() {
   const table = document.getElementById("blind-table");
   if (!hint || !table) return;
   try {
-    const data = await fetchJson("/api/insights/bom/blindspots");
+    const data = await fetchJson(withWindow("/api/insights/bom/blindspots"));
+    const w = data.window;
     hint.innerHTML = `${qty(data.total)} product(s) look assembled but have no known composition, so their
-      components show no pack-driven pull and no buildability. Ranked by 90-day sales — adding the top rows
-      above closes the most valuable gaps first. <span class="muted">Heuristic: ${esc(data.heuristic)}</span>`;
+      components show no pack-driven pull and no buildability. Ranked by sales over the selected
+      ${w.windowMonths}-month window — adding the top rows above closes the most valuable gaps first.
+      <span class="muted">Heuristic: ${esc(data.heuristic)}</span>`;
     table.innerHTML = data.items.length
       ? `<div class="table-wrap"><table>
-          <thead><tr><th>Product</th><th class="num">Sold 90d</th><th class="num">Sold 365d</th><th class="num">Free stock</th></tr></thead>
+          <thead><tr><th>Product</th><th class="num">Sold ${w.windowMonths}m</th><th class="num">Sold ${w.longMonths}m</th><th class="num">Free stock</th></tr></thead>
           <tbody>${data.items
             .slice(0, 25)
             .map(
               (b) => `<tr class="rowlink" data-uid="${esc(b.uid)}">
                 <td><strong>${esc(b.number ?? "—")}</strong><br /><span class="muted">${esc((b.name ?? "").slice(0, 60))}</span></td>
-                <td class="num">${qty(b.sold_90)}</td>
-                <td class="num">${qty(b.sold_365)}</td>
+                <td class="num">${qty(b.sold_window)}</td>
+                <td class="num">${qty(b.sold_long)}</td>
                 <td class="num">${qty(b.stock_free)}</td>
               </tr>`,
             )
@@ -2112,14 +2220,14 @@ async function loadProductsTable() {
   if (!container) return;
   container.innerHTML = '<p class="loading">Loading products…</p>';
   const params = new URLSearchParams({ q: prodState.q, page: String(prodState.page) });
-  const data = await fetchJson(`/api/insights/products?${params}`);
+  const data = await fetchJson(withWindow(`/api/insights/products?${params}`));
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
 
   container.innerHTML = `
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Product</th><th class="num">Components</th><th class="num">Free stock</th>
-        <th class="num">Sold 90d</th><th class="num">Buildable now</th><th>Confidence</th>
+        <th class="num">Sold ${data.window.windowMonths}m</th><th class="num">Buildable</th><th>Confidence</th>
       </tr></thead>
       <tbody>
         ${
@@ -2130,7 +2238,7 @@ async function loadProductsTable() {
                     <td><strong>${esc(p.number ?? "—")}</strong><br /><span class="muted">${esc((p.name ?? "").slice(0, 60))}</span></td>
                     <td class="num">${qty(p.component_count)}</td>
                     <td class="num">${qty(p.stock_free)}</td>
-                    <td class="num">${qty(p.sold_90)}</td>
+                    <td class="num">${qty(p.sold_window)}</td>
                     <td class="num">${p.buildable == null ? "—" : qty(p.buildable)}</td>
                     <td>${
                       p.has_user_rows
@@ -2170,6 +2278,7 @@ async function loadProductsTable() {
 
 async function renderSuppliers() {
   main.innerHTML = `
+    ${historicalNotice()}
     <div class="page-head">
       <div>
         <h1>Suppliers</h1>
@@ -2216,7 +2325,7 @@ async function loadSuppliersTable() {
   if (!container) return;
   container.innerHTML = '<p class="loading">Loading suppliers…</p>';
   const params = new URLSearchParams({ q: supState.q });
-  const data = await fetchJson(`/api/insights/suppliers?${params}`);
+  const data = await fetchJson(withWindow(`/api/insights/suppliers?${params}`));
 
   const regionOptions = (s) =>
     [
@@ -2234,7 +2343,7 @@ async function loadSuppliersTable() {
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Supplier</th><th>Region (Allied label)</th><th class="num">Items</th>
-        <th class="num">Bought 365d</th><th class="num">Open PO value</th>
+        <th class="num">Bought ${data.window.windowMonths}m</th><th class="num">Open PO value</th>
         <th>Lead time</th><th>Notes</th><th></th>
       </tr></thead>
       <tbody>
@@ -2253,7 +2362,7 @@ async function loadSuppliersTable() {
                       <select class="sup-region">${regionOptions(s)}</select>
                     </td>
                     <td class="num" title="Items supplied: MYOB primary supplier or inferred from purchase history${s.primary_items ? ` (${s.primary_items} set as MYOB primary)` : ""}">${qty(s.supplied_items)}</td>
-                    <td class="num">${money(s.purchase_value_365)}<br /><span class="muted">${qty(s.bills_365)} bill(s)</span></td>
+                    <td class="num">${money(s.purchase_value_window)}<br /><span class="muted">${qty(s.bills_window)} bill(s)</span></td>
                     <td class="num">${money(s.open_po_value)}<br /><span class="muted">${qty(s.open_po_count)} open</span></td>
                     <td>
                       <input class="sup-lead" type="number" min="1" max="365" step="1"
@@ -2493,7 +2602,7 @@ async function renderData() {
         <dd>Negative lines on MYOB Inventory Build transactions — stock used to assemble finished products.
         Separate movements from sales, so combining them does not double count.</dd>
         <dt>Weekly demand / cover</dt>
-        <dd>Trailing 90-day rate; items with no 90-day activity fall back to the 365-day rate and are flagged "slow mover".
+        <dd>Measured over the window selected at the top of the page, ending on the selected date; items with no activity inside it fall back to the wider look-back (twice the window) and are flagged "slow mover".
         Cover = free stock ÷ weekly demand.</dd>
         <dt>Product recipes</dt>
         <dd>MYOB's own Bill of Materials is read directly from the item master and covers auto-build products,
@@ -3114,6 +3223,7 @@ function drawCart() {
   const undecided = d.unresolvedDuplicates;
 
   main.innerHTML = `
+    ${historicalNotice(d)}
     <div class="page-head">
       <div>
         <h1>Purchasing</h1>
@@ -3140,6 +3250,7 @@ function drawCart() {
     }
 
     <div id="cart-decision-list"></div>
+    ${cartDecisionsMade(d)}
 
     <div class="cart-suppliers">
       ${d.suppliers.map(cartSupplierCard).join("")}
@@ -3152,6 +3263,17 @@ function drawCart() {
   });
   const decide = document.getElementById("cart-decide");
   if (decide) decide.addEventListener("click", showCartDecisions);
+  main.querySelectorAll(".cart-undo").forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      await fetchJson("/api/insights/cart/undo", {
+        method: "POST",
+        body: JSON.stringify({ itemUid: b.dataset.item }),
+      });
+      cartData = await fetchJson(withWindow("/api/insights/cart"));
+      drawCart();
+    }),
+  );
   wireCartCards();
 }
 
@@ -3160,8 +3282,8 @@ function cartSupplierCard(g) {
   const open = cartOpen.has(g.supplierUid);
   const lead =
     g.leadTimeDays == null
-      ? '<span class="muted" title="No order has been matched to a bill for this supplier yet">lead time unknown</span>'
-      : `<span title="Median from purchase order raised to goods billed">~${g.leadTimeDays} day lead</span>`;
+      ? '<span class="muted" title="No purchase order has been matched to a bill for this supplier yet">lead time unknown</span>'
+      : `<span title="Typical wait from purchase order to goods billed, measured from their own orders">~${g.leadTimeDays} day lead</span>`;
   const flagged = g.lines.filter((l) => l.supplierCount > 1 && l.state !== "selected" && l.state !== "split").length;
 
   return `
@@ -3308,7 +3430,14 @@ function wireCartCards() {
 
     const compare = tr.querySelector(".cart-compare");
     if (compare)
-      compare.addEventListener("click", () => openSupplierCompare(itemUid, compare.dataset.number));
+      compare.addEventListener("click", () => {
+        // Entering from a bucket queues the rest too, so a decision made here
+        // can roll straight into the next one.
+        if (!decisionQueue.includes(itemUid)) {
+          decisionQueue = [itemUid, ...buildDecisionQueue().filter((u) => u !== itemUid)];
+        }
+        openSupplierCompare(itemUid, compare.dataset.number);
+      });
   });
 }
 
@@ -3330,6 +3459,8 @@ async function saveCartLine(body) {
  * direct from the factory, and that trade-off can only be judged with lead time,
  * cost, current stock and incoming supply on screen together.
  */
+let decisionQueue = [];
+
 function openSupplierCompare(itemUid, number) {
   const rows = [];
   for (const g of cartData.suppliers)
@@ -3337,12 +3468,19 @@ function openSupplierCompare(itemUid, number) {
   if (!rows.length) return;
 
   const first = rows[0].l;
-  const cheapest = Math.min(...rows.map((r) => r.l.lastCost ?? r.l.averageCost ?? Infinity));
-  // Only badge "fastest" when there is something to be faster than. With one
-  // measured supplier and one unknown, the label would claim a comparison that
-  // was never made.
-  const measured = rows.map((r) => r.l.leadTimeDays).filter((d) => d != null);
-  const fastest = measured.length > 1 ? Math.min(...measured) : null;
+  /*
+   * Badge a winner only when there is exactly one. Three suppliers all marked
+   * "fastest" at one day tells the reader nothing and makes the badge look
+   * decorative; where several tie, the numbers speak for themselves.
+   */
+  const uniqueBest = (values) => {
+    const clean = values.filter((v) => v != null && Number.isFinite(v));
+    if (clean.length < 2) return null;
+    const best = Math.min(...clean);
+    return clean.filter((v) => v === best).length === 1 ? best : null;
+  };
+  const cheapest = uniqueBest(rows.map((r) => r.l.lastCost ?? r.l.averageCost ?? null));
+  const fastest = uniqueBest(rows.map((r) => r.l.leadTimeDays));
 
   const body = `
     <div class="compare-head">
@@ -3366,7 +3504,7 @@ function openSupplierCompare(itemUid, number) {
           ${rows
             .map(({ g, l }) => {
               const cost = l.lastCost ?? l.averageCost ?? 0;
-              const isCheapest = cost === cheapest && rows.length > 1;
+              const isCheapest = cheapest != null && cost === cheapest;
               const isFastest = fastest != null && l.leadTimeDays === fastest;
               return `<tr>
                 <td><strong>${esc(g.supplierName)}</strong>
@@ -3381,8 +3519,10 @@ function openSupplierCompare(itemUid, number) {
                 <td class="num">${
                   l.leadTimeDays == null
                     ? '<span class="muted">unknown</span>'
-                    : `${l.leadTimeDays} days ${isFastest ? '<span class="badge ok">fastest</span>' : ""}
-                       <br /><span class="muted">from ${l.leadTimeOrders} order(s)</span>`
+                    : `${l.leadTimeDays} ${l.leadTimeDays === 1 ? "day" : "days"} ${isFastest ? '<span class="badge ok">fastest</span>' : ""}
+                       <br /><span class="muted" title="Same-day order/bill pairs are ignored — they record paperwork, not a wait">from ${l.leadTimeOrders} order${l.leadTimeOrders === 1 ? "" : "s"}${
+                         l.leadTimeSameDayExcluded ? `, ${l.leadTimeSameDayExcluded} same-day ignored` : ""
+                       }</span>`
                 }</td>
                 <td class="num"><input class="cmp-qty" type="number" step="any" min="0" value="${l.qty}"
                      data-supplier="${esc(g.supplierUid)}" aria-label="Quantity from ${esc(g.supplierName)}" /></td>
@@ -3403,7 +3543,28 @@ function openSupplierCompare(itemUid, number) {
       <button class="btn" id="cmp-split" type="button">Record as a deliberate split</button>
     </div>`;
 
-  openDrawer(`Suppliers for ${number || ""}`, body);
+  // Position in the queue, so working through many decisions is one pass
+  // rather than open-decide-close repeated dozens of times.
+  const pos = decisionQueue.indexOf(itemUid);
+  const nav =
+    pos >= 0 && decisionQueue.length > 1
+      ? `<div class="compare-nav">
+           <span class="muted">Decision ${pos + 1} of ${decisionQueue.length}</span>
+           <span>
+             <button class="btn small" id="cmp-skip" type="button"
+               ${pos === decisionQueue.length - 1 ? "disabled" : ""}>Skip for now</button>
+           </span>
+         </div>`
+      : "";
+
+  openDrawer(`Suppliers for ${number || ""}`, nav + body);
+
+  const skip = document.getElementById("cmp-skip");
+  if (skip)
+    skip.addEventListener("click", () => {
+      const next = decisionQueue[pos + 1];
+      if (next) openSupplierCompare(next, null);
+    });
 
   document.querySelectorAll(".cmp-choose").forEach((b) =>
     b.addEventListener("click", async () => {
@@ -3412,9 +3573,7 @@ function openSupplierCompare(itemUid, number) {
         method: "POST",
         body: JSON.stringify({ itemUid, supplierUid: b.dataset.supplier }),
       });
-      closeDrawer();
-      cartData = await fetchJson(withWindow("/api/insights/cart"));
-      drawCart();
+      await afterCartDecision(itemUid);
     }),
   );
 
@@ -3430,9 +3589,7 @@ function openSupplierCompare(itemUid, number) {
       method: "POST",
       body: JSON.stringify({ itemUid, parts }),
     });
-    closeDrawer();
-    cartData = await fetchJson(withWindow("/api/insights/cart"));
-    drawCart();
+    await afterCartDecision(itemUid);
   });
 }
 
@@ -3448,6 +3605,7 @@ function showCartDecisions() {
       byItem.set(l.itemUid, e);
     }
   const list = [...byItem.entries()].sort((a, b) => b[1].value - a[1].value);
+  decisionQueue = list.map(([uid]) => uid);
   const el = document.getElementById("cart-decision-list");
 
   el.innerHTML = `
@@ -3504,3 +3662,83 @@ document.getElementById("side-drawer-close")?.addEventListener("click", closeDra
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDrawer();
 });
+
+/**
+ * What has already been decided, and how to take it back.
+ *
+ * People hesitate over a decision they cannot review or reverse, and choosing a
+ * supplier removes the item from other buckets — so without this, the only
+ * evidence of the choice is an item that has quietly disappeared from
+ * everywhere else.
+ */
+function cartDecisionsMade(d) {
+  if (!d.decisions.length) return "";
+  return `
+    <section class="panel cart-decided">
+      <h2>Decided — ${qty(d.decisions.length)} item${d.decisions.length === 1 ? "" : "s"}</h2>
+      <p class="hint">These are settled and will export cleanly. Undo puts an item back
+      under every supplier it is available from.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th>Decision</th><th class="num">Qty</th><th></th></tr></thead>
+        <tbody>
+          ${d.decisions
+            .map(
+              (x) => `<tr>
+                <td><strong>${esc(x.number ?? "—")}</strong><br />
+                  <span class="muted">${esc(x.name ?? "")}</span></td>
+                <td>${
+                  x.kind === "split"
+                    ? `<span class="badge ok">Split</span> ${x.suppliers
+                        .map((s) => `${esc(s.supplierName)} <span class="muted">(${qty(s.qty)})</span>`)
+                        .join(" + ")}`
+                    : `<span class="badge ok">Chosen</span> ${esc(x.suppliers[0]?.supplierName ?? "")}`
+                }</td>
+                <td class="num">${qty(x.suppliers.reduce((a, s) => a + s.qty, 0))}</td>
+                <td><button class="btn small cart-undo" data-item="${esc(x.itemUid)}" type="button">Undo</button></td>
+              </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table></div>
+    </section>`;
+}
+
+/**
+ * Refresh, then move straight to the next undecided item.
+ *
+ * Working through 200 sourcing decisions should be one pass, not two hundred
+ * rounds of open, decide, close, scroll, find the next one. The drawer only
+ * closes when the queue runs out.
+ */
+async function afterCartDecision(itemUid) {
+  cartData = await fetchJson(withWindow("/api/insights/cart"));
+  const at = decisionQueue.indexOf(itemUid);
+  decisionQueue = decisionQueue.filter((u) => u !== itemUid);
+  drawCart();
+  if (document.getElementById("cart-decision-list")?.innerHTML) showCartDecisions();
+
+  const next = decisionQueue[at] ?? decisionQueue[0];
+  if (next) {
+    openSupplierCompare(next, null);
+  } else {
+    closeDrawer();
+    if (decisionQueue.length === 0 && cartData.unresolvedDuplicates === 0) {
+      const el = document.getElementById("cart-decision-list");
+      if (el)
+        el.innerHTML =
+          '<div class="notice ok">Every sourcing decision is made. The order sheets will export without duplicate warnings.</div>';
+    }
+  }
+}
+
+/** Undecided items, highest value at stake first. */
+function buildDecisionQueue() {
+  const byItem = new Map();
+  for (const g of cartData.suppliers)
+    for (const l of g.lines) {
+      if (l.supplierCount < 2 || l.state === "selected" || l.state === "split") continue;
+      const v = (byItem.get(l.itemUid) ?? 0) + l.qty * (l.lastCost ?? l.averageCost ?? 0);
+      byItem.set(l.itemUid, v);
+    }
+  return [...byItem.entries()].sort((a, b) => b[1] - a[1]).map(([uid]) => uid);
+}

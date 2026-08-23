@@ -943,3 +943,30 @@ button.fact.fact-link:hover { border-color: var(--brand); }
 }
 
 .pp-table tfoot td.num { color: var(--brand-deep); }
+
+/* ---------- standing statement of the date / window controls ---------- */
+
+.controls-state {
+  flex-basis: 100%;
+  margin: 0.15rem 0 0;
+  font-size: 0.68rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* Amber while a non-default view is in force, so a historical or narrowed
+   view can never be mistaken for the live picture. */
+.controls-state.changed {
+  color: var(--ink);
+  border-top: 1px solid var(--brand);
+  padding-top: 0.35rem;
+}
+
+.controls-state .badge { margin-right: 0.3rem; }
+.controls-state .linkish { margin-left: 0.3rem; }
+.compare-nav {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 0.6rem; margin-bottom: 0.8rem; padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--line); font-size: 0.82rem;
+}
+.cart-decided table { font-size: 0.85rem; }
