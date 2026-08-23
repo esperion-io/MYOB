@@ -1829,6 +1829,26 @@ async function renderProducts() {
   await Promise.all([loadProductsTable(), loadBlindspots()]);
 }
 
+/**
+ * Jump from an empty search straight into recording the missing recipe, with
+ * the parent number already filled in so the only thing left to type is what
+ * the item is made of.
+ */
+function startBomEntry(number) {
+  const box = document.getElementById("bom-paste");
+  if (!box) return;
+  const starter = `${number}, COMPONENT-NUMBER, 1`;
+  box.value = box.value.trim() ? `${box.value.replace(/\s+$/, "")}\n${starter}` : starter;
+  document.getElementById("bom-commit").disabled = true;
+  document.getElementById("bom-msg").textContent =
+    `Replace COMPONENT-NUMBER with what ${number} is made of, one line per component, then check the rows.`;
+  box.scrollIntoView({ behavior: "smooth", block: "center" });
+  box.focus();
+  // Select the placeholder so typing the real component number replaces it.
+  const at = box.value.lastIndexOf("COMPONENT-NUMBER");
+  if (at >= 0) box.setSelectionRange(at, at + "COMPONENT-NUMBER".length);
+}
+
 /** parent, component, qty — one per line, comma or tab separated. */
 function parseBomPaste(text) {
   return text
@@ -1931,6 +1951,48 @@ async function loadBlindspots() {
   }
 }
 
+/**
+ * What an empty products table means. This page lists only items with a known
+ * composition (~500 of 3,100), so a search for a real item number comes back
+ * empty and reads like a typo. Name the item, say why it is absent, and offer
+ * the one action that fixes it.
+ */
+function productsEmptyState(data) {
+  const q = prodState.q.trim();
+  if (!q)
+    return '<span class="muted">No assembled products observed yet. Relationships appear after builds sync, or add them manually below.</span>';
+
+  const matches = data.noRecipeMatches ?? [];
+  if (!matches.length)
+    return `<span class="muted">No product matches &ldquo;${esc(q)}&rdquo;, and no inventory item matches it either &mdash; check the number.</span>`;
+
+  return `
+    <div class="empty-state">
+      <p><strong>No recipe on file.</strong> This page lists only items with a known composition, so
+      ${matches.length === 1 ? "this item does not appear" : "these items do not appear"} here even though
+      ${matches.length === 1 ? "it exists" : "they exist"} in inventory.</p>
+      <ul class="empty-matches">
+        ${matches
+          .map(
+            (m) => `<li>
+              <a href="#/item/${esc(m.uid)}"><strong>${esc(m.number ?? "—")}</strong></a>
+              <span class="muted">${esc((m.name ?? "").slice(0, 60))}</span>
+              ${m.is_active === false ? '<span class="badge idle">Inactive</span>' : ""}
+              ${
+                m.used_in_count > 0
+                  ? `<span class="badge brand">Used as a component in ${qty(m.used_in_count)} product(s)</span>`
+                  : '<span class="badge idle">Not used as a component either</span>'
+              }
+              <button class="btn small" data-add-bom="${esc(m.number ?? "")}">Add a recipe</button>
+            </li>`,
+          )
+          .join("")}
+      </ul>
+      <p class="muted">A recipe is only needed if the item is <em>assembled</em>. A bought-in part with no
+      components is correctly absent &mdash; its stock and demand still show on the Inventory page.</p>
+    </div>`;
+}
+
 async function loadProductsTable() {
   const container = document.getElementById("prod-table");
   if (!container) return;
@@ -1964,7 +2026,7 @@ async function loadProductsTable() {
                   </tr>`,
                 )
                 .join("")
-            : '<tr><td colspan="6" class="muted">No assembled products observed yet. Relationships appear after builds sync, or add them manually below.</td></tr>'
+            : `<tr><td colspan="6">${productsEmptyState(data)}</td></tr>`
         }
       </tbody>
     </table></div>
@@ -1976,6 +2038,9 @@ async function loadProductsTable() {
 
   container.querySelectorAll("tr.rowlink").forEach((tr) =>
     tr.addEventListener("click", () => (location.hash = `#/item/${tr.dataset.uid}`)),
+  );
+  container.querySelectorAll("[data-add-bom]").forEach((btn) =>
+    btn.addEventListener("click", () => startBomEntry(btn.dataset.addBom)),
   );
   container.querySelector("#prod-prev")?.addEventListener("click", () => {
     prodState.page -= 1;

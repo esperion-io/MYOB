@@ -632,6 +632,61 @@ const DDL: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_item_tags_key ON platform_item_tags (tag_key)`,
 
+  /*
+   * ---- P5 + P6: the purchasing cart ---------------------------------------
+   *
+   * The old purchasing view was a stateless recomputation: it bucketed each item
+   * under exactly one supplier and kept nothing, so there was nowhere to put an
+   * edited quantity, a removal, a supplier choice or a deliberate split. All of
+   * P5's and P6's requirements need state, which is what this table is.
+   *
+   * A row is one (item, supplier) decision. An item below its minimum appears
+   * under every supplier tagged against it — that is the P6 fix — and these rows
+   * record what Allied decided to do about each appearance.
+   *
+   * `state`:
+   *   suggested — the platform's recommendation, untouched
+   *   edited    — Allied changed the quantity; they always want the final call
+   *   removed   — struck from this supplier's order
+   *   selected  — chosen as THE supplier, which removes the item elsewhere
+   *   split     — deliberately ordered from more than one supplier at once
+   */
+  `CREATE TABLE IF NOT EXISTS platform_purchase_cart (
+    item_uid TEXT NOT NULL,
+    supplier_uid TEXT NOT NULL,
+    qty DOUBLE PRECISION,
+    state TEXT NOT NULL DEFAULT 'suggested',
+    note TEXT,
+    updated_by TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (item_uid, supplier_uid)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_cart_supplier ON platform_purchase_cart (supplier_uid)`,
+  `CREATE INDEX IF NOT EXISTS idx_cart_state ON platform_purchase_cart (state)`,
+
+  /*
+   * Measured supplier lead time: purchase order raised to goods billed.
+   *
+   * Promised dates are set on only 30 orders, but 1,153 of 1,265 converted
+   * orders can be matched to their bill by number and supplier, which gives what
+   * actually happened rather than what was promised. The median resists the
+   * zero-day rows that appear when an order and bill are entered together.
+   *
+   * This is the number behind the brief's sourcing trade-off: the same product
+   * from a local warehouse in days, or cheaper from the factory in months.
+   */
+  `CREATE OR REPLACE VIEW supplier_lead_time AS
+   SELECT o.supplier_uid,
+          COUNT(*)::int AS orders_measured,
+          PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY (b.date::date - o.date::date))::int AS median_lead_days,
+          MAX(b.date::date - o.date::date)::int AS slowest_lead_days,
+          MAX(o.date)::date AS last_ordered
+   FROM myob_purchase_orders o
+   JOIN myob_purchase_bills b
+     ON b.number = o.number AND b.supplier_uid = o.supplier_uid
+   WHERE b.date >= o.date AND o.supplier_uid IS NOT NULL
+   GROUP BY o.supplier_uid`,
+
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_bill_lines_item ON myob_purchase_bill_lines (item_uid)`,

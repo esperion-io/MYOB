@@ -768,3 +768,23 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
 }
 .tag-x:hover { color: var(--ink); }
 .row-tags .tag-chip { font-size: 0.75rem; padding: 0.05rem 0.4rem; }
+
+/* ---------- empty search result on Products & BOM ---------- */
+
+.empty-state { padding: 0.5rem 0.1rem; max-width: 46rem; }
+.empty-state p { margin: 0 0 0.55rem; font-size: 0.76rem; }
+.empty-state p:last-child { margin-bottom: 0; font-size: 0.7rem; }
+
+.empty-matches { list-style: none; margin: 0 0 0.7rem; padding: 0; }
+
+.empty-matches li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.empty-matches li:last-child { border-bottom: 0; }
+.empty-matches .muted { flex: 1 1 12rem; }

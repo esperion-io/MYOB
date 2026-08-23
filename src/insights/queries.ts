@@ -1282,7 +1282,35 @@ export async function productsList(params: { q?: string; page?: number }) {
     page,
     pageSize,
     parents: rows.slice((page - 1) * pageSize, page * pageSize),
+    // Only ~500 of 3,100 items have a recipe, so a search that matches a real
+    // item still comes back empty here. Say which it is rather than leaving
+    // staff to guess whether they mistyped the number.
+    noRecipeMatches:
+      q && rows.length === 0 ? await itemsWithoutRecipe(likeEscape(q)) : [],
   };
+}
+
+/**
+ * Items matching a products search that have no composition on file, so the
+ * empty result can name them. Whether the item is used as a component
+ * elsewhere is the useful distinction: a nut that is only ever a component is
+ * a different situation from a pack nobody has recorded a recipe for.
+ */
+const likeEscape = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+async function itemsWithoutRecipe(q: string) {
+  const result = await getPool().query(
+    `SELECT i.uid, i.number, i.name, i.is_active,
+            (SELECT COUNT(*)::int FROM effective_bom b WHERE b.component_uid = i.uid) AS used_in_count
+     FROM myob_items i
+     WHERE (COALESCE(i.number, '') || ' ' || COALESCE(i.name, ''))
+             ILIKE '%' || $1 || '%' ESCAPE '\\'
+       AND NOT EXISTS (SELECT 1 FROM effective_bom b WHERE b.parent_uid = i.uid)
+     ORDER BY i.is_active DESC NULLS LAST, i.number
+     LIMIT 6`,
+    [q],
+  );
+  return result.rows;
 }
 
 export async function purchasing(opts?: Partial<DemandWindow>) {

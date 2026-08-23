@@ -3,6 +3,15 @@ import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
 import { config } from "../config.js";
 import { hasDatabaseUrl } from "../db.js";
+import type { CartState } from "../insights/cart.js";
+import {
+  cartExport,
+  purchaseCart,
+  resetCart,
+  selectCartSupplier,
+  setCartLine,
+  splitCartItem,
+} from "../insights/cart.js";
 import {
   addUserBom,
   bomBlindspots,
@@ -95,6 +104,8 @@ function windowParams(req: Request): {
     longMonths: req.query.longMonths ? Number(req.query.longMonths) : undefined,
   };
 }
+
+const CART_STATES = ["suggested", "edited", "removed", "selected", "split"];
 
 function requireDb(res: Response): boolean {
   if (!hasDatabaseUrl()) {
@@ -699,6 +710,97 @@ insightsRouter.post("/supplier-regions/apply", async (_req, res) => {
   if (!requireDb(res)) return;
   try {
     res.json(await applySupplierRegions());
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+// ---- P5 + P6: the purchasing cart ----------------------------------------
+
+/** Items needing an order, under every supplier tagged against them. */
+insightsRouter.get("/cart", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await purchaseCart(windowParams(req)));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Edit a quantity, add a note, or strike a line from one supplier. */
+insightsRouter.post("/cart/line", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { itemUid, supplierUid, qty, state, note } = req.body ?? {};
+    if (typeof itemUid !== "string" || typeof supplierUid !== "string") {
+      res.status(400).json({ error: "itemUid and supplierUid are required." });
+      return;
+    }
+    await setCartLine({
+      itemUid,
+      supplierUid,
+      qty: typeof qty === "number" ? qty : null,
+      // Only the states the cart understands; anything else is rejected rather
+      // than written through and discovered later as a row nothing renders.
+      state: CART_STATES.includes(state) ? (state as CartState) : undefined,
+      note: typeof note === "string" ? note : null,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Choose one supplier; the item leaves every other bucket in the same action. */
+insightsRouter.post("/cart/select", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { itemUid, supplierUid } = req.body ?? {};
+    if (typeof itemUid !== "string" || typeof supplierUid !== "string") {
+      res.status(400).json({ error: "itemUid and supplierUid are required." });
+      return;
+    }
+    await selectCartSupplier(itemUid, supplierUid);
+    res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Deliberately split one item's quantity across several suppliers. */
+insightsRouter.post("/cart/split", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { itemUid, parts } = req.body ?? {};
+    if (typeof itemUid !== "string" || !Array.isArray(parts) || parts.length < 2) {
+      res.status(400).json({ error: "itemUid and at least two parts are required." });
+      return;
+    }
+    await splitCartItem(itemUid, parts);
+    res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.post("/cart/reset", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({ cleared: await resetCart() });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Per-supplier order sheet, with unresolved duplicates flagged in the file. */
+insightsRouter.get("/cart.csv", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const out = await cartExport(windowParams(req));
+    res
+      .type("text/csv; charset=utf-8")
+      .setHeader("Content-Disposition", `attachment; filename="${out.filename}"`)
+      .send(out.csv);
   } catch (err) {
     send500(res, err);
   }
