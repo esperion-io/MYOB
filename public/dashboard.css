@@ -788,3 +788,158 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
 
 .empty-matches li:last-child { border-bottom: 0; }
 .empty-matches .muted { flex: 1 1 12rem; }
+
+/* ---------- purchasing cart (P5 + P6) ----------
+   The supplier bucket is the unit of work — one bucket becomes one email — so
+   buckets are collapsed until opened and the header carries everything needed
+   to decide whether to open it. */
+.cart-decisions { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.cart-decisions .btn { margin-left: auto; }
+
+.cart-suppliers { display: grid; gap: 0.7rem; }
+.cart-supplier { padding: 0; overflow: hidden; }
+.cart-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  width: 100%; padding: 0.85rem 1.1rem; border: 0; background: none;
+  font: inherit; color: inherit; cursor: pointer; text-align: left;
+}
+.cart-head:hover { background: var(--surface-2, rgba(0,0,0,0.02)); }
+.cart-head:focus-visible { outline: 2px solid var(--brand, #b8622a); outline-offset: -2px; }
+.cart-head-main { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; min-width: 0; }
+.cart-head-stats {
+  display: flex; align-items: center; gap: 0.8rem; flex: none;
+  font-variant-numeric: tabular-nums; font-size: 0.85rem;
+}
+.cart-caret { color: var(--muted); width: 1ch; }
+.cart-supplier.is-open .cart-head { border-bottom: 1px solid var(--line); }
+.cart-lines table { font-size: 0.85rem; }
+.cart-qty {
+  font: inherit; width: 7rem; text-align: right; padding: 0.25rem 0.4rem;
+  border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg); color: var(--ink); font-variant-numeric: tabular-nums;
+}
+.cart-why { max-width: 30rem; }
+/* The reasoning has to be scannable at a glance, not a paragraph to read. */
+.why-bits { font-size: 0.78rem; color: var(--muted); line-height: 1.7; }
+.why-bits span { white-space: nowrap; }
+button.badge { border: 0; cursor: pointer; font: inherit; font-size: 0.7rem; }
+button.badge:hover { filter: brightness(0.95); }
+
+.drawer-wide { width: min(46rem, 96vw); }
+.drawer-body { overflow-y: auto; }
+.compare-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 1rem; flex-wrap: wrap; margin-bottom: 0.9rem;
+}
+.compare-head h2 { margin: 0; }
+.compare-stock { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.82rem; }
+.compare-stock span { display: grid; }
+.cmp-qty {
+  font: inherit; width: 6rem; text-align: right; padding: 0.2rem 0.35rem;
+  border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg); color: var(--ink);
+}
+.compare-actions { margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--line); }
+body.drawer-open { overflow: hidden; }
+@media (max-width: 720px) {
+  .cart-head { flex-direction: column; align-items: flex-start; gap: 0.4rem; }
+  .cart-head-stats { width: 100%; justify-content: space-between; }
+}
+
+/* ---------- potential pack pull (inferred, never in totals) ---------- */
+
+/* The fact tile doubles as a jump to the explanation below it. */
+button.fact.fact-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.fact.fact-link:hover { border-color: var(--brand); }
+
+.fact .f-note {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--brand-deep);
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Boxed and dashed, matching the "inferred" tile, so the figure is never
+   mistaken for a measured quantity the reader should act on. */
+.pp-callout {
+  border: 1px dashed var(--brand);
+  background: var(--brand-soft);
+  padding: 0.6rem 0.7rem;
+  margin: 0.5rem 0;
+}
+
+.pp-callout.lead { margin: 0 0 0.7rem; }
+
+.pp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+}
+
+.pp-figure {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--brand-deep);
+}
+
+.pp-figure.big { font-size: 1.5rem; }
+
+.pp-body { margin: 0 0 0.3rem; font-size: 0.72rem; line-height: 1.45; }
+.pp-body:last-child { margin-bottom: 0; }
+
+/* Measured demand against the inferred pull, to size the gap at a glance. */
+.pp-bar {
+  display: flex;
+  height: 0.6rem;
+  margin: 0.55rem 0 0.3rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.pp-seg.measured { background: var(--ink-deep); }
+.pp-seg.potential {
+  background: repeating-linear-gradient(
+    45deg, var(--brand), var(--brand) 3px, var(--brand-deep) 3px, var(--brand-deep) 6px
+  );
+}
+
+.pp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin: 0;
+  font-size: 0.64rem;
+  color: var(--muted);
+}
+
+.pp-legend .pp-key {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.55rem;
+  margin-right: 0.25rem;
+}
+
+.pp-legend .pp-key.measured { background: var(--ink-deep); }
+.pp-legend .pp-key.potential { background: var(--brand); }
+
+.pp-table tfoot td {
+  border-top: 1px solid var(--ink-deep);
+  border-bottom: 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.pp-table tfoot td.num { color: var(--brand-deep); }

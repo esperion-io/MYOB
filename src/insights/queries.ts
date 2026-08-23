@@ -1176,22 +1176,30 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
       relationshipRows(uid),
       pool.query(`SELECT entity, last_synced_at FROM sync_state ORDER BY entity`),
       // Which packs/kits drive this component's potential demand, and the
-      // sold/built/bought arithmetic behind each one.
+      // sold/built/bought arithmetic behind each one. Uses the same window as
+      // the headline figure — pinned to a fixed 90 days these rows silently
+      // failed to add up to the total shown above them.
       pool.query(
         `WITH sold AS (
            SELECT l.item_uid, SUM(l.qty)::float8 AS qty
            FROM myob_sale_invoice_lines l JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
-           WHERE i.date >= NOW() - INTERVAL '90 days' AND l.item_uid IS NOT NULL
+           WHERE i.date <= '${win.asAt}'::date
+             AND i.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+             AND l.item_uid IS NOT NULL
            GROUP BY l.item_uid
          ), built AS (
            SELECT bl.item_uid, SUM(bl.qty)::float8 AS qty
            FROM myob_build_lines bl JOIN myob_builds b ON b.uid = bl.build_uid
-           WHERE bl.qty > 0 AND b.date >= NOW() - INTERVAL '90 days' AND bl.item_uid IS NOT NULL
+           WHERE bl.qty > 0 AND bl.item_uid IS NOT NULL
+             AND b.date <= '${win.asAt}'::date
+             AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
            GROUP BY bl.item_uid
          ), bought AS (
            SELECT l.item_uid, SUM(l.qty)::float8 AS qty
            FROM myob_purchase_bill_lines l JOIN myob_purchase_bills b ON b.uid = l.bill_uid
-           WHERE b.date >= NOW() - INTERVAL '90 days' AND l.item_uid IS NOT NULL
+           WHERE l.item_uid IS NOT NULL
+             AND b.date <= '${win.asAt}'::date
+             AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
            GROUP BY l.item_uid
          )
          SELECT eb.parent_uid AS uid, i.number, i.name, eb.qty_per::float8 AS qty_per,

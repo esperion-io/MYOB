@@ -62,8 +62,8 @@ const TERMS = {
   },
   potential: {
     label: "Potential pack pull",
-    short: "Inferred component demand from packs sold but not rebuilt. Never included in the totals.",
-    long: "When a pack or kit sells more units in 90 days than were built or bought, the difference came out of stock made earlier. Rebuilding it would pull these components, but MYOB has recorded no such movement — so it is reported separately and never added to demand, cover, suggestions or risk.",
+    short: "Extra units this item would need if the packs that sold were rebuilt. Deliberately left out of every total.",
+    long: "Packs and kits often sell out of finished stock built months ago. When a pack sells more than was built or bought in the same period, the shortfall came from that older stock — and replacing it would pull this component all over again. MYOB has recorded no movement for that, so the figure is an inference, shown on its own and never added to demand, cover, purchase suggestions or the risk score. Example: a pack sells 800, only 80 were built and none bought, so 720 packs were never replaced; at 2 of this item per pack, that is 1,440 units of demand nobody can see in the sales figures.",
   },
   supplier_source: {
     label: "Supplier source",
@@ -94,7 +94,7 @@ const FLAG_HELP = {
   inactive_with_stock: "The item is marked inactive in MYOB but still holds stock.",
   no_supplier: "The item has demand but no supplier recorded, in MYOB or here, and none in purchase history.",
   slow_mover: "Nothing moved in the last 90 days, so the slower 365-day rate is used for demand and cover.",
-  understated_demand: "Packs containing this item sold without being rebuilt, so its measured demand understates the real pull.",
+  understated_demand: "Packs holding this item sold without being rebuilt, so the demand and cover figures shown for it are lower than the real usage. Open the item to see which packs and how many units.",
   min_above_demand: "This item is both overstocked against demand and suggested for reorder, because the MYOB minimum level sits far above what demand justifies — worth reviewing the minimum itself.",
 };
 
@@ -105,7 +105,7 @@ const FLAG_LABELS = {
   inactive_with_stock: ["Inactive w/ stock", "warn"],
   no_supplier: ["No supplier", "warn"],
   slow_mover: ["Slow mover", "idle"],
-  understated_demand: ["Pack pull not counted", "brand"],
+  understated_demand: ["Demand understated", "brand"],
   min_above_demand: ["Min level above demand", "warn"],
 };
 
@@ -148,7 +148,7 @@ const INVENTORY_FILTERS = [
   ["committed", "Has committed stock"],
   ["components", "Used in assemblies"],
   ["parents", "Assembled products"],
-  ["understated", "Pack pull not counted"],
+  ["understated", "Demand understated by packs"],
   ["min_above_demand", "Min level above demand"],
   ["negative", "Negative stock"],
   ["stock_no_cost", "Stock with no cost"],
@@ -1059,6 +1059,144 @@ function toggleExpandRow(tr) {
   loadExpandExtras(item.uid, tr.nextElementSibling.querySelector(".expand-extra"));
 }
 
+/* ---------- pack pull (inferred demand) ---------- */
+
+/**
+ * Everything the pack-pull explanation needs, derived once. The inventory
+ * expand panel and the item page both render from this so the number, the
+ * wording and the percentage can never disagree between the two views.
+ */
+function packPull(i) {
+  const p = i.potential;
+  if (!p || !(p.qtyWindow > 0)) return null;
+  const measuredWeekly = i.demand.weekly || 0;
+  return {
+    units: p.qtyWindow,
+    weekly: p.weekly,
+    parentCount: p.parentCount,
+    months: i.demand.windowMonths,
+    measuredWeekly,
+    // Null when the item has no measured demand at all — a percentage on top
+    // of zero says nothing, and that case needs different words anyway.
+    upliftPct: measuredWeekly > 0 ? Math.round((p.weekly / measuredWeekly) * 100) : null,
+  };
+}
+
+/** The single plain-English sentence that explains the figure. */
+function packPullSentence(pp) {
+  const packs = `${pp.parentCount} pack${pp.parentCount === 1 ? "" : "s"}`;
+  if (pp.upliftPct == null)
+    return `${packs} containing this item sold without being rebuilt. Replacing them would need about
+      <strong>${qty(pp.units)} units</strong> of this item — and because nothing else moved, its demand and
+      cover currently read as if it were never used at all.`;
+  return `${packs} containing this item sold without being rebuilt. Replacing them would need about
+    <strong>${qty(pp.units)} more units</strong> over the last ${pp.months} months
+    (~${pp.weekly.toFixed(1)} a week) &mdash; roughly <strong>${pp.upliftPct}% on top</strong> of the
+    ${pp.measuredWeekly.toFixed(1)} a week measured here.`;
+}
+
+/** Measured vs potential weekly demand, to size the gap at a glance. */
+function packPullBar(pp) {
+  const total = pp.measuredWeekly + pp.weekly;
+  if (!(total > 0)) return "";
+  const measuredPct = Math.round((pp.measuredWeekly / total) * 100);
+  return `
+    <div class="pp-bar" role="img"
+         aria-label="Measured ${pp.measuredWeekly.toFixed(1)} per week, potential pack pull ${pp.weekly.toFixed(1)} per week">
+      <span class="pp-seg measured" style="width:${measuredPct}%"></span>
+      <span class="pp-seg potential" style="width:${100 - measuredPct}%"></span>
+    </div>
+    <p class="pp-legend">
+      <span><i class="pp-key measured"></i>Measured demand ${pp.measuredWeekly.toFixed(1)}/wk</span>
+      <span><i class="pp-key potential"></i>Potential pack pull +${pp.weekly.toFixed(1)}/wk</span>
+    </p>`;
+}
+
+/**
+ * The compact version for the inventory expand panel. A bare "+3,073" row read
+ * as another demand figure staff should act on, which is the one thing this
+ * number must never be taken for — so it is boxed, labelled as not counted,
+ * and says in words what it would mean.
+ */
+function packPullCallout(i) {
+  const pp = packPull(i);
+  if (!pp) return "";
+  return `
+    <div class="pp-callout">
+      <p class="pp-head">
+        <span class="term" title="${esc(TERMS.potential.short)}">Potential pack pull</span>
+        <span class="pp-figure">+${qty(pp.units)}</span>
+        <span class="badge brand">Not counted above</span>
+      </p>
+      <p class="pp-body">${packPullSentence(pp)}</p>
+      <p class="pp-body muted">Open the item to see which packs and the sold &minus; built &minus; bought working.</p>
+    </div>`;
+}
+
+/**
+ * The full explanation on the item page. Ordered the way a person asks the
+ * question: what it means, how big it is next to real demand, then the
+ * per-pack arithmetic. The column headings carry the operators (− − = ×) so
+ * the table reads as the sum it is rather than six unrelated numbers.
+ */
+function packPullPanel(i, parents) {
+  const pp = packPull(i);
+  if (!pp) return "";
+  const months = i.demand.windowMonths;
+  return `
+    <section class="panel" id="pack-pull">
+      <h2>Demand hiding in packs <span class="badge brand">not counted anywhere else</span></h2>
+
+      <div class="pp-callout lead">
+        <p class="pp-head">
+          <span class="pp-figure big">+${qty(pp.units)}</span>
+          <span class="muted">units of potential pull over ${months} months</span>
+        </p>
+        <p class="pp-body">${packPullSentence(pp)}</p>
+        ${packPullBar(pp)}
+      </div>
+
+      <p class="hint">MYOB never recorded these movements &mdash; the packs left the door out of stock built
+      earlier &mdash; so this figure is worked out, not observed. It is shown on its own and is
+      <strong>never</strong> added to weekly demand, cover, purchase suggestions or the risk score. Treat it as
+      a prompt to check whether these packs are due to be rebuilt, not as stock to order.</p>
+
+      <h3 class="sub-h">Where it comes from</h3>
+      <p class="hint">For each pack: what sold, minus what was built, minus what was bought in, leaves the packs
+      that were never replaced. Multiply by how many of this item each pack takes.</p>
+      <div class="table-wrap"><table class="pp-table">
+        <thead><tr>
+          <th>Pack that sold</th>
+          <th class="num" title="Units of the pack invoiced in the window">Sold ${months}m</th>
+          <th class="num" title="Units of the pack made by MYOB build transactions in the window">&minus; Built</th>
+          <th class="num" title="Units of the pack bought in ready-made from a supplier">&minus; Bought</th>
+          <th class="num" title="Packs that sold but were never replaced — these came from stock built earlier">= Never replaced</th>
+          <th class="num" title="How many of this item one pack takes">&times; Per pack</th>
+          <th class="num" title="Units of this item that rebuilding those packs would pull">= Potential pull</th>
+        </tr></thead>
+        <tbody>
+          ${parents
+            .map(
+              (p) => `<tr>
+                <td>${itemLink(p.uid, p.number ?? "—")}<br /><span class="muted">${esc((p.name ?? "").slice(0, 40))}</span></td>
+                <td class="num">${qty(p.sold_90)}</td>
+                <td class="num">${qty(p.built_90)}</td>
+                <td class="num">${qty(p.bought_90)}</td>
+                <td class="num">${qty(p.unexplained_units)}</td>
+                <td class="num">${qty(p.qty_per)}</td>
+                <td class="num"><strong>+${qty(p.potential_qty)}</strong></td>
+              </tr>`,
+            )
+            .join("")}
+        </tbody>
+        <tfoot><tr>
+          <td colspan="6">Total potential pull</td>
+          <td class="num"><strong>+${qty(pp.units)}</strong></td>
+        </tr></tfoot>
+      </table></div>
+    </section>`;
+}
+
 function kvRow(label, value, cls = "") {
   return `<div class="kv ${cls}"><span>${label}</span><span>${value}</span></div>`;
 }
@@ -1098,14 +1236,7 @@ function expandPanelHtml(i) {
     ${kvRow(`Cover${invTargetCover ? ` (target ${invTargetCover}w)` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
     ${kvRow(`Direct sales · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.directWindow)} / ${qty(i.demand.directLong)}`)}
     ${kvRow(`Via builds · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.componentWindow)} / ${qty(i.demand.componentLong)}`)}
-    ${
-      i.potential.qtyWindow > 0
-        ? kvRow(
-            `Potential from packs 90d <span class="muted">(not in totals)</span>`,
-            `<span class="potential-val" title="Packs/kits that sold more than were built or bought inside the selected window, × qty per. Inferred, not a MYOB movement.">+${qty(i.potential.qtyWindow)} <span class="muted">· ${i.potential.parentCount} product(s)</span></span>`,
-          )
-        : ""
-    }
+    ${packPullCallout(i)}
     ${kvRow(
       "Used in finished products",
       i.parentCountDeep > i.parentCount
@@ -1329,7 +1460,12 @@ async function renderItem(uid) {
       <div class="fact src-platform" title="${i.parentCountDeep > i.parentCount ? `${i.parentCount} directly, ${i.parentCountDeep - i.parentCount} more via sub-assemblies` : "Direct parents"}"><span class="f-label">Used in products</span><span class="f-value">${i.parentCountDeep || i.parentCount}${i.parentCountDeep > i.parentCount ? `<span class="muted" style="font-size:0.7rem"> (${i.parentCount} direct)</span>` : ""}</span></div>
       ${
         i.potential.qtyWindow > 0
-          ? `<div class="fact src-inferred"><span class="f-label">Potential pack pull</span><span class="f-value">+${qty(i.potential.qtyWindow)}</span></div>`
+          ? `<button type="button" class="fact src-inferred fact-link" data-scroll-to="pack-pull"
+                title="${esc(TERMS.potential.short)}">
+               <span class="f-label">Potential pack pull</span>
+               <span class="f-value">+${qty(i.potential.qtyWindow)}</span>
+               <span class="f-note">not in demand or cover &mdash; see why &darr;</span>
+             </button>`
           : ""
       }
     </div>
@@ -1352,36 +1488,7 @@ async function renderItem(uid) {
 
         ${
           (d.potentialParents || []).length
-            ? `<section class="panel">
-                <h2>Potential demand from packs <span class="badge brand">not counted in totals</span></h2>
-                <p class="hint">These finished products sold more units in the last 90 days than were built or bought
-                in the same period — the difference came out of stock made earlier. If Allied rebuilds them, this
-                component gets pulled by the quantities below. MYOB has not recorded these movements, so this is an
-                inference: it is shown separately and never added to weekly demand, cover, suggestions or risk.</p>
-                <div class="table-wrap"><table>
-                  <thead><tr><th>Finished product</th><th class="num">Sold 90d</th><th class="num">Built</th>
-                  <th class="num">Bought</th><th class="num">Unexplained</th><th class="num">Qty per</th>
-                  <th class="num">Potential pull</th></tr></thead>
-                  <tbody>
-                    ${d.potentialParents
-                      .map(
-                        (p) => `<tr>
-                          <td>${itemLink(p.uid, p.number ?? "—")}<br /><span class="muted">${esc((p.name ?? "").slice(0, 40))}</span></td>
-                          <td class="num">${qty(p.sold_90)}</td>
-                          <td class="num">${qty(p.built_90)}</td>
-                          <td class="num">${qty(p.bought_90)}</td>
-                          <td class="num">${qty(p.unexplained_units)}</td>
-                          <td class="num">${qty(p.qty_per)}</td>
-                          <td class="num"><strong>+${qty(p.potential_qty)}</strong></td>
-                        </tr>`,
-                      )
-                      .join("")}
-                  </tbody>
-                </table></div>
-                <p class="hint" style="margin-top:0.6rem">Total potential pull:
-                <strong>+${qty(i.potential.qtyWindow)}</strong> over the window (~${i.potential.weekly.toFixed(1)}/week)
-                versus measured weekly demand of ${i.demand.weekly.toFixed(1)}.</p>
-              </section>`
+            ? packPullPanel(i, d.potentialParents)
             : ""
         }
 
@@ -1588,6 +1695,13 @@ async function renderItem(uid) {
         </section>
       </div>
     </div>`;
+
+  // Hash links would be swallowed by the router, so in-page jumps scroll by hand.
+  main.querySelectorAll("[data-scroll-to]").forEach((el) =>
+    el.addEventListener("click", () =>
+      document.getElementById(el.dataset.scrollTo)?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    ),
+  );
 
   renderItemTags(uid, d.item.tags ?? []);
   loadItemLedger(uid);
@@ -2182,70 +2296,6 @@ async function loadSuppliersTable() {
 
 /* ---------- purchasing ---------- */
 
-async function renderPurchasing() {
-  main.innerHTML = '<p class="loading">Building purchasing view…</p>';
-  const data = await fetchJson(withWindow("/api/insights/purchasing"));
-  const csvUrl = `/api/insights/purchasing.csv${accessKey() ? `?key=${encodeURIComponent(accessKey())}` : ""}`;
-
-  main.innerHTML = `
-    <div class="page-head">
-      <div>
-        <h1>Purchasing</h1>
-        <p class="page-sub">${qty(data.totalItems)} items suggested or below minimum · target cover ${data.targetCoverWeeks} weeks ·
-        grouped by supplier (MYOB primary where set, otherwise inferred from purchase history).
-        Suggestions are decision support — nothing is written to MYOB.</p>
-      </div>
-      <div class="head-actions">
-        <a class="btn primary" href="${csvUrl}" download>Export CSV</a>
-      </div>
-    </div>
-    ${
-      data.suppliers.length
-        ? data.suppliers
-            .map(
-              (g) => `<section class="panel">
-              <h2>${esc(g.supplier)} ${regionChip(g.region, g.regionSource)} <span class="muted" style="text-transform:none;font-weight:500">· ${qty(g.itemCount)} item(s) · est ${money(g.estimatedCost)}</span></h2>
-              <div class="table-wrap"><table>
-                <thead><tr>
-                  <th>Risk</th><th>Item</th><th class="num">Free stock</th><th class="num">Incoming</th>
-                  <th class="num">Weekly</th><th>Cover</th><th class="num">Suggested qty</th><th class="num">Est cost</th><th>Flags</th>
-                </tr></thead>
-                <tbody>${g.items
-                  .map(
-                    (i) => `<tr class="rowlink" data-uid="${esc(i.uid)}">
-                      <td>${riskPill(i.risk.score)}</td>
-                      <td><strong>${esc(i.number ?? "—")}</strong><br /><span class="muted">${esc((i.name ?? "").slice(0, 50))}</span>
-                        ${i.supplierItemNumber ? `<br /><span class="muted">Supplier ref: ${esc(i.supplierItemNumber)}</span>` : ""}</td>
-                      <td class="num">${qty(i.qtyFreeStock)}</td>
-                      <td class="num">${qty(i.incomingQty)}</td>
-                      <td class="num">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "—"}</td>
-                      <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
-                      <td class="num"><strong>${qty(i.suggestion?.qty ?? 0)}</strong></td>
-                      <td class="num">${money((i.suggestion?.qty ?? 0) * (i.averageCost ?? 0))}</td>
-                      <td>${flagChips(i.flags)}</td>
-                    </tr>`,
-                  )
-                  .join("")}</tbody>
-              </table></div>
-            </section>`,
-            )
-            .join("")
-        : '<div class="notice">Nothing currently needs ordering against the target cover. Adjust TARGET_COVER_WEEKS to tune sensitivity.</div>'
-    }`;
-
-  main.querySelectorAll("tr.rowlink").forEach((tr) =>
-    tr.addEventListener("click", () => (location.hash = `#/item/${tr.dataset.uid}`)),
-  );
-}
-
-/* ---------- data & sync ---------- */
-
-/*
- * Quantity freshness. MYOB does not bump Item.LastModified when stock moves, so
- * an item that was not re-fetched is silently serving wrong quantities rather
- * than merely lagging. The items entity is always fully refreshed now, so any
- * stale item is a sync bug and must be impossible to miss.
- */
 function freshnessNotice(f) {
   if (!f) return "";
   const stale = Number(f.stale_items ?? 0);
@@ -2374,7 +2424,7 @@ async function renderData() {
             <tr><td>Stock on hand with zero average cost</td><td class="num">${qty(d.dataQuality.stockNoCost)}</td></tr>
             <tr><td>Inactive items still holding stock</td><td class="num">${qty(d.dataQuality.inactiveWithStock)}</td></tr>
             <tr><td>Items with demand but no known supplier (no MYOB primary, no purchase history)</td><td class="num">${qty(d.dataQuality.demandNoSupplier)}</td></tr>
-            <tr><td>Components whose measured demand understates pack-driven pull</td><td class="num">${qty(d.dataQuality.understatedDemand)}</td></tr>
+            <tr><td>Components whose demand is understated by packs sold but not rebuilt</td><td class="num">${qty(d.dataQuality.understatedDemand)}</td></tr>
           </tbody>
         </table></div>
       </section>
@@ -2467,14 +2517,16 @@ async function renderData() {
         <dd>MYOB inventory adjustments change stock without a sale, purchase or build (write-offs, stocktake
         corrections, reversals). They are never treated as demand; the Overview lists the largest of the last
         30 days by value so unusual movements get investigated rather than silently absorbed.</dd>
-        <dt>Potential demand from packs (inferred — never in totals)</dt>
-        <dd>When a pack, kit or dressing set sells more units in 90 days than were built or bought in the same
-        period, the difference came out of finished stock made earlier. Rebuilding those units would pull its
-        components, but MYOB has recorded no such movement — so the platform reports that pull separately as
-        "potential" and never adds it to weekly demand, cover, purchasing suggestions or the risk score.
-        Components flagged "Pack pull not counted" either have no measured demand at all or would gain at least
-        a quarter again; the item page lists the exact products and arithmetic behind the figure. Coverage is
-        limited to products whose composition is known, so it grows as BOM coverage improves.</dd>
+        <dt>Demand hiding in packs — "potential pack pull" (inferred, never in totals)</dt>
+        <dd>A pack, kit or dressing set often sells out of finished stock built months ago. When one sells more
+        in the window than was built or bought in the same window, the shortfall came from that older stock, and
+        replacing it would pull its components all over again. MYOB has recorded no movement for that, so the
+        platform works the figure out — <em>sold − built − bought = packs never replaced, × how many per
+        pack</em> — reports it on its own, and never adds it to weekly demand, cover, purchasing suggestions or
+        the risk score. Items tagged <strong>Demand understated</strong> are the ones where it matters: either
+        nothing else moved at all, or the hidden pull would add at least a quarter again. The item page shows
+        every pack behind the figure and the arithmetic for each. Coverage is limited to products whose
+        composition is known, so it grows as BOM coverage improves.</dd>
         <dt>Suppliers, regions &amp; lead times</dt>
         <dd>A product can have several suppliers. Allied records them on the item page — one marked
         <strong>preferred</strong> — and that preferred supplier is what purchasing grouping, region reporting
@@ -3020,3 +3072,435 @@ function renderItemTags(uid, tags) {
     if (e.key === "Enter") submit();
   });
 }
+
+/* ================= Purchasing cart (P5 + P6) =================
+ *
+ * Designed around how Allied actually buy. Their goal is not more dashboards —
+ * it is less time crunching numbers and more time talking to suppliers. Several
+ * are overseas with a language barrier and can only handle one issue per
+ * conversation, so a padded or garbled order costs a full round trip.
+ *
+ * That shapes three decisions:
+ *
+ *  1. **The supplier bucket is the unit of work**, because one bucket becomes
+ *     one email. Buckets are collapsed by default; you open the one you are
+ *     about to contact and ignore the rest.
+ *  2. **Decisions come before lists.** An item under several suppliers is not a
+ *     row to scroll past, it is a choice to make, so the count sits at the top
+ *     and can be worked through directly.
+ *  3. **Compare without leaving.** Choosing a supplier means weighing lead time
+ *     against cost against what is already on the water, so that comparison
+ *     opens in place rather than sending someone to another page.
+ */
+
+let cartData = null;
+const cartOpen = new Set();
+
+async function renderPurchasing() {
+  main.innerHTML = '<p class="loading">Building the order list…</p>';
+  cartData = await fetchJson(withWindow("/api/insights/cart"));
+  drawCart();
+}
+
+function cartExportUrl() {
+  const key = accessKey();
+  return `/api/insights/cart.csv?asAt=${encodeURIComponent(windowState.asAt)}&windowMonths=${windowState.windowMonths}${
+    key ? `&key=${encodeURIComponent(key)}` : ""
+  }`;
+}
+
+function drawCart() {
+  const d = cartData;
+  const undecided = d.unresolvedDuplicates;
+
+  main.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Purchasing</h1>
+        <p class="page-sub">${qty(d.totalItems)} items need an order, ${qty(d.totalLines)} lines across
+        ${qty(d.suppliers.length)} suppliers · estimated ${money(d.estimatedCost)} ·
+        demand over the last ${windowLabel()}. Nothing is written to MYOB.</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn" id="cart-reset" type="button" title="Discard every edit, choice and split">Start again</button>
+        <a class="btn primary" href="${cartExportUrl()}" download>Export order sheets</a>
+      </div>
+    </div>
+
+    ${
+      undecided
+        ? `<div class="notice warn cart-decisions">
+             <strong>${qty(undecided)} item${undecided === 1 ? "" : "s"} sit under more than one supplier</strong>
+             with no choice recorded. Each is a sourcing decision — usually a smaller local order against a
+             cheaper, slower one direct from the factory. Left undecided they can be ordered twice, so the
+             export flags them.
+             <button class="btn small" id="cart-decide" type="button">Work through them</button>
+           </div>`
+        : `<div class="notice ok">Every item has one supplier, or a deliberate split. Nothing can be ordered twice.</div>`
+    }
+
+    <div id="cart-decision-list"></div>
+
+    <div class="cart-suppliers">
+      ${d.suppliers.map(cartSupplierCard).join("")}
+    </div>`;
+
+  document.getElementById("cart-reset").addEventListener("click", async () => {
+    if (!confirm("Discard every quantity edit, supplier choice and split? Allied data only — MYOB is untouched.")) return;
+    await fetchJson("/api/insights/cart/reset", { method: "POST" });
+    renderPurchasing();
+  });
+  const decide = document.getElementById("cart-decide");
+  if (decide) decide.addEventListener("click", showCartDecisions);
+  wireCartCards();
+}
+
+/** One supplier, one conversation. Collapsed until you are working on it. */
+function cartSupplierCard(g) {
+  const open = cartOpen.has(g.supplierUid);
+  const lead =
+    g.leadTimeDays == null
+      ? '<span class="muted" title="No order has been matched to a bill for this supplier yet">lead time unknown</span>'
+      : `<span title="Median from purchase order raised to goods billed">~${g.leadTimeDays} day lead</span>`;
+  const flagged = g.lines.filter((l) => l.supplierCount > 1 && l.state !== "selected" && l.state !== "split").length;
+
+  return `
+    <section class="panel cart-supplier ${open ? "is-open" : ""}" data-supplier="${esc(g.supplierUid)}">
+      <button class="cart-head" type="button" data-toggle="${esc(g.supplierUid)}" aria-expanded="${open}">
+        <span class="cart-head-main">
+          <strong>${esc(g.supplierName)}</strong>
+          ${g.region ? `<span class="chip">${esc(g.region)}</span>` : ""}
+          <span class="muted">${lead}</span>
+        </span>
+        <span class="cart-head-stats">
+          ${flagged ? `<span class="badge warn" title="${flagged} line(s) also sit under another supplier">${flagged} to decide</span>` : ""}
+          <span>${qty(g.itemCount)} line${g.itemCount === 1 ? "" : "s"}</span>
+          <strong>${money(g.estimatedCost)}</strong>
+          <span class="cart-caret">${open ? "▾" : "▸"}</span>
+        </span>
+      </button>
+      ${open ? cartLinesTable(g) : ""}
+    </section>`;
+}
+
+function cartLinesTable(g) {
+  return `
+    <div class="table-wrap cart-lines">
+      <table>
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th class="num">Order qty</th>
+            <th class="num">Unit cost</th>
+            <th class="num">Est cost</th>
+            <th>Why this quantity</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${g.lines.map((l) => cartLineRow(g, l)).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function cartLineRow(g, l) {
+  const cost = l.lastCost ?? l.averageCost ?? 0;
+  const undecided = l.supplierCount > 1 && l.state !== "selected" && l.state !== "split";
+  const stateChip =
+    l.state === "split"
+      ? '<span class="badge ok" title="Deliberately ordered from more than one supplier">Split</span>'
+      : l.state === "selected"
+        ? '<span class="badge ok" title="Chosen supplier for this item">Chosen</span>'
+        : l.state === "edited"
+          ? '<span class="badge brand">Edited</span>'
+          : "";
+
+  /*
+   * The badge must be obvious at a glance in every bucket, without hovering —
+   * that is what stops the same item being ordered twice. Its wording follows
+   * the state: "also under" describes a live duplicate, and saying that after
+   * the choice has been made would keep raising an alarm that has been dealt
+   * with.
+   */
+  const others = l.supplierCount - 1;
+  const badgeText =
+    l.state === "split"
+      ? `split across ${l.supplierCount} suppliers`
+      : l.state === "selected"
+        ? `chosen over ${others} other${others === 1 ? "" : "s"}`
+        : `also under ${others} other${others === 1 ? "" : "s"}`;
+  const alsoUnder = l.supplierCount > 1
+    ? `<button class="badge ${undecided ? "warn" : "idle"} cart-compare" type="button"
+         data-item="${esc(l.itemUid)}" data-number="${esc(l.number ?? "")}"
+         title="Compare all ${l.supplierCount} suppliers for this item">${badgeText}</button>`
+    : "";
+
+  return `
+    <tr data-item="${esc(l.itemUid)}" data-supplier="${esc(g.supplierUid)}">
+      <td>
+        <a href="#/item/${esc(l.itemUid)}"><strong>${esc(l.number ?? "—")}</strong></a>
+        ${stateChip} ${alsoUnder}
+        <br /><span class="muted">${esc(l.name ?? "")}${l.productFinish ? ` · ${esc(l.productFinish)}` : ""}</span>
+      </td>
+      <td class="num">
+        <input class="cart-qty" type="number" step="any" min="0" value="${l.qty}"
+               aria-label="Order quantity for ${esc(l.number ?? "")}" />
+        ${l.qty !== l.suggestedQty ? `<br /><span class="muted" title="The platform suggested ${qty(l.suggestedQty)}">was ${qty(l.suggestedQty)}</span>` : ""}
+      </td>
+      <td class="num">${cost ? price(cost) : "—"}<br />
+        <span class="muted">${l.lastCost != null ? "last paid" : "average"}</span></td>
+      <td class="num">${money(l.qty * cost)}</td>
+      <td class="cart-why">${cartRationale(l)}</td>
+      <td class="num"><button class="tag-x cart-remove" type="button" title="Remove this line from ${esc(g.supplierName)}">×</button></td>
+    </tr>`;
+}
+
+/** The working behind the number, in the order someone actually checks it. */
+function cartRationale(l) {
+  const bits = [
+    `<span title="Free stock today">${qty(l.freeStock)} free</span>`,
+    l.minLevel ? `<span title="MYOB minimum level">min ${qty(l.minLevel)}</span>` : "",
+    `<span title="Demand over the last ${l.rationale.demandWindowMonths} months">${l.weeklyDemand.toFixed(1)}/wk</span>`,
+    l.coverWeeks != null ? `<span title="Weeks of cover at that rate">${l.coverWeeks.toFixed(1)}w cover</span>` : "",
+    l.incomingQty ? `<span title="Already on order and not yet received">+${qty(l.incomingQty)} incoming</span>` : "",
+    l.leadTimeDays != null
+      ? `<span title="Median measured across ${l.leadTimeOrders} matched orders">${l.leadTimeDays}d lead</span>`
+      : "",
+  ].filter(Boolean);
+  return `<span class="why-bits">${bits.join(" · ")}</span>`;
+}
+
+/** Expand/collapse, inline quantity edits, removals and the compare drawer. */
+function wireCartCards() {
+  main.querySelectorAll("[data-toggle]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const uid = btn.dataset.toggle;
+      if (cartOpen.has(uid)) cartOpen.delete(uid);
+      else cartOpen.add(uid);
+      drawCart();
+    }),
+  );
+
+  main.querySelectorAll("tr[data-item]").forEach((tr) => {
+    const itemUid = tr.dataset.item;
+    const supplierUid = tr.dataset.supplier;
+
+    const qtyInput = tr.querySelector(".cart-qty");
+    if (qtyInput) {
+      // Save on blur rather than per keystroke: Allied are typing a considered
+      // number, not searching, and a request per digit would fight them.
+      qtyInput.addEventListener("blur", async () => {
+        const value = Number(qtyInput.value);
+        if (!Number.isFinite(value) || value < 0) return;
+        await saveCartLine({ itemUid, supplierUid, qty: value, state: "edited" });
+      });
+      qtyInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") qtyInput.blur();
+      });
+    }
+
+    const remove = tr.querySelector(".cart-remove");
+    if (remove)
+      remove.addEventListener("click", async () => {
+        await saveCartLine({ itemUid, supplierUid, state: "removed" });
+      });
+
+    const compare = tr.querySelector(".cart-compare");
+    if (compare)
+      compare.addEventListener("click", () => openSupplierCompare(itemUid, compare.dataset.number));
+  });
+}
+
+async function saveCartLine(body) {
+  try {
+    await fetchJson("/api/insights/cart/line", { method: "POST", body: JSON.stringify(body) });
+    cartData = await fetchJson(withWindow("/api/insights/cart"));
+    drawCart();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+/**
+ * Every supplier for one item, side by side.
+ *
+ * This is the decision the brief describes: the same product is often available
+ * as a smaller, dearer order from a local warehouse or a larger, cheaper one
+ * direct from the factory, and that trade-off can only be judged with lead time,
+ * cost, current stock and incoming supply on screen together.
+ */
+function openSupplierCompare(itemUid, number) {
+  const rows = [];
+  for (const g of cartData.suppliers)
+    for (const l of g.lines) if (l.itemUid === itemUid) rows.push({ g, l });
+  if (!rows.length) return;
+
+  const first = rows[0].l;
+  const cheapest = Math.min(...rows.map((r) => r.l.lastCost ?? r.l.averageCost ?? Infinity));
+  // Only badge "fastest" when there is something to be faster than. With one
+  // measured supplier and one unknown, the label would claim a comparison that
+  // was never made.
+  const measured = rows.map((r) => r.l.leadTimeDays).filter((d) => d != null);
+  const fastest = measured.length > 1 ? Math.min(...measured) : null;
+
+  const body = `
+    <div class="compare-head">
+      <div>
+        <h2>${esc(number || first.number || "Item")}</h2>
+        <p class="muted">${esc(first.name ?? "")}</p>
+      </div>
+      <div class="compare-stock">
+        <span><strong>${qty(first.freeStock)}</strong> free stock</span>
+        <span><strong>${qty(first.incomingQty)}</strong> incoming</span>
+        <span><strong>${first.weeklyDemand.toFixed(1)}</strong>/week</span>
+        ${first.coverWeeks != null ? `<span><strong>${first.coverWeeks.toFixed(1)}</strong> weeks cover</span>` : ""}
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Supplier</th><th class="num">Unit cost</th><th class="num">Lead time</th>
+          <th class="num">Suggested qty</th><th class="num">Est cost</th><th></th></tr></thead>
+        <tbody>
+          ${rows
+            .map(({ g, l }) => {
+              const cost = l.lastCost ?? l.averageCost ?? 0;
+              const isCheapest = cost === cheapest && rows.length > 1;
+              const isFastest = fastest != null && l.leadTimeDays === fastest;
+              return `<tr>
+                <td><strong>${esc(g.supplierName)}</strong>
+                  ${g.region ? `<span class="chip">${esc(g.region)}</span>` : ""}
+                  ${l.state === "split" ? '<span class="badge ok">In the split</span>' : ""}
+                  <br /><span class="muted">${
+                    l.supplierSource === "allied" ? "Tagged by Allied"
+                    : l.supplierSource === "myob" ? "MYOB primary supplier"
+                    : "Inferred from purchase history"
+                  }</span></td>
+                <td class="num">${cost ? price(cost) : "—"} ${isCheapest ? '<span class="badge ok">cheapest</span>' : ""}</td>
+                <td class="num">${
+                  l.leadTimeDays == null
+                    ? '<span class="muted">unknown</span>'
+                    : `${l.leadTimeDays} days ${isFastest ? '<span class="badge ok">fastest</span>' : ""}
+                       <br /><span class="muted">from ${l.leadTimeOrders} order(s)</span>`
+                }</td>
+                <td class="num"><input class="cmp-qty" type="number" step="any" min="0" value="${l.qty}"
+                     data-supplier="${esc(g.supplierUid)}" aria-label="Quantity from ${esc(g.supplierName)}" /></td>
+                <td class="num">${money(l.qty * cost)}</td>
+                <td><button class="btn small cmp-choose" data-supplier="${esc(g.supplierUid)}" type="button"
+                      title="Order the whole quantity from ${esc(g.supplierName)} and drop the others">Choose</button></td>
+              </tr>`;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="compare-actions">
+      <p class="hint">Choosing one supplier removes this item from the others in a single action.
+      To buy from more than one on purpose, set the quantities above and record it as a split — the
+      order sheets will show it as intentional rather than a duplicate.</p>
+      <button class="btn" id="cmp-split" type="button">Record as a deliberate split</button>
+    </div>`;
+
+  openDrawer(`Suppliers for ${number || ""}`, body);
+
+  document.querySelectorAll(".cmp-choose").forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      await fetchJson("/api/insights/cart/select", {
+        method: "POST",
+        body: JSON.stringify({ itemUid, supplierUid: b.dataset.supplier }),
+      });
+      closeDrawer();
+      cartData = await fetchJson(withWindow("/api/insights/cart"));
+      drawCart();
+    }),
+  );
+
+  document.getElementById("cmp-split").addEventListener("click", async () => {
+    const parts = [...document.querySelectorAll(".cmp-qty")]
+      .map((i) => ({ supplierUid: i.dataset.supplier, qty: Number(i.value) }))
+      .filter((p) => p.qty > 0);
+    if (parts.length < 2) {
+      alert("A split needs a quantity against at least two suppliers.");
+      return;
+    }
+    await fetchJson("/api/insights/cart/split", {
+      method: "POST",
+      body: JSON.stringify({ itemUid, parts }),
+    });
+    closeDrawer();
+    cartData = await fetchJson(withWindow("/api/insights/cart"));
+    drawCart();
+  });
+}
+
+/** Work through the undecided items one at a time, highest value first. */
+function showCartDecisions() {
+  const byItem = new Map();
+  for (const g of cartData.suppliers)
+    for (const l of g.lines) {
+      if (l.supplierCount < 2 || l.state === "selected" || l.state === "split") continue;
+      const e = byItem.get(l.itemUid) ?? { line: l, value: 0, suppliers: [] };
+      e.value += l.qty * (l.lastCost ?? l.averageCost ?? 0);
+      e.suppliers.push(g.supplierName);
+      byItem.set(l.itemUid, e);
+    }
+  const list = [...byItem.entries()].sort((a, b) => b[1].value - a[1].value);
+  const el = document.getElementById("cart-decision-list");
+
+  el.innerHTML = `
+    <section class="panel">
+      <h2>Decisions to make</h2>
+      <p class="hint">Highest value first — these are where ordering twice would cost the most.
+      Open one to compare its suppliers side by side.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th>Available from</th><th class="num">At stake</th><th></th></tr></thead>
+        <tbody>
+          ${list
+            .slice(0, 40)
+            .map(
+              ([uid, e]) => `<tr>
+                <td><strong>${esc(e.line.number ?? "—")}</strong><br />
+                  <span class="muted">${esc(e.line.name ?? "")}</span></td>
+                <td class="muted">${e.suppliers.map((s) => esc(s)).join(" · ")}</td>
+                <td class="num">${money(e.value)}</td>
+                <td><button class="btn small dec-open" data-item="${esc(uid)}"
+                      data-number="${esc(e.line.number ?? "")}" type="button">Compare</button></td>
+              </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table></div>
+      ${list.length > 40 ? `<p class="hint">Showing the 40 largest of ${qty(list.length)}.</p>` : ""}
+    </section>`;
+
+  el.querySelectorAll(".dec-open").forEach((b) =>
+    b.addEventListener("click", () => openSupplierCompare(b.dataset.item, b.dataset.number)),
+  );
+  el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---------- reusable side drawer ---------- */
+
+function openDrawer(title, html) {
+  const d = document.getElementById("side-drawer");
+  document.getElementById("side-drawer-title").textContent = title;
+  document.getElementById("side-drawer-body").innerHTML = html;
+  d.hidden = false;
+  document.body.classList.add("drawer-open");
+  document.getElementById("side-drawer-close").focus();
+}
+
+function closeDrawer() {
+  const d = document.getElementById("side-drawer");
+  if (!d) return;
+  d.hidden = true;
+  document.body.classList.remove("drawer-open");
+}
+
+document.getElementById("side-drawer-close")?.addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeDrawer();
+});

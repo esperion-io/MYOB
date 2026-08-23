@@ -77,6 +77,17 @@
       </div>
     </div>
 
+    <!-- Reusable side panel. The supplier comparison opens here rather than on
+         its own page: choosing a supplier is a decision made against the cart in
+         front of you, not somewhere else. -->
+    <aside class="drawer drawer-wide" id="side-drawer" hidden aria-label="Detail">
+      <div class="drawer-head">
+        <h2 id="side-drawer-title">Detail</h2>
+        <button class="btn small" id="side-drawer-close" type="button">Close</button>
+      </div>
+      <div class="drawer-body" id="side-drawer-body"></div>
+    </aside>
+
     <aside class="drawer" id="help-drawer" hidden aria-label="Glossary">
       <div class="drawer-head">
         <h2>What the numbers mean</h2>
