@@ -647,6 +647,8 @@ export interface ListParams extends Partial<DemandWindow> {
   productType?: string;
   productFinish?: string;
   tag?: string;
+  /** Return every matching row, bypassing the page cap. Exports only. */
+  all?: boolean;
   filter?: string;
   region?: string;
   sort?: string;
@@ -827,8 +829,15 @@ export async function listItems(params: ListParams) {
     return dir === "asc" ? c : -c;
   });
 
-  const pageSize = Math.min(Math.max(params.pageSize ?? 50, 10), 200);
-  const page = Math.max(params.page ?? 1, 1);
+  /*
+   * The 200 cap protects the browser from a runaway page, but an export must
+   * never be silently truncated — a spreadsheet missing 2,900 of 3,100 rows
+   * looks complete and is not. `all` opts out, and only the export uses it.
+   */
+  const pageSize = params.all
+    ? rows.length
+    : Math.min(Math.max(params.pageSize ?? 50, 10), 200);
+  const page = params.all ? 1 : Math.max(params.page ?? 1, 1);
   const start = (page - 1) * pageSize;
 
   return {
@@ -2444,7 +2453,7 @@ export async function applySupplierRegions(): Promise<{
  * built, so that is what should land in the file.
  */
 export async function itemsCsv(params: ListParams): Promise<string> {
-  const data = await listItems({ ...params, page: 1, pageSize: 100000 });
+  const data = await listItems({ ...params, all: true });
   const esc = (v: unknown): string => {
     if (v == null) return "";
     const s = typeof v === "number" ? String(Number(v.toFixed(4))) : String(v);
