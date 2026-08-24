@@ -520,6 +520,12 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
   // flagged rather than resolved by suppressing one of them.
   if (excess && suggestion) flags.push("min_above_demand");
 
+  // Dead stock is the two problems together: barely selling AND holding far
+  // more than the demand justifies. Carried as its own flag rather than left
+  // as a filter-only concept, so the item itself says which of the two it is
+  // — "slow mover" alone still sells, "dead stock" has money stuck in it.
+  if (excess && flags.includes("slow_mover")) flags.push("dead_stock");
+
   return {
     uid: String(row.uid),
     number: (row.number as string) ?? null,
@@ -803,7 +809,7 @@ export async function listItems(params: ListParams) {
     // Money sitting in stock that is barely selling — the combination is what
     // makes it worth acting on, so it gets its own view.
     case "dead_stock":
-      rows = rows.filter((r) => r.excess != null && r.flags.includes("slow_mover"));
+      rows = rows.filter((r) => r.flags.includes("dead_stock"));
       break;
     case "committed":
       rows = rows.filter((r) => (r.qtyCommitted ?? 0) > 0);

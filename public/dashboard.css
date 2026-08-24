@@ -1006,3 +1006,14 @@ button.fact.fact-link:hover { border-color: var(--brand); }
   gap: 0.8rem; margin-top: 0.9rem; padding-top: 0.8rem; border-top: 1px solid var(--line);
 }
 body.modal-open { overflow: hidden; }
+
+/* ---------- side-by-side comparison in the help drawer ---------- */
+
+.compare { margin: 0.4rem 0 0.8rem; font-size: 0.72rem; }
+.compare th, .compare td { padding: 0.35rem 0.5rem; vertical-align: top; }
+.compare tr th:first-child, .compare tr td:first-child {
+  color: var(--muted);
+  white-space: nowrap;
+  width: 9rem;
+}
+.compare th { text-transform: none; letter-spacing: 0; font-size: 0.72rem; }

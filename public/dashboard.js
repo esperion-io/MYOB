@@ -57,8 +57,8 @@ const TERMS = {
   },
   excess: {
     label: "Excess stock",
-    short: "Value of stock beyond the excess threshold of cover, where it is material.",
-    long: "Free stock beyond the excess threshold (default 26 weeks of cover) valued at average cost, counted only when the item has real demand and the excess is worth at least $250. The counterpart to shortage risk: stock Allied could stop reordering.",
+    short: "The value of stock you are holding beyond about six months of cover.",
+    long: "Anything on the shelf beyond 26 weeks of cover, valued at average cost. It only counts when the item genuinely sells and the excess is worth at least $250, so small overages are not flagged as problems. Where shortage risk asks what to order sooner, this asks what to stop ordering.",
   },
   potential: {
     label: "Potential pack pull",
@@ -87,26 +87,34 @@ const TERMS = {
   },
 };
 
+/*
+ * Tag wording is written for the people reading it, not for the code that sets
+ * it: say what is true of the item, then what it means for them. Anything that
+ * needs a second clause to explain a threshold belongs in the help drawer, not
+ * in a tooltip.
+ */
 const FLAG_HELP = {
-  below_min: "Free stock is under the minimum level set in MYOB for this item.",
-  negative_stock: "MYOB shows less than zero on hand — usually a sequencing or data-entry problem worth investigating.",
-  stock_no_cost: "Stock is on hand but its average cost is zero, so any value or excess figure understates reality.",
-  inactive_with_stock: "The item is marked inactive in MYOB but still holds stock.",
-  no_supplier: "The item has demand but no supplier recorded, in MYOB or here, and none in purchase history.",
-  slow_mover: "This item has not sold or been used at all in the last 6 months, but it did earlier in the year — so its demand is worked out over the longer period instead, giving a slower rate.",
+  below_min: "There is less free stock than the minimum level MYOB holds for this item.",
+  negative_stock: "MYOB shows less than zero on the shelf, which cannot be true. Usually movements were entered out of order, or something was counted twice — worth checking before trusting any other figure for this item.",
+  stock_no_cost: "There is stock on the shelf but MYOB has no cost for it, so this item's stock value shows as nothing. Whatever it is really worth is missing from every total.",
+  inactive_with_stock: "Marked inactive in MYOB, but there is still stock on the shelf. Either it should be active again, or the stock needs using up or writing off.",
+  no_supplier: "This item is being used, but nobody is recorded as supplying it — not in MYOB, not here, and it has never appeared on a bill. There is no one to order it from.",
+  slow_mover: "This item has not sold or been used at all in the last 6 months, but it did earlier in the year — so its demand is worked out over the longer period instead, giving a slower rate. It still sells; it is just quiet.",
+  dead_stock: "A slow mover that is also badly overstocked: barely selling, and holding far more than the demand justifies. This is money sitting on the shelf — the clearest candidate to stop reordering.",
   understated_demand: "Packs holding this item sold without being rebuilt, so the demand and cover figures shown for it are lower than the real usage. Open the item to see which packs and how many units.",
-  min_above_demand: "This item is both overstocked against demand and suggested for reorder, because the MYOB minimum level sits far above what demand justifies — worth reviewing the minimum itself.",
+  min_above_demand: "MYOB's minimum level for this item is far higher than its demand justifies, so it is being suggested for reorder while it already has too much on the shelf. The minimum is what needs looking at, not the stock.",
 };
 
 const FLAG_LABELS = {
   below_min: ["Below min", "fail"],
   negative_stock: ["Negative stock", "fail"],
-  stock_no_cost: ["No cost", "warn"],
-  inactive_with_stock: ["Inactive w/ stock", "warn"],
+  stock_no_cost: ["No cost in MYOB", "warn"],
+  inactive_with_stock: ["Inactive, still has stock", "warn"],
   no_supplier: ["No supplier", "warn"],
   slow_mover: ["Slow mover", "idle"],
+  dead_stock: ["Dead stock", "fail"],
   understated_demand: ["Demand understated", "brand"],
-  min_above_demand: ["Min level above demand", "warn"],
+  min_above_demand: ["Min level too high", "warn"],
 };
 
 /*
@@ -143,13 +151,13 @@ const INVENTORY_FILTERS = [
   ["below_min", "Below min level"],
   ["low_cover", "Cover under 4 weeks"],
   ["excess", "Excess stock"],
-  ["slow_mover", "Slow movers"],
-  ["dead_stock", "Dead stock (slow + excess)"],
+  ["slow_mover", "Slow movers (quiet, but still selling)"],
+  ["dead_stock", "Dead stock (quiet AND overstocked)"],
   ["committed", "Has committed stock"],
   ["components", "Used in assemblies"],
   ["parents", "Assembled products"],
   ["understated", "Demand understated by packs"],
-  ["min_above_demand", "Min level above demand"],
+  ["min_above_demand", "Min level too high"],
   ["negative", "Negative stock"],
   ["stock_no_cost", "Stock with no cost"],
   ["no_supplier", "No supplier set"],
@@ -247,6 +255,11 @@ function riskPill(score) {
 
 function flagChips(flags) {
   if (!flags?.length) return "";
+  // Dead stock already means "slow mover, and overstocked with it", so showing
+  // both reads as two problems where there is one. The slow_mover flag stays
+  // in the data — the Slow movers view still finds these items — it is only
+  // the duplicate chip that is dropped.
+  if (flags.includes("dead_stock")) flags = flags.filter((f) => f !== "slow_mover");
   return `<span class="chips">${flags
     .map((f) => {
       const [label, tone] = FLAG_LABELS[f] ?? [f, "idle"];
@@ -410,6 +423,20 @@ function renderHelp() {
         )
         .join("")}
     </dl>
+    <h3 class="sub-h">Slow mover or dead stock?</h3>
+    <p class="drawer-note">They sound alike and mean different things. Every dead-stock item is a slow mover;
+    what makes it dead stock is how much of it you are holding.</p>
+    <table class="compare">
+      <tbody>
+        <tr><th></th><th><span class="badge idle">Slow mover</span></th><th><span class="badge fail">Dead stock</span></th></tr>
+        <tr><td>How it sells</td><td>Quietly &mdash; nothing in 6 months, but it did earlier</td><td>The same &mdash; quietly</td></tr>
+        <tr><td>How much you hold</td><td>Could be any amount</td><td>Far more than the demand justifies</td></tr>
+        <tr><td>What it means</td><td>It still sells. Order it, just less often</td><td>Money is stuck on the shelf</td></tr>
+        <tr><td>What to do</td><td>Nothing urgent &mdash; watch it</td><td>Stop reordering, use it up or clear it</td></tr>
+      </tbody>
+    </table>
+    <p class="drawer-note">An item tagged <span class="badge fail">Dead stock</span> is not tagged
+    <span class="badge idle">Slow mover</span> as well &mdash; the stronger tag covers both.</p>
     <p class="drawer-note">Hover any column heading or tag for the same explanation without opening this panel.</p>`;
   body.dataset.filled = "1";
 }
@@ -2637,8 +2664,20 @@ async function renderData() {
         it still sells, just slowly, and you are carrying far too much of it.
         <br /><br />
         This is what stops the two mistakes at either end — treating a quiet item as finished and letting it run
-        out, or reordering it as if it were a fast seller. <strong>Dead stock</strong> is a slow mover that is
-        also carrying excess. Both periods shift if you change the setting at the top of the page.</dd>
+        out, or reordering it as if it were a fast seller. Both periods shift if you change the setting at the
+        top of the page.</dd>
+        <dt>Slow mover vs dead stock</dt>
+        <dd>A <strong>slow mover</strong> is about how an item <em>sells</em>: quietly. It is not a problem on
+        its own — plenty of items are meant to sell slowly, and the right response is usually to order them
+        less often.
+        <br /><br />
+        <strong>Dead stock</strong> is a slow mover that is <em>also</em> badly overstocked: barely selling, and
+        holding more than six months of cover with real money in it. That combination is the problem, because
+        the stock is not going to sell through on its own. Every dead-stock item is a slow mover; most slow
+        movers are not dead stock.
+        <br /><br />
+        Because the stronger tag covers both, an item shows either <strong>Slow mover</strong> or
+        <strong>Dead stock</strong> — never the two together.</dd>
         <dt>Product recipes</dt>
         <dd>MYOB's own Bill of Materials is read directly from the item master and covers auto-build products,
         which never appear as build transactions. Recipes are also derived from MYOB build transactions with a

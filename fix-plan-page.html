@@ -205,12 +205,12 @@
 <div class="wrap">
 
   <header class="masthead">
-    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v2.4</p>
+    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v3</p>
     <h1>Allied Priority Fix Plan</h1>
     <p class="standfirst">Implementation plan for the six client priorities, rebuilt around a stocktake-anchored stock ledger — plus one blocking defect found while verifying the numbers.</p>
     <div class="meta">
-      <span><b>Revised</b> 21 Aug 2026</span>
-      <span><b>Status</b> P0–P4 shipped · P5+P6 remaining</span>
+      <span><b>Revised</b> 24 Aug 2026</span>
+      <span><b>Status</b> All six priorities shipped</span>
       <span><b>Verified against</b> Live MYOB file, 3,100 items</span>
     </div>
   </header>
@@ -226,6 +226,7 @@
       <li><strong>P2 shipped 19 Aug.</strong> Stock value is our on hand × average cost — which caught a MYOB valuation error of exactly 100×: SW101616G4 recorded at $3.36 instead of $336.00.</li>
       <li><strong>P3 shipped 21 Aug.</strong> An as-at date and a rolling window that move independently, a month-end spreadsheet export, and a New Zealand time correction that was misdating the snapshot trail by a day.</li>
       <li><strong>P4 shipped 21 Aug.</strong> Product type and finish as independent facets — "stainless washers" is 89 items from two filters, with no compound category anywhere — plus Allied's own free-text tags.</li>
+      <li><strong>P5 + P6 shipped 24 Aug.</strong> The cart fans an item out across every supplier tagged against it — 1,346 items become 1,681 lines across 69 suppliers — with all five guard rails, lead times measured from Allied's own orders, and per-supplier order sheets.</li>
     </ul>
   </div>
 
@@ -571,12 +572,51 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
       </ol>
     </article>
 
-    <article class="card is-critical">
-      <h3><span class="pid">P5 + P6</span> The purchasing cart <span class="tag crit">Largest item</span></h3>
-      <p class="dep">Build as one piece of work · P6 cannot be fixed inside the current design</p>
+    <article class="card is-core">
+      <h3><span class="pid">P5 + P6</span> The purchasing cart <span class="tag good">Shipped 24 Aug</span></h3>
+      <p class="dep">1,346 items across 69 suppliers · all five guard rails verified</p>
       <p>P5's editable quantities need the same persistence P6's split-orders need. <strong>Doing them separately means building the cart twice.</strong></p>
 
-      <h4>Why the current design cannot be patched</h4>
+      <div class="evidence">
+        <p class="etitle">Shipped and verified — the P6 defect is fixed</p>
+        <ul>
+          <li>An item now appears under <strong>every</strong> supplier tagged against it: 1,346 items become
+            <strong>1,681 lines across 69 suppliers</strong>. BN16425G sits under Hanova, Shanghai Screw-Fast,
+            Bremick and TANDL — the choice Allied could not previously see.</li>
+          <li>All five guard rails verified end to end: badged in every bucket, side-by-side comparison,
+            choose-one clears the others, splits recorded explicitly, export flags what is unresolved.</li>
+          <li>Adding or removing a supplier reflects immediately — no sync, no recalculation.</li>
+          <li>Multi-supplier tagging seeded from their own purchase history: <strong>242 items, 641 links</strong>.</li>
+          <li>Decisions are reversible, and the undecided list is a modal ranked by what is at stake —
+            <strong>NZ$352,436</strong> across 212 items.</li>
+        </ul>
+      </div>
+
+      <h4>Lead time is measured, not promised</h4>
+      <p>Only 30 orders carry a promised date, but 1,153 of 1,265 converted orders match their bill by number
+      and supplier. Same-day pairs are excluded — <strong>31% of the population</strong>, and paperwork rather
+      than a wait. Every figure shows its provenance: <em>"24 days from 6 orders, 7 same-day ignored."</em></p>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Supplier</th><th class="num">Typical lead</th></tr></thead>
+          <tbody>
+            <tr><td>TANDL</td><td class="num">117 days</td></tr>
+            <tr><td>Jiaxing Goodway</td><td class="num">100 days</td></tr>
+            <tr><td>HANOVA INTERNATIONAL</td><td class="num">83 days</td></tr>
+            <tr><td>Skellerup Rubber</td><td class="num">5 days</td></tr>
+            <tr><td>Bringans Fasteners</td><td class="num">2 days</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>That is the brief's factory-versus-local trade-off in Allied's own numbers. On BN16425G:
+      <strong>$1.88 a unit from Hanova at 83 days, or $3.75 from Bremick at 1 day.</strong></p>
+
+      <h4>Client decision — export format</h4>
+      <p>Export is <strong>CSV with a UTF-8 BOM</strong>, which Excel opens directly and pastes cleanly into an
+      email. Confirmed as sufficient; a true <code>.xlsx</code> with column widths and formatting was considered
+      and deliberately not built.</p>
+
+      <h4>Why the previous design could not be patched</h4>
       <p><code>purchasing()</code> in <code>src/insights/queries.ts:1110</code> is a <strong>stateless recomputation, not a cart</strong>:</p>
       <div class="evidence">
         <ul>

@@ -1,6 +1,6 @@
 # Allied Priority Fix Plan — v2
 
-**Status:** P0 shipped 18 Aug 2026. P1 and P2 shipped 19 Aug 2026. P3 shipped 21 Aug 2026. P4–P6 proposed. Revised after client direction on stocktake-anchored stock maths.
+**Status:** All six priorities shipped. P0 18 Aug, P1 and P2 19 Aug, P3 21 Aug, P4 21 Aug, P5+P6 24 Aug 2026. Two backlog items raised and parked. Revised after client direction on stocktake-anchored stock maths.
 
 **What changed in v2**
 
@@ -11,6 +11,8 @@
 - **P1 shipped 19 Aug** — on hand, committed, free, on order and available are all computed here from Allied's own documents; counts, divergence and the audit trail are on screen.
 - **P2 shipped 19 Aug** — stock value is our on hand × average cost, which caught a MYOB valuation error of exactly 100×.
 - **P3 shipped 21 Aug** — an as-at date and a rolling window, genuinely independent; a NZ-time correction that was misdating the snapshot trail; and the month-end spreadsheet export.
+- **P4 shipped 21 Aug** — product type and finish as independent facets, nothing suppressed, plus Allied's own free-text tags.
+- **P5+P6 shipped 24 Aug** — the cart fans an item out across every supplier tagged against it, with all five guard rails, measured lead times and per-supplier order sheets.
 
 ---
 
@@ -578,7 +580,7 @@ The client can pull the 31 July stock position beside a 6-month rolling consumpt
 
 ---
 
-### P4 — Independent facets plus free-text tags
+### P4 — Independent facets plus free-text tags ✅ SHIPPED 21 Aug 2026
 
 Depends on P0, which persists the custom lists. **Simplified by client direction — no suppression work.**
 
@@ -593,11 +595,71 @@ Depends on P0, which persists the custom lists. **Simplified by client direction
 
 ---
 
-### P5 + P6 — The purchasing cart. Build as one piece of work. 🔴 LARGEST ITEM
+### P5 + P6 — The purchasing cart ✅ SHIPPED 24 Aug 2026
 
 The brief separates these, but they are the same rebuild: P5's editable quantities need the same persistence P6's split-orders need. Doing them separately means building the cart twice.
 
-#### Why the current design cannot be patched
+#### What shipped
+
+**The P6 defect is fixed.** An item below its minimum now appears under every
+supplier tagged against it: **1,346 items become 1,681 lines across 69
+suppliers**. `BN16425G` sits under Hanova, Shanghai Screw-Fast, Bremick and
+TANDL — the sourcing choice Allied previously could not see.
+
+**All five guard rails, verified end to end.** Every multi-supplier line is
+badged in every bucket without hovering; the comparison drawer shows all
+suppliers side by side with lead time, cost, on-hand and incoming; choosing one
+supplier clears the item from the others in a single action; a split is recorded
+explicitly with its total and per-supplier breakdown; and the export opens with
+a warning and marks unresolved rows `CHECK`.
+
+**Lead time is measured, not promised.** Only 30 orders carry a promised date,
+but 1,153 of 1,265 converted orders match their bill by number and supplier.
+Same-day pairs are excluded — 31% of the population, and paperwork rather than a
+wait. Every figure shows its own provenance: *"24 days from 6 orders, 7 same-day
+ignored."* TANDL 117 days and Hanova 83 against Skellerup 5 and Bringans 2 is
+the brief's factory-versus-local trade-off in Allied's own numbers.
+
+**Multi-supplier tagging seeded from purchase history** — 242 items, 641 links,
+because every one of those sourcing decisions was already recorded in their
+bills. A supplier must account for at least 5% of an item's spend and have been
+bought within two years, so one-off top-ups of 34 units are not offered as
+options.
+
+**Decisions are reversible and unmissable.** A "Decided" panel lists every
+choice with Undo. The undecided list is a modal, paginated 25 at a time, ranked
+by what is at stake — NZ$352,436 across 212 items.
+
+**Exports on every view this work touched**: inventory (filters applied),
+supplier list (with measured lead times), the cart, and the as-at position.
+
+#### What using it caught
+
+Seven faults found by working the screens rather than reading them:
+
+1. **A split left the item in its other buckets.** 2,000 units across two
+   suppliers came to 2,874 across four — the exact duplicate order the split
+   exists to prevent. A split now decides which suppliers are in play.
+2. **A zero-day lead time for an Australian supplier**, which was the symptom of
+   the median being computed over same-day pairs.
+3. **The inventory export was silently truncated to 200 rows** — a spreadsheet
+   holding 200 of 3,103 items looks complete and is not.
+4. **The superseded purchasing view was still routed**, so the P6 defect could
+   still be exported from `/purchasing.csv`. Removed.
+5. **Unit costs rendered as NZ$0** — the whole-dollar formatter applied to
+   fastener prices, in the one view built for comparing them.
+6. **The undecided list showed 40 of 212** with no way to reach the rest.
+7. **CSS variables that do not exist in this stylesheet** (`--surface`, `--bg`
+   against a file defining `--panel`, `--paper`), which had been silently
+   falling back to transparent since P3.
+
+#### Client decision
+
+Export is **CSV with a UTF-8 BOM**, which Excel opens directly and pastes
+cleanly into an email. Confirmed with the client as sufficient; a true `.xlsx`
+with column widths and formatting was considered and deliberately not built.
+
+#### Why the previous design could not be patched
 
 `purchasing()` in `src/insights/queries.ts:1110` is a **stateless recomputation, not a cart**:
 
@@ -782,10 +844,10 @@ P0 sync + freshness ──> P1 stocktake-anchored ledger ──┬──> P2 val
 | P1 | Stocktake-anchored ledger | **L** | ✅ Shipped 19 Aug 2026. Now the core of the product. |
 | P2 | Average-cost valuation | S | ✅ Shipped 19 Aug 2026. Caught a 100× MYOB error. |
 | P3 | As-at + rolling window + export | L | ✅ Shipped 21 Aug 2026. Also caught a live NZ-time dating fault. |
-| P4 | Facets + tags | S–M | Reduced — no suppression logic. |
-| P5+P6 | Cart rebuild | XL | New persistence, fan-out, guard rails, xlsx. |
+| P4 | Facets + tags | S–M | ✅ Shipped 21 Aug 2026. |
+| P5+P6 | Cart rebuild | XL | ✅ Shipped 24 Aug 2026. Fan-out, guard rails, measured lead times, CSV. |
 
-**Recommended order: P0 → P1 → P2 → P3 → P4 → P5+P6.** P0–P3 are shipped, which clears the August month-end deadline. P4 is next; P5+P6 is the largest remaining piece.
+**All six shipped**, in the order P0 → P1 → P2 → P3 → P4 → P5+P6. The August month-end deadline was cleared by P3. What remains is the two backlog items (B1, B2), both of which need a client decision rather than engineering.
 
 P1 now sits directly behind P0 rather than beside P2, because on-hand is an input to valuation, cover, below-minimum flags and every purchasing suggestion. P2 follows immediately and is nearly free. P3 must not slip — it is the only item with a hard external deadline. The cart rebuild is the largest piece and should not start until the numbers beneath it are trusted, or it will be built twice.
 
