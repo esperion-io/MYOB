@@ -82,6 +82,19 @@
       </div>
     </div>
 
+    <!-- Modal for things that must be dealt with, not browsed past. The
+         sourcing decisions live here rather than in a page section, because a
+         section among other sections reads as optional. -->
+    <div class="modal-backdrop" id="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-head">
+          <h2 id="modal-title">Detail</h2>
+          <button class="btn small" id="modal-close" type="button">Close</button>
+        </div>
+        <div class="modal-body" id="modal-body"></div>
+      </div>
+    </div>
+
     <!-- Reusable side panel. The supplier comparison opens here rather than on
          its own page: choosing a supplier is a decision made against the cart in
          front of you, not somewhere else. -->

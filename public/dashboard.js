@@ -3284,7 +3284,6 @@ function drawCart() {
         : `<div class="notice ok">Every item has one supplier, or a deliberate split. Nothing can be ordered twice.</div>`
     }
 
-    <div id="cart-decision-list"></div>
     ${cartDecisionsMade(d)}
 
     <div class="cart-suppliers">
@@ -3575,6 +3574,10 @@ function openSupplierCompare(itemUid, number) {
       <p class="hint">Choosing one supplier removes this item from the others in a single action.
       To buy from more than one on purpose, set the quantities above and record it as a split — the
       order sheets will show it as intentional rather than a duplicate.</p>
+      <!-- Splitting by hand across several boxes is exactly where a quantity
+           goes missing or gets counted twice, so the arithmetic is done here
+           and shown live rather than left to the person typing. -->
+      <div class="split-tally" id="split-tally"></div>
       <button class="btn" id="cmp-split" type="button">Record as a deliberate split</button>
     </div>`;
 
@@ -3593,6 +3596,38 @@ function openSupplierCompare(itemUid, number) {
       : "";
 
   openDrawer(`Suppliers for ${number || ""}`, nav + body);
+
+  // Live tally: what was suggested, what has been allocated, and the gap.
+  const suggested = first.suggestedQty;
+  const tally = () => {
+    const el = document.getElementById("split-tally");
+    if (!el) return;
+    const parts = [...document.querySelectorAll(".cmp-qty")]
+      .map((i) => ({ supplierUid: i.dataset.supplier, qty: Number(i.value) || 0 }))
+      .filter((p) => p.qty > 0);
+    const allocated = parts.reduce((a, p) => a + p.qty, 0);
+    const diff = allocated - suggested;
+    const state = parts.length < 2 ? "idle" : Math.abs(diff) < 0.001 ? "ok" : "warn";
+    el.className = `split-tally is-${state}`;
+    el.innerHTML =
+      parts.length < 2
+        ? `<span class="muted">Set a quantity against at least two suppliers to split.
+             Suggested total is <strong>${qty(suggested)}</strong>.</span>`
+        : `<span>Suggested <strong>${qty(suggested)}</strong></span>
+           <span>Allocated <strong>${qty(allocated)}</strong> across ${parts.length} suppliers</span>
+           <span class="split-diff">${
+             Math.abs(diff) < 0.001
+               ? "adds up exactly"
+               : diff > 0
+                 ? `<strong>${qty(diff)} more</strong> than suggested`
+                 : `<strong>${qty(-diff)} short</strong> of the suggestion`
+           }</span>`;
+  };
+  document.querySelectorAll(".cmp-qty").forEach((i) => {
+    i.addEventListener("input", tally);
+    i.addEventListener("change", tally);
+  });
+  tally();
 
   const skip = document.getElementById("cmp-skip");
   if (skip)
@@ -3620,6 +3655,18 @@ function openSupplierCompare(itemUid, number) {
       alert("A split needs a quantity against at least two suppliers.");
       return;
     }
+    const allocated = parts.reduce((a, p) => a + p.qty, 0);
+    const diff = allocated - suggested;
+    // A mismatch can be deliberate — a minimum order quantity, or topping up
+    // beyond the suggestion — so this confirms rather than blocks.
+    if (Math.abs(diff) > 0.001) {
+      const ok = confirm(
+        `This split comes to ${qty(allocated)}, which is ${
+          diff > 0 ? `${qty(diff)} more than` : `${qty(-diff)} short of`
+        } the suggested ${qty(suggested)}.\n\nRecord it anyway?`,
+      );
+      if (!ok) return;
+    }
     await fetchJson("/api/insights/cart/split", {
       method: "POST",
       body: JSON.stringify({ itemUid, parts }),
@@ -3628,8 +3675,27 @@ function openSupplierCompare(itemUid, number) {
   });
 }
 
-/** Work through the undecided items one at a time, highest value first. */
+/**
+ * The undecided items, as a modal.
+ *
+ * This began as a panel folded into the purchasing page and was too easy to
+ * miss — it looked like one more section among the supplier buckets, when it is
+ * the thing that has to happen before any order goes out. A modal states that:
+ * it interrupts, it is the only thing on screen, and it does not close until
+ * dismissed.
+ *
+ * It also paginates. The first version showed the 40 largest with no way to
+ * reach the rest, which quietly hid 172 of 212 decisions.
+ */
+let decisionPage = 1;
+const DECISIONS_PER_PAGE = 25;
+
 function showCartDecisions() {
+  decisionPage = 1;
+  drawDecisionModal();
+}
+
+function decisionRows() {
   const byItem = new Map();
   for (const g of cartData.suppliers)
     for (const l of g.lines) {
@@ -3639,40 +3705,70 @@ function showCartDecisions() {
       e.suppliers.push(g.supplierName);
       byItem.set(l.itemUid, e);
     }
-  const list = [...byItem.entries()].sort((a, b) => b[1].value - a[1].value);
+  return [...byItem.entries()].sort((a, b) => b[1].value - a[1].value);
+}
+
+function drawDecisionModal() {
+  const list = decisionRows();
   decisionQueue = list.map(([uid]) => uid);
-  const el = document.getElementById("cart-decision-list");
 
-  el.innerHTML = `
-    <section class="panel">
-      <h2>Decisions to make</h2>
-      <p class="hint">Highest value first — these are where ordering twice would cost the most.
-      Open one to compare its suppliers side by side.</p>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Item</th><th>Available from</th><th class="num">At stake</th><th></th></tr></thead>
-        <tbody>
-          ${list
-            .slice(0, 40)
-            .map(
-              ([uid, e]) => `<tr>
-                <td><strong>${esc(e.line.number ?? "—")}</strong><br />
-                  <span class="muted">${esc(e.line.name ?? "")}</span></td>
-                <td class="muted">${e.suppliers.map((s) => esc(s)).join(" · ")}</td>
-                <td class="num">${money(e.value)}</td>
-                <td><button class="btn small dec-open" data-item="${esc(uid)}"
-                      data-number="${esc(e.line.number ?? "")}" type="button">Compare</button></td>
-              </tr>`,
-            )
-            .join("")}
-        </tbody>
-      </table></div>
-      ${list.length > 40 ? `<p class="hint">Showing the 40 largest of ${qty(list.length)}.</p>` : ""}
-    </section>`;
+  if (!list.length) {
+    openModal(
+      "Decisions to make",
+      '<div class="notice ok">Every item has one supplier or a deliberate split. Nothing can be ordered twice.</div>',
+    );
+    return;
+  }
 
-  el.querySelectorAll(".dec-open").forEach((b) =>
-    b.addEventListener("click", () => openSupplierCompare(b.dataset.item, b.dataset.number)),
+  const pages = Math.max(1, Math.ceil(list.length / DECISIONS_PER_PAGE));
+  decisionPage = Math.min(Math.max(decisionPage, 1), pages);
+  const from = (decisionPage - 1) * DECISIONS_PER_PAGE;
+  const slice = list.slice(from, from + DECISIONS_PER_PAGE);
+  const totalAtStake = list.reduce((a, [, e]) => a + e.value, 0);
+
+  openModal(
+    `${qty(list.length)} sourcing decision${list.length === 1 ? "" : "s"}`,
+    `<p class="hint">Each of these is available from more than one supplier. Until one is chosen —
+     or a split recorded — it can be ordered twice. Ranked by what is at stake, so the costly
+     mistakes are settled first. <strong>${money(totalAtStake)}</strong> in total.</p>
+     <div class="table-wrap"><table>
+       <thead><tr><th>Item</th><th>Available from</th><th class="num">At stake</th><th></th></tr></thead>
+       <tbody>
+         ${slice
+           .map(
+             ([uid, e]) => `<tr>
+               <td><strong>${esc(e.line.number ?? "—")}</strong><br />
+                 <span class="muted">${esc(e.line.name ?? "")}</span></td>
+               <td class="muted">${e.suppliers.map((x) => esc(x)).join(" · ")}</td>
+               <td class="num">${money(e.value)}</td>
+               <td><button class="btn small dec-open" data-item="${esc(uid)}"
+                     data-number="${esc(e.line.number ?? "")}" type="button">Compare</button></td>
+             </tr>`,
+           )
+           .join("")}
+       </tbody>
+     </table></div>
+     <div class="modal-pager">
+       <button class="btn small" id="dec-prev" type="button" ${decisionPage === 1 ? "disabled" : ""}>Previous</button>
+       <span class="muted">${from + 1}–${Math.min(from + DECISIONS_PER_PAGE, list.length)} of ${qty(list.length)}</span>
+       <button class="btn small" id="dec-next" type="button" ${decisionPage === pages ? "disabled" : ""}>Next</button>
+     </div>`,
   );
-  el.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  document.querySelectorAll(".dec-open").forEach((b) =>
+    b.addEventListener("click", () => {
+      closeModal();
+      openSupplierCompare(b.dataset.item, b.dataset.number);
+    }),
+  );
+  document.getElementById("dec-prev")?.addEventListener("click", () => {
+    decisionPage -= 1;
+    drawDecisionModal();
+  });
+  document.getElementById("dec-next")?.addEventListener("click", () => {
+    decisionPage += 1;
+    drawDecisionModal();
+  });
 }
 
 /* ---------- reusable side drawer ---------- */
@@ -3750,19 +3846,23 @@ async function afterCartDecision(itemUid) {
   const at = decisionQueue.indexOf(itemUid);
   decisionQueue = decisionQueue.filter((u) => u !== itemUid);
   drawCart();
-  if (document.getElementById("cart-decision-list")?.innerHTML) showCartDecisions();
 
   const next = decisionQueue[at] ?? decisionQueue[0];
   if (next) {
     openSupplierCompare(next, null);
-  } else {
-    closeDrawer();
-    if (decisionQueue.length === 0 && cartData.unresolvedDuplicates === 0) {
-      const el = document.getElementById("cart-decision-list");
-      if (el)
-        el.innerHTML =
-          '<div class="notice ok">Every sourcing decision is made. The order sheets will export without duplicate warnings.</div>';
-    }
+    return;
+  }
+  // Queue exhausted. Say so plainly rather than just closing, so finishing a
+  // run of decisions feels finished.
+  closeDrawer();
+  if (cartData.unresolvedDuplicates === 0) {
+    openModal(
+      "All decided",
+      `<div class="notice ok">Every sourcing decision is made. The order sheets will export
+       with no duplicate warnings.</div>
+       <p class="hint">Any of these can still be changed — the Decided list on the purchasing
+       page has an Undo against each one.</p>`,
+    );
   }
 }
 
@@ -3801,3 +3901,30 @@ function suppliersCsvUrl() {
   const key = accessKey();
   return `/api/insights/suppliers.csv${key ? `?key=${encodeURIComponent(key)}` : ""}`;
 }
+
+/* ---------- modal ---------- */
+
+function openModal(title, html) {
+  const b = document.getElementById("modal-backdrop");
+  document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-body").innerHTML = html;
+  b.hidden = false;
+  document.body.classList.add("modal-open");
+  document.getElementById("modal-close").focus();
+}
+
+function closeModal() {
+  const b = document.getElementById("modal-backdrop");
+  if (!b) return;
+  b.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+document.getElementById("modal-close")?.addEventListener("click", closeModal);
+document.getElementById("modal-backdrop")?.addEventListener("click", (e) => {
+  // Click the backdrop to dismiss, but not a click inside the dialog itself.
+  if (e.target.id === "modal-backdrop") closeModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeModal();
+});

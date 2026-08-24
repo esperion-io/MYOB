@@ -689,7 +689,7 @@ tr.expand-row:hover > td { background: #fbf9f6; }
 .form-row input[type="date"] {
   font: inherit; padding: 0.5rem 0.6rem;
   border: 1px solid var(--line); border-radius: 6px;
-  background: var(--surface); color: var(--ink); width: 100%;
+  background: var(--panel); color: var(--ink); width: 100%;
 }
 #count-bulk { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; resize: vertical; }
 .count-form .btn { justify-self: start; }
@@ -708,18 +708,18 @@ tr.expand-row:hover > td { background: #fbf9f6; }
 .ledger-head > div {
   display: grid; gap: 0.15rem;
   padding: 0.7rem 0.85rem; border: 1px solid var(--line); border-radius: 8px;
-  background: var(--surface-2, var(--surface));
+  background: var(--paper);
 }
 .ledger-head .k-value { font-size: 1.25rem; font-weight: 650; font-variant-numeric: tabular-nums; }
 .ledger-head .muted { font-size: 0.78rem; }
-tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weight: 600; }
+tr.ledger-anchor td { background: var(--paper); font-weight: 600; }
 
 .picker-row {
   display: block; width: 100%; text-align: left; font: inherit;
   padding: 0.45rem 0.6rem; border: 0; border-bottom: 1px solid var(--line);
   background: none; color: inherit; cursor: pointer;
 }
-.picker-row:hover, .picker-row:focus-visible { background: var(--surface-2, rgba(0,0,0,0.04)); }
+.picker-row:hover, .picker-row:focus-visible { background: var(--paper); }
 
 /* ---------- P3: as-at date vs rolling window ----------
    The two controls are styled differently on purpose. They are not
@@ -729,7 +729,7 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
 .controls {
   display: flex; flex-wrap: wrap; gap: 1rem 1.6rem; align-items: flex-start;
   padding: 0.85rem 1.6rem; border-bottom: 1px solid var(--line);
-  background: var(--surface);
+  background: var(--panel);
 }
 .controls[hidden] { display: none; }
 .control { display: grid; grid-template-columns: auto auto auto; gap: 0.4rem 0.5rem; align-items: center; }
@@ -740,7 +740,7 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
 .control input[type="date"], .control select {
   font: inherit; padding: 0.35rem 0.5rem;
   border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--ink);
+  background: var(--panel); color: var(--ink);
 }
 .control-note { grid-column: 1 / -1; margin: 0; font-size: 0.72rem; color: var(--muted); }
 /* A moment: square edges, solid left rule. */
@@ -758,7 +758,7 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
   display: inline-flex; align-items: center; gap: 0.3rem;
   padding: 0.15rem 0.5rem; margin: 0 0.35rem 0.35rem 0;
   border: 1px solid var(--line); border-radius: 999px;
-  background: var(--surface); font-size: 0.82rem;
+  background: var(--panel); font-size: 0.82rem;
 }
 .tag-chip a { text-decoration: none; }
 .tag-chip a:hover { text-decoration: underline; }
@@ -803,7 +803,7 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
   width: 100%; padding: 0.85rem 1.1rem; border: 0; background: none;
   font: inherit; color: inherit; cursor: pointer; text-align: left;
 }
-.cart-head:hover { background: var(--surface-2, rgba(0,0,0,0.02)); }
+.cart-head:hover { background: var(--paper); }
 .cart-head:focus-visible { outline: 2px solid var(--brand, #b8622a); outline-offset: -2px; }
 .cart-head-main { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; min-width: 0; }
 .cart-head-stats {
@@ -816,7 +816,7 @@ tr.ledger-anchor td { background: var(--surface-2, rgba(0,0,0,0.03)); font-weigh
 .cart-qty {
   font: inherit; width: 7rem; text-align: right; padding: 0.25rem 0.4rem;
   border: 1px solid var(--line); border-radius: 5px;
-  background: var(--bg); color: var(--ink); font-variant-numeric: tabular-nums;
+  background: var(--panel); color: var(--ink); font-variant-numeric: tabular-nums;
 }
 .cart-why { max-width: 30rem; }
 /* The reasoning has to be scannable at a glance, not a paragraph to read. */
@@ -837,7 +837,7 @@ button.badge:hover { filter: brightness(0.95); }
 .cmp-qty {
   font: inherit; width: 6rem; text-align: right; padding: 0.2rem 0.35rem;
   border: 1px solid var(--line); border-radius: 5px;
-  background: var(--bg); color: var(--ink);
+  background: var(--panel); color: var(--ink);
 }
 .compare-actions { margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--line); }
 body.drawer-open { overflow: hidden; }
@@ -970,3 +970,39 @@ button.fact.fact-link:hover { border-color: var(--brand); }
   border-bottom: 1px solid var(--line); font-size: 0.82rem;
 }
 .cart-decided table { font-size: 0.85rem; }
+
+/* Split arithmetic, shown live so a missing or doubled quantity is obvious
+   before it is recorded rather than after it reaches a supplier. */
+.split-tally {
+  display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem; align-items: baseline;
+  margin: 0 0 0.7rem; padding: 0.55rem 0.75rem; border-radius: 6px;
+  font-size: 0.85rem; border: 1px solid var(--line); background: var(--panel);
+}
+.split-tally.is-ok { border-color: #2c6349; }
+.split-tally.is-ok .split-diff { color: #2c6349; font-weight: 600; }
+.split-tally.is-warn { border-color: #8a6210; }
+.split-tally.is-warn .split-diff { color: #8a6210; font-weight: 600; }
+
+/* ---------- modal ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center; padding: 1.5rem;
+  background: rgba(20, 24, 27, 0.45);
+}
+.modal-backdrop[hidden] { display: none; }
+.modal {
+  width: min(56rem, 100%); max-height: 86vh; display: flex; flex-direction: column;
+  background: var(--panel); border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.28);
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: 0.9rem 1.2rem; border-bottom: 1px solid var(--line);
+}
+.modal-head h2 { margin: 0; font-size: 1rem; }
+.modal-body { padding: 1.1rem 1.2rem; overflow-y: auto; }
+.modal-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.8rem; margin-top: 0.9rem; padding-top: 0.8rem; border-top: 1px solid var(--line);
+}
+body.modal-open { overflow: hidden; }
