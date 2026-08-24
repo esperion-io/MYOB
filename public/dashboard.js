@@ -38,7 +38,7 @@ const TERMS = {
   weekly_demand: {
     label: "Weekly demand",
     short: "Average units used per week — direct sales plus components consumed by builds.",
-    long: "Rate of direct sales plus components consumed by MYOB build transactions, measured over the window chosen at the top of the page and up to the date chosen beside it. If nothing moved inside that window but did in the wider look-back (twice the window), the slower rate is used and the item is tagged a slow mover.",
+    long: "Units sold plus units used building other products, averaged per week over the period set at the top of the page (6 months by default) and up to the date set beside it. If an item did not move at all in that period but did earlier, we fall back to a longer period so it still gets a rate — those items are tagged \"slow mover\".",
   },
   cover: {
     label: "Cover",
@@ -93,7 +93,7 @@ const FLAG_HELP = {
   stock_no_cost: "Stock is on hand but its average cost is zero, so any value or excess figure understates reality.",
   inactive_with_stock: "The item is marked inactive in MYOB but still holds stock.",
   no_supplier: "The item has demand but no supplier recorded, in MYOB or here, and none in purchase history.",
-  slow_mover: "Nothing moved inside the selected window, so the slower rate from the wider look-back is used for demand and cover.",
+  slow_mover: "This item has not sold or been used at all in the last 6 months, but it did earlier in the year — so its demand is worked out over the longer period instead, giving a slower rate.",
   understated_demand: "Packs holding this item sold without being rebuilt, so the demand and cover figures shown for it are lower than the real usage. Open the item to see which packs and how many units.",
   min_above_demand: "This item is both overstocked against demand and suggested for reorder, because the MYOB minimum level sits far above what demand justifies — worth reviewing the minimum itself.",
 };
@@ -943,6 +943,24 @@ async function renderInventory() {
     </div>
     <div id="inv-facet-note" class="hint" hidden></div>
     <div id="inv-table"><p class="loading">Loading items…</p></div>`;
+
+  // Export what is on screen — the filtered view is the one they built.
+  const head = main.querySelector(".page-head");
+  if (head) {
+    const actions = head.querySelector(".head-actions") ?? (() => {
+      const el = document.createElement("div");
+      el.className = "head-actions";
+      head.appendChild(el);
+      return el;
+    })();
+    const a = document.createElement("a");
+    a.className = "btn";
+    a.download = "";
+    a.textContent = "Export this list";
+    a.title = "Every item currently shown, with the filters applied";
+    a.href = inventoryCsvUrl();
+    actions.appendChild(a);
+  }
 
   const q = document.getElementById("inv-q");
   const filter = document.getElementById("inv-filter");
@@ -2285,7 +2303,10 @@ async function renderSuppliers() {
         <p class="page-sub">MYOB supplier facts with Allied-managed labels: region, lead time, notes.
         Labels live in this platform only — never written to MYOB — and drive the region split on
         Overview, Inventory and Purchasing.</p>
+        <div class="head-actions">
+        <a class="btn" href="${suppliersCsvUrl()}" download>Export suppliers</a>
       </div>
+    </div>
     </div>
     <div class="toolbar">
       <input type="search" id="sup-q" placeholder="Search name, city, country, region…" value="${esc(supState.q)}" />
@@ -2602,8 +2623,22 @@ async function renderData() {
         <dd>Negative lines on MYOB Inventory Build transactions — stock used to assemble finished products.
         Separate movements from sales, so combining them does not double count.</dd>
         <dt>Weekly demand / cover</dt>
-        <dd>Measured over the window selected at the top of the page, ending on the selected date; items with no activity inside it fall back to the wider look-back (twice the window) and are flagged "slow mover".
-        Cover = free stock ÷ weekly demand.</dd>
+        <dd>Weekly demand is units sold plus units used building other products, averaged per week over the
+        period set at the top of the page — 6 months by default — ending on the date set beside it.
+        Cover = free stock &divide; weekly demand: how many weeks the stock on the shelf would last.</dd>
+        <dt>How we spot a slow mover</dt>
+        <dd>An item is tagged <strong>slow mover</strong> when it has not sold or been used <em>at all</em> in
+        the last 6 months, but it did move earlier in the year. Rather than show it as having no demand, we
+        work its rate out over the longer period instead, which naturally gives a slower one.
+        <br /><br />
+        <strong>For example:</strong> 60 units went out over the past year, but nothing since February. Left on
+        the 6-month view the item looks dead and would never be reordered. Spread over the year it comes out at
+        roughly 1 a week — so 200 on the shelf reads as about 4 years of cover, which is the honest answer:
+        it still sells, just slowly, and you are carrying far too much of it.
+        <br /><br />
+        This is what stops the two mistakes at either end — treating a quiet item as finished and letting it run
+        out, or reordering it as if it were a fast seller. <strong>Dead stock</strong> is a slow mover that is
+        also carrying excess. Both periods shift if you change the setting at the top of the page.</dd>
         <dt>Product recipes</dt>
         <dd>MYOB's own Bill of Materials is read directly from the item master and covers auto-build products,
         which never appear as build transactions. Recipes are also derived from MYOB build transactions with a
@@ -3741,4 +3776,28 @@ function buildDecisionQueue() {
       byItem.set(l.itemUid, v);
     }
   return [...byItem.entries()].sort((a, b) => b[1] - a[1]).map(([uid]) => uid);
+}
+
+/** Inventory export carries the same filters as the view on screen. */
+function inventoryCsvUrl() {
+  const p = new URLSearchParams({
+    q: invState.q,
+    filter: invState.filter,
+    region: invState.region,
+    sort: invState.sort,
+    asAt: windowState.asAt,
+    windowMonths: String(windowState.windowMonths),
+  });
+  if (invState.dir) p.set("dir", invState.dir);
+  if (invState.productType) p.set("productType", invState.productType);
+  if (invState.productFinish) p.set("productFinish", invState.productFinish);
+  if (invState.tag) p.set("tag", invState.tag);
+  const key = accessKey();
+  if (key) p.set("key", key);
+  return `/api/insights/items.csv?${p}`;
+}
+
+function suppliersCsvUrl() {
+  const key = accessKey();
+  return `/api/insights/suppliers.csv${key ? `?key=${encodeURIComponent(key)}` : ""}`;
 }

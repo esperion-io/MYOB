@@ -24,8 +24,6 @@ import {
   listItems,
   overview,
   productsList,
-  purchasing,
-  purchasingCsv,
   relationships,
   removeItemSupplier,
   removeUserBom,
@@ -40,6 +38,8 @@ import {
   suggestSuppliersFromHistory,
   applySupplierRegions,
   suggestSupplierRegions,
+  itemsCsv,
+  suppliersCsv,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 import {
@@ -218,31 +218,6 @@ insightsRouter.get("/products", async (req, res) => {
         ...windowParams(req),
       }),
     );
-  } catch (err) {
-    send500(res, err);
-  }
-});
-
-insightsRouter.get("/purchasing", async (req, res) => {
-  if (!requireDb(res)) return;
-  try {
-    res.json(await purchasing(windowParams(req)));
-  } catch (err) {
-    send500(res, err);
-  }
-});
-
-insightsRouter.get("/purchasing.csv", async (_req, res) => {
-  if (!requireDb(res)) return;
-  try {
-    const data = await purchasing();
-    res
-      .type("text/csv")
-      .set(
-        "Content-Disposition",
-        `attachment; filename="allied-purchasing-${businessToday()}.csv"`,
-      )
-      .send(purchasingCsv(data));
   } catch (err) {
     send500(res, err);
   }
@@ -820,6 +795,43 @@ insightsRouter.post("/cart/undo", async (req, res) => {
     }
     await undoCartDecision(itemUid);
     res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** The inventory list as a spreadsheet, honouring the filters in the URL. */
+insightsRouter.get("/items.csv", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const csv = await itemsCsv({
+      q: typeof req.query.q === "string" ? req.query.q : undefined,
+      filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
+      region: typeof req.query.region === "string" ? req.query.region : undefined,
+      sort: typeof req.query.sort === "string" ? req.query.sort : undefined,
+      dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
+      productType: typeof req.query.productType === "string" ? req.query.productType : undefined,
+      productFinish: typeof req.query.productFinish === "string" ? req.query.productFinish : undefined,
+      tag: typeof req.query.tag === "string" ? req.query.tag : undefined,
+      ...windowParams(req),
+    });
+    res
+      .type("text/csv; charset=utf-8")
+      .setHeader("Content-Disposition", `attachment; filename="allied-inventory-${businessToday()}.csv"`)
+      .send(csv);
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** The supplier list as a spreadsheet, with measured lead times. */
+insightsRouter.get("/suppliers.csv", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res
+      .type("text/csv; charset=utf-8")
+      .setHeader("Content-Disposition", `attachment; filename="allied-suppliers-${businessToday()}.csv"`)
+      .send(await suppliersCsv());
   } catch (err) {
     send500(res, err);
   }

@@ -1366,83 +1366,6 @@ async function itemsWithoutRecipe(q: string) {
   return result.rows;
 }
 
-export async function purchasing(opts?: Partial<DemandWindow>) {
-  const win = resolveWindow(opts);
-  const items = await computedItems(win);
-  const rows = items
-    .filter((i) => i.suggestion != null || i.flags.includes("below_min"))
-    .sort((a, b) => b.risk.score - a.risk.score);
-
-  const groups = new Map<
-    string,
-    { supplier: string; region: string | null; regionSource: string | null; items: ItemComputed[] }
-  >();
-  for (const item of rows) {
-    const key = item.supplierName ?? "No known supplier";
-    if (!groups.has(key))
-      groups.set(key, {
-        supplier: key,
-        region: item.supplierRegion,
-        regionSource: item.supplierRegionSource,
-        items: [],
-      });
-    groups.get(key)!.items.push(item);
-  }
-
-  return {
-    generatedAt: new Date().toISOString(),
-    targetCoverWeeks: config.insights.targetCoverWeeks,
-    totalItems: rows.length,
-    suppliers: [...groups.values()].map((g) => ({
-      supplier: g.supplier,
-      region: g.region,
-      regionSource: g.regionSource,
-      itemCount: g.items.length,
-      estimatedCost: g.items.reduce(
-        (s, i) => s + (i.suggestion?.qty ?? 0) * (i.averageCost ?? 0),
-        0,
-      ),
-      items: g.items,
-    })),
-  };
-}
-
-export function purchasingCsv(data: Awaited<ReturnType<typeof purchasing>>): string {
-  const esc = (v: unknown): string => {
-    const s = v == null ? "" : String(v);
-    return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
-  };
-  const lines = [
-    [
-      "Supplier", "Supplier source", "Item number", "Item name", "Supplier item no",
-      "On hand", "Committed", "Free stock", "On order (incoming)", "Min level",
-      "Average cost", "Stock value (on hand x average cost)",
-      "Weekly demand", "Demand basis", "Cover (weeks)",
-      "Potential pack demand 90d (not in totals)",
-      "Suggested order qty", "Est cost", "Risk score", "Flags",
-    ].join(","),
-  ];
-  for (const g of data.suppliers) {
-    for (const i of g.items) {
-      lines.push(
-        [
-          esc(g.supplier),
-          i.supplierSource === "inferred" ? "inferred from purchases" : i.supplierSource === "myob" ? "MYOB primary" : "",
-          esc(i.number), esc(i.name), esc(i.supplierItemNumber),
-          i.qtyOnHand ?? "", i.qtyCommitted ?? "", i.qtyFreeStock ?? "", i.incomingQty,
-          i.minLevel ?? "",
-          i.averageCost ?? "", i.currentValue == null ? "" : i.currentValue.toFixed(2),
-          i.demand.weekly, i.demand.basis,
-          i.coverWeeks ?? "", i.potential.qtyWindow || "",
-          i.suggestion?.qty ?? 0,
-          ((i.suggestion?.qty ?? 0) * (i.averageCost ?? 0)).toFixed(2),
-          i.risk.score, esc(i.flags.join(" ")),
-        ].join(","),
-      );
-    }
-  }
-  return lines.join("\n");
-}
 
 export async function dataStatus() {
   await ensureInsightsSchema();
@@ -2509,4 +2432,90 @@ export async function applySupplierRegions(): Promise<{
     skippedNoSignal: suggestions.filter((s) => !s.region && !s.conflict).length,
     skippedExisting: confident.length - (res.rowCount ?? 0),
   };
+}
+
+/**
+ * The inventory list as a spreadsheet, honouring whatever filters are applied.
+ *
+ * The brief asks for an export on every view this work touches, because Allied's
+ * whole existing workflow lives in spreadsheets — a number they cannot get out
+ * of the tool is a number they will go back to Excel to recreate. Exporting the
+ * *filtered* list matters: "stainless washers below minimum" is the view they
+ * built, so that is what should land in the file.
+ */
+export async function itemsCsv(params: ListParams): Promise<string> {
+  const data = await listItems({ ...params, page: 1, pageSize: 100000 });
+  const esc = (v: unknown): string => {
+    if (v == null) return "";
+    const s = typeof v === "number" ? String(Number(v.toFixed(4))) : String(v);
+    return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+  };
+  const header = [
+    "Item number", "Item name", "Product type", "Product finish", "Tags",
+    "Supplier", "Supplier source", "Region",
+    "On hand", "Committed", "Free stock", "On order", "Available",
+    "Average cost", "Stock value", "Min level",
+    "Weekly demand", "Demand window (months)", "Demand basis", "Cover (weeks)",
+    "Suggested order qty", "Risk score", "Flags",
+    "Reference point", "Reference date", "MYOB on hand", "Difference vs MYOB",
+  ];
+  const lines = [header.join(",")];
+  for (const i of data.items) {
+    lines.push([
+      esc(i.number), esc(i.name), esc(i.productType), esc(i.productFinish),
+      esc(i.tags.join(" ")),
+      esc(i.supplierName), esc(i.supplierSource), esc(i.supplierRegion),
+      esc(i.qtyOnHand), esc(i.qtyCommitted), esc(i.qtyFreeStock),
+      esc(i.qtyOnOrder), esc(i.qtyAvailable),
+      esc(i.averageCost), esc(i.currentValue), esc(i.minLevel),
+      esc(i.demand.weekly), esc(i.demand.windowMonths), esc(i.demand.basis),
+      esc(i.coverWeeks), esc(i.suggestion?.qty ?? 0), esc(i.risk.score),
+      esc(i.flags.join(" ")),
+      esc(i.anchorSource), esc(i.anchorDate), esc(i.myobOnHand), esc(i.divergence),
+    ].join(","));
+  }
+  return `﻿${lines.join("\r\n")}\r\n`;
+}
+
+/** The supplier list as a spreadsheet, with the measured lead time. */
+export async function suppliersCsv(): Promise<string> {
+  await ensureInsightsSchema();
+  const r = await getPool().query(
+    `SELECT s.name, s.display_id, s.city, s.country, s.email, s.phone,
+            m.region, l.median_lead_days, l.orders_measured, l.same_day_excluded,
+            COALESCE(b.bills, 0)::int AS bills,
+            COALESCE(b.value, 0)::float8 AS purchase_value,
+            COALESCE(pi.items, 0)::int AS items_tagged,
+            (SELECT COUNT(*)::int FROM myob_items i WHERE i.primary_supplier_uid = s.uid) AS items_myob_primary
+     FROM myob_suppliers s
+     LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
+     LEFT JOIN supplier_lead_time l ON l.supplier_uid = s.uid
+     LEFT JOIN (SELECT supplier_uid, COUNT(*)::int AS bills, SUM(COALESCE(total,0)) AS value
+                FROM myob_purchase_bills WHERE supplier_uid IS NOT NULL GROUP BY 1) b
+       ON b.supplier_uid = s.uid
+     LEFT JOIN (SELECT supplier_uid, COUNT(*)::int AS items
+                FROM platform_item_suppliers GROUP BY 1) pi ON pi.supplier_uid = s.uid
+     ORDER BY COALESCE(b.value, 0) DESC`,
+  );
+  const esc = (v: unknown): string => {
+    if (v == null) return "";
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+  };
+  const header = [
+    "Supplier", "MYOB ID", "City", "Country", "Region", "Email", "Phone",
+    "Lead time (days)", "Orders measured", "Same-day ignored",
+    "Bills", "Purchase value", "Items tagged here", "Items where MYOB primary",
+  ];
+  const lines = [header.join(",")];
+  for (const s of r.rows) {
+    lines.push([
+      esc(s.name), esc(s.display_id), esc(s.city), esc(s.country), esc(s.region),
+      esc(s.email), esc(s.phone),
+      esc(s.median_lead_days), esc(s.orders_measured), esc(s.same_day_excluded),
+      esc(s.bills), esc(Number(s.purchase_value).toFixed(2)),
+      esc(s.items_tagged), esc(s.items_myob_primary),
+    ].join(","));
+  }
+  return `﻿${lines.join("\r\n")}\r\n`;
 }
