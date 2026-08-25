@@ -139,7 +139,7 @@ const INVENTORY_PRESETS = [
   { id: "attention", label: "Needs attention", state: { filter: "attention", sort: "risk", dir: "desc" } },
   { id: "reorder", label: "Reorder now", state: { filter: "suggested", sort: "cover", dir: "asc" } },
   { id: "slow", label: "Slow movers", state: { filter: "slow_mover", sort: "value", dir: "desc" } },
-  { id: "dead", label: "Dead stock", state: { filter: "dead_stock", sort: "excess", dir: "desc" } },
+  { id: "dead", label: "Dead stock", state: { filter: "dead_stock", sort: "value", dir: "desc" } },
   { id: "committed", label: "Most committed", state: { filter: "committed", sort: "committed", dir: "desc" } },
   { id: "china", label: "From China", state: { region: "China", sort: "value", dir: "desc" } },
 ];
@@ -255,11 +255,6 @@ function riskPill(score) {
 
 function flagChips(flags) {
   if (!flags?.length) return "";
-  // Dead stock already means "slow mover, and overstocked with it", so showing
-  // both reads as two problems where there is one. The slow_mover flag stays
-  // in the data — the Slow movers view still finds these items — it is only
-  // the duplicate chip that is dropped.
-  if (flags.includes("dead_stock")) flags = flags.filter((f) => f !== "slow_mover");
   return `<span class="chips">${flags
     .map((f) => {
       const [label, tone] = FLAG_LABELS[f] ?? [f, "idle"];
@@ -424,19 +419,22 @@ function renderHelp() {
         .join("")}
     </dl>
     <h3 class="sub-h">Slow mover or dead stock?</h3>
-    <p class="drawer-note">They sound alike and mean different things. Every dead-stock item is a slow mover;
-    what makes it dead stock is how much of it you are holding.</p>
+    <p class="drawer-note">They sound alike but they are different questions. A slow mover is still selling.
+    Dead stock has stopped.</p>
     <table class="compare">
       <tbody>
         <tr><th></th><th><span class="badge idle">Slow mover</span></th><th><span class="badge fail">Dead stock</span></th></tr>
-        <tr><td>How it sells</td><td>Quietly &mdash; nothing in 6 months, but it did earlier</td><td>The same &mdash; quietly</td></tr>
-        <tr><td>How much you hold</td><td>Could be any amount</td><td>Far more than the demand justifies</td></tr>
-        <tr><td>What it means</td><td>It still sells. Order it, just less often</td><td>Money is stuck on the shelf</td></tr>
-        <tr><td>What to do</td><td>Nothing urgent &mdash; watch it</td><td>Stop reordering, use it up or clear it</td></tr>
+        <tr><td>The test</td><td>Nothing lately, but it did move inside the period you are looking at</td><td>Nothing at all in 12 months, and there is stock on the shelf</td></tr>
+        <tr><td>Is it selling?</td><td>Yes &mdash; slowly</td><td>No</td></tr>
+        <tr><td>What it means</td><td>Order it, just less often</td><td>Money sitting still</td></tr>
+        <tr><td>What to do</td><td>Nothing urgent &mdash; watch it</td><td>Use it up, clear it, or write it off</td></tr>
       </tbody>
     </table>
-    <p class="drawer-note">An item tagged <span class="badge fail">Dead stock</span> is not tagged
-    <span class="badge idle">Slow mover</span> as well &mdash; the stronger tag covers both.</p>
+    <p class="drawer-note">The two lists never overlap, so an item is in one or the other, never both.
+    Dead stock is judged over a year at minimum &mdash; a narrow view never makes an ordinary item look dead.
+    Look back <em>further</em> than a year and the longer period is used instead, so anything that moved inside
+    it counts as a slow mover: an item last sold 14 months ago is dead stock on a 6-month view, and a slow
+    mover once you look back 18.</p>
     <p class="drawer-note">Hover any column heading or tag for the same explanation without opening this panel.</p>`;
   body.dataset.filled = "1";
 }
@@ -870,7 +868,9 @@ async function renderOverview() {
     <section class="panel">
       <h2>Largest stock adjustments — last 30 days</h2>
       <p class="hint">Write-offs, stocktake corrections and reversals ranked by value. These are MYOB movements that
-      change stock without a sale, purchase or build, so they are worth a second look when a number looks wrong.</p>
+      change stock without a sale, purchase or build, so they are worth a second look when a number looks wrong.
+      Each row is one adjustment document netted across its lines for that item, so a move between locations that
+      gives the stock straight back does not appear as a write-off.</p>
       <div class="table-wrap"><table>
         <thead><tr><th>Item</th><th>Doc</th><th>Date</th><th class="num">Qty ±</th><th class="num">Value</th><th>Memo</th></tr></thead>
         <tbody>
@@ -882,9 +882,13 @@ async function renderOverview() {
                       <td><strong>${esc(a.item_number ?? "—")}</strong><br /><span class="muted">${esc((a.item_name ?? "").slice(0, 40))}</span></td>
                       <td>${esc(a.number ?? "—")}</td>
                       <td>${dateFmt(a.date)}</td>
-                      <td class="num ${a.qty < 0 ? "neg" : ""}">${a.qty > 0 ? "+" : ""}${qty(a.qty)}</td>
+                      <td class="num ${a.qty < 0 ? "neg" : ""}">${a.qty > 0 ? "+" : ""}${qty(a.qty)}${
+                        a.lines > 1
+                          ? `<br /><span class="muted" style="font-size:0.62rem">net of ${qty(a.lines)} lines</span>`
+                          : ""
+                      }</td>
                       <td class="num">${money(a.value)}</td>
-                      <td class="muted">${esc((a.line_memo ?? a.doc_memo ?? "").slice(0, 40))}</td>
+                      <td class="muted">${esc((a.doc_memo ?? a.line_memo ?? "").slice(0, 40))}</td>
                     </tr>`,
                   )
                   .join("")
@@ -2667,17 +2671,22 @@ async function renderData() {
         out, or reordering it as if it were a fast seller. Both periods shift if you change the setting at the
         top of the page.</dd>
         <dt>Slow mover vs dead stock</dt>
-        <dd>A <strong>slow mover</strong> is about how an item <em>sells</em>: quietly. It is not a problem on
-        its own — plenty of items are meant to sell slowly, and the right response is usually to order them
-        less often.
+        <dd>A <strong>slow mover</strong> is still selling — just not lately. Nothing has gone out recently,
+        but it did move inside the period you are looking at. That is not a problem on its own: plenty of items
+        are meant to sell slowly, and the right response is usually to order them less often.
         <br /><br />
-        <strong>Dead stock</strong> is a slow mover that is <em>also</em> badly overstocked: barely selling, and
-        holding more than six months of cover with real money in it. That combination is the problem, because
-        the stock is not going to sell through on its own. Every dead-stock item is a slow mover; most slow
-        movers are not dead stock.
+        <strong>Dead stock</strong> has stopped. There is stock on the shelf and <em>nothing</em> has moved in
+        12 months — not one sale, and not one build using it. No thresholds and no judgement calls: it either
+        moved or it did not.
         <br /><br />
-        Because the stronger tag covers both, an item shows either <strong>Slow mover</strong> or
-        <strong>Dead stock</strong> — never the two together.</dd>
+        <strong>The period it is judged over is a year at minimum.</strong> Narrowing the view to 3 or 6 months
+        never makes an ordinary item look dead — the test still reaches back a full year. Widening it past a
+        year does change things, and deliberately so: if you look back 18 months, anything that moved in those
+        18 months is a slow mover rather than dead stock, because you can see that movement on screen. An item
+        last sold 14 months ago is dead stock on the 6-month view and a slow mover on the 18-month view.
+        <br /><br />
+        The as-at date moves it too: pick an earlier date and the test runs over the year up to that date. An
+        item is only ever one of the two — the lists never overlap.</dd>
         <dt>Product recipes</dt>
         <dd>MYOB's own Bill of Materials is read directly from the item master and covers auto-build products,
         which never appear as build transactions. Recipes are also derived from MYOB build transactions with a

@@ -92,10 +92,23 @@ function clampMonths(v: unknown, fallback: number): number {
   return Number.isFinite(n) && n >= 1 && n <= 60 ? n : fallback;
 }
 
+/**
+ * The floor for the dead-stock test: a year, or the window when it is wider.
+ *
+ * The floor stops a narrow view redefining the term — at a 3-month window,
+ * plenty of ordinary items have not moved, and none of them are dead. Above a
+ * year the window takes over instead, because the reader can see those older
+ * movements on screen and calling the item dead would contradict them.
+ *
+ * Safe as a FILTER over the long look-back because longMonths is floored at 12.
+ */
+const DEAD_STOCK_MONTHS = 12;
+
 const demandCte = (w: DemandWindow): string => `
   direct_demand AS (
     SELECT l.item_uid,
            COALESCE(SUM(l.qty) FILTER (WHERE i.date <= '${w.asAt}'::date AND i.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS direct_window,
+           COALESCE(SUM(l.qty) FILTER (WHERE i.date >= '${w.asAt}'::date - make_interval(months => ${DEAD_STOCK_MONTHS})), 0)::float8 AS direct_year,
            COALESCE(SUM(l.qty), 0)::float8 AS direct_long
     FROM myob_sale_invoice_lines l
     JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
@@ -105,6 +118,7 @@ const demandCte = (w: DemandWindow): string => `
   component_demand AS (
     SELECT bl.item_uid,
            COALESCE(SUM(-bl.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS comp_window,
+           COALESCE(SUM(-bl.qty) FILTER (WHERE b.date >= '${w.asAt}'::date - make_interval(months => ${DEAD_STOCK_MONTHS})), 0)::float8 AS comp_year,
            COALESCE(SUM(-bl.qty), 0)::float8 AS comp_long
     FROM myob_build_lines bl
     JOIN myob_builds b ON b.uid = bl.build_uid
@@ -239,8 +253,10 @@ const itemSelect = (w: DemandWindow): string => `
          sup.country AS supplier_country,
          sm.region AS supplier_region_override,
          COALESCE(dd.direct_window, 0) AS direct_window,
+         COALESCE(dd.direct_year, 0) AS direct_year,
          COALESCE(dd.direct_long, 0) AS direct_long,
          COALESCE(cd.comp_window, 0) AS comp_window,
+         COALESCE(cd.comp_year, 0) AS comp_year,
          COALESCE(cd.comp_long, 0) AS comp_long,
          COALESCE(inc.qty, 0) AS incoming_qty,
          COALESCE(u.parent_count, 0) AS parent_count,
@@ -432,9 +448,36 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     (row.inferred_supplier_uid as string) ??
     null;
   if (weekly > 0 && !supplierUid) flags.push("no_supplier");
-  // No sales inside the chosen window at all — the rate came from the wider
-  // look-back, so treat it as a slow mover rather than a current seller.
-  if (basis === "long") flags.push("slow_mover");
+
+  /*
+   * Slow mover and dead stock, decided together so an item can only ever be
+   * one of them.
+   *
+   * Dead stock is "nothing has moved at all" — no sales, no builds consuming
+   * it — over a year, or over the period being viewed when that is longer than
+   * a year. The longer-of rule is what makes it read naturally at wide windows:
+   * looking back 18 months at an item that last sold 14 months ago, the reader
+   * can see the sale in the period they chose, so calling it dead contradicts
+   * what is on screen. It is a slow mover there, and dead stock at a 6-month
+   * window where that sale is out of view.
+   *
+   * Stock on hand is required: an item nobody buys and that Allied does not
+   * hold is a dormant catalogue entry, not stock sitting still, and listing
+   * thousands of them would bury the ones with money in them.
+   */
+  const movedInYear = (n(row.direct_year) ?? 0) + (n(row.comp_year) ?? 0) > 0;
+  const movedInWindow = totalWindow > 0;
+  const movedInDeadPeriod =
+    win.windowMonths >= DEAD_STOCK_MONTHS ? movedInWindow : movedInYear;
+
+  if (!movedInDeadPeriod && (onHand ?? 0) > 0) {
+    flags.push("dead_stock");
+  } else if (basis === "long" || (movedInWindow && !movedInYear)) {
+    // Either the rate had to come from the wider look-back, or the only
+    // movement inside a wide window is older than a year. Both mean the same
+    // thing to the reader: still selling, just not lately.
+    flags.push("slow_mover");
+  }
   if (understatesMeasured) flags.push("understated_demand");
 
   const factors: { label: string; points: number }[] = [];
@@ -519,12 +562,6 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
   // Both numbers are right; the contradiction itself is the insight, so it is
   // flagged rather than resolved by suppressing one of them.
   if (excess && suggestion) flags.push("min_above_demand");
-
-  // Dead stock is the two problems together: barely selling AND holding far
-  // more than the demand justifies. Carried as its own flag rather than left
-  // as a filter-only concept, so the item itself says which of the two it is
-  // — "slow mover" alone still sells, "dead stock" has money stuck in it.
-  if (excess && flags.includes("slow_mover")) flags.push("dead_stock");
 
   return {
     uid: String(row.uid),
@@ -928,17 +965,28 @@ export async function overview(opts?: Partial<DemandWindow>) {
     // absolute value — the write-offs, stocktake corrections and reversals
     // worth a second look. Anchored to asAt so a historical view does not list
     // adjustments that had not happened yet.
+    //
+    // Netted per document and item, not listed line by line. A location move
+    // is one adjustment carrying a -30,000 line and six positive lines that
+    // give the same 30,000 back; ranking the lines separately put a -30,000
+    // "write-off" at the top of the table that no single movement on the item
+    // page matched. HAVING drops those net-zero moves entirely — nothing
+    // actually left the building.
     pool.query(`
-      SELECT a.number, a.date, a.memo AS doc_memo, al.memo AS line_memo,
-             al.qty::float8 AS qty,
+      SELECT a.number, a.date, a.memo AS doc_memo,
+             MIN(NULLIF(al.memo, '')) AS line_memo,
+             SUM(al.qty)::float8 AS qty,
+             COUNT(*)::int AS lines,
              i.uid, i.number AS item_number, i.name AS item_name,
-             (ABS(al.qty) * COALESCE(NULLIF(al.unit_cost, 0), i.average_cost, 0))::float8 AS value
+             (ABS(SUM(al.qty))
+              * COALESCE(AVG(NULLIF(al.unit_cost, 0)), i.average_cost, 0))::float8 AS value
       FROM myob_adjustment_lines al
       JOIN myob_adjustments a ON a.uid = al.adjustment_uid
       JOIN myob_items i ON i.uid = al.item_uid
       WHERE a.date <= '${win.asAt}'::date
         AND a.date >= '${win.asAt}'::date - INTERVAL '30 days'
-        AND al.qty <> 0
+      GROUP BY a.uid, a.number, a.date, a.memo, i.uid, i.number, i.name, i.average_cost
+      HAVING ABS(SUM(al.qty)) > 1e-6
       ORDER BY value DESC
       LIMIT 10
     `),
@@ -1177,26 +1225,37 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
       ),
       // Capped at the selected date: movements after it would contradict the
       // on-hand figure in the header, which is reconstructed to that date.
+      //
+      // doc_uid and seq are sort keys, not display fields. Ordering by date
+      // alone left same-day lines in whatever order the planner produced, so
+      // the seven lines of one location move scattered through the list and
+      // its -30,000 line could fall below the fold while its positive halves
+      // sat at the top. Keeping a document's lines adjacent and in MYOB's own
+      // line order makes a move read as a move.
       pool.query(
-        `SELECT * FROM (
+        `SELECT kind, doc, date, delta, counterparty, description FROM (
            SELECT 'sale' AS kind, i.number AS doc, i.date, -l.qty::float8 AS delta,
-                  i.customer_name AS counterparty, l.description
+                  i.customer_name AS counterparty, l.description,
+                  i.uid AS doc_uid, l.idx AS seq
            FROM myob_sale_invoice_lines l JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
            WHERE l.item_uid = $1 AND i.date <= '${win.asAt}'::date
            UNION ALL
            SELECT 'purchase', b.number, b.date, l.qty::float8,
-                  b.supplier_name, l.description
+                  b.supplier_name, l.description, b.uid, l.idx
            FROM myob_purchase_bill_lines l JOIN myob_purchase_bills b ON b.uid = l.bill_uid
            WHERE l.item_uid = $1 AND b.date <= '${win.asAt}'::date
            UNION ALL
-           SELECT 'build', b.number, b.date, bl.qty::float8, b.memo, NULL
+           SELECT 'build', b.number, b.date, bl.qty::float8, b.memo, NULL, b.uid, bl.idx
            FROM myob_build_lines bl JOIN myob_builds b ON b.uid = bl.build_uid
            WHERE bl.item_uid = $1 AND b.date <= '${win.asAt}'::date
            UNION ALL
-           SELECT 'adjustment', a.number, a.date, al.qty::float8, a.memo, al.memo
+           SELECT 'adjustment', a.number, a.date, al.qty::float8, a.memo, al.memo,
+                  a.uid, al.idx
            FROM myob_adjustment_lines al JOIN myob_adjustments a ON a.uid = al.adjustment_uid
            WHERE al.item_uid = $1 AND a.date <= '${win.asAt}'::date
-         ) m ORDER BY date DESC NULLS LAST LIMIT 60`,
+         ) m
+         ORDER BY date DESC NULLS LAST, kind, doc_uid, seq
+         LIMIT 60`,
         [uid],
       ),
       pool.query(
