@@ -769,10 +769,21 @@ const DDL: string[] = [
   // columns. kit_form depended on kit_candidate, so it goes first.
   `DROP VIEW IF EXISTS kit_form`,
   `DROP VIEW IF EXISTS kit_candidate`,
+  `DROP VIEW IF EXISTS kit_embedded_stock`,
   `CREATE VIEW kit_form AS
    WITH billed AS (
+     /*
+      * What Allied have ACTUALLY paid, weighted across every bill.
+      *
+      * Not MYOB's average_cost, which for a built item is the cost of building
+      * it: BP1675S16 carries an average_cost of $12.86 and has never once been
+      * purchased. Presenting that as a purchase price invented a buying option
+      * that does not exist. A buy price exists only where a bill exists.
+      */
      SELECT l.item_uid, SUM(l.qty)::double precision AS qty,
-            COUNT(DISTINCT l.bill_uid)::int AS bills, MAX(h.date) AS last_bought
+            COUNT(DISTINCT l.bill_uid)::int AS bills, MAX(h.date) AS last_bought,
+            (SUM(l.total) / NULLIF(SUM(l.qty), 0))::double precision AS buy_price,
+            (ARRAY_AGG(h.supplier_name ORDER BY h.date DESC))[1] AS last_supplier
      FROM myob_purchase_bill_lines l
      JOIN myob_purchase_bills h ON h.uid = l.bill_uid
      WHERE l.item_uid IS NOT NULL AND l.qty > 0
@@ -792,6 +803,8 @@ const DDL: string[] = [
    SELECT r.parent_uid AS item_uid,
           COALESCE(p.form,
                    CASE WHEN bi.item_uid IS NOT NULL THEN 'buy_allowed' ELSE 'made_here' END) AS form,
+          bi.buy_price,
+          bi.last_supplier,
           (CASE WHEN bi.item_uid IS NOT NULL THEN 'buy_allowed' ELSE 'made_here' END) AS derived_form,
           (p.item_uid IS NOT NULL) AS overridden,
           r.component_count,
@@ -807,38 +820,29 @@ const DDL: string[] = [
    LEFT JOIN built bu ON bu.item_uid = r.parent_uid
    LEFT JOIN platform_kit_policy p ON p.item_uid = r.parent_uid`,
 
-  `CREATE OR REPLACE VIEW kit_embedded_stock AS
-   WITH RECURSIVE holding AS (
-     SELECT e.parent_uid AS kit_uid, e.component_uid,
-            (GREATEST(COALESCE(pos.free_stock, 0), 0) * e.qty_per)::double precision AS units,
-            1 AS depth,
-            ARRAY[e.parent_uid, e.component_uid] AS path
-     FROM effective_bom e
-     JOIN item_position pos ON pos.item_uid = e.parent_uid
-     WHERE COALESCE(pos.free_stock, 0) > 0 AND e.qty_per > 0
-     UNION ALL
-     SELECT h.kit_uid, e.component_uid,
-            (h.units * e.qty_per)::double precision, h.depth + 1,
-            h.path || e.component_uid
-     FROM holding h
-     JOIN effective_bom e ON e.parent_uid = h.component_uid
-     WHERE h.depth < 6 AND e.qty_per > 0 AND NOT e.component_uid = ANY(h.path)
-   )
-   SELECT component_uid AS item_uid, kit_uid,
-          MIN(depth)::int AS depth,
-          SUM(units)::double precision AS units
-   FROM holding
-   GROUP BY component_uid, kit_uid`,
-
+  /*
+   * kit_embedded_stock was removed on 26 Aug 2026.
+   *
+   * It exploded kit stock back into component units — 8,123 packs shown as
+   * 32,492 bolts — and a rule then reduced component orders by that figure.
+   * Both were wrong about how Allied operate: a pack bought from a supplier is
+   * never broken open, so the bolts inside it cannot fill a loose bolt order,
+   * and showing them as if they could invited exactly the double-count the
+   * feature exists to prevent.
+   *
+   * The counting rule stands and is now true by construction: a kit is counted
+   * as a kit, a component as a component, and nothing is added across the two.
+   * What replaced the view is the question Allied actually asked — how many
+   * kits can we field, on hand plus buildable.
+   */
   /*
    * The build route, priced and stock-checked, for every item with a recipe.
    *
-   * component_cost is the roll-up at average cost and is the honest comparison
-   * against buying the kit complete — on Allied's own file the two routes are
-   * within a few percent of each other and the sign flips by finish: galvanised
-   * BP1675G costs $2.10 bought and $1.86 built, stainless BP1675S16 costs
-   * $12.86 bought and $13.31 built. Buy the stainless, build the galvanised,
-   * which is exactly what Allied already do.
+   * component_cost is the roll-up at average cost. It is only ever compared
+   * against kit_form.buy_price — a real price from a real bill — and never
+   * against MYOB's average_cost for the parent, which for a built item is just
+   * the cost of having built it. 500 of the 513 recipe parents have no buy
+   * price at all, and for those there is no comparison to draw.
    *
    * buildable_now is the binding constraint, not the cost: the scarcest
    * component decides how many can be made today, and it is frequently zero.

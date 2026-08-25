@@ -1,6 +1,6 @@
 # Allied Priority Fix Plan — v3
 
-**Status:** All seven priorities shipped. P0 18 Aug, P1 and P2 19 Aug, P3 21 Aug, P4 21 Aug, P5+P6 24 Aug, P7 25 Aug (simplified 26 Aug) 2026. Two backlog items raised and parked. Revised after client direction on stocktake-anchored stock maths.
+**Status:** All seven priorities shipped. P0 18 Aug, P1 and P2 19 Aug, P3 21 Aug, P4 21 Aug, P5+P6 24 Aug, P7 25 Aug (reworked 26 Aug) 2026. Two backlog items raised and parked. Revised after client direction on stocktake-anchored stock maths.
 
 **What changed in v2**
 
@@ -13,7 +13,7 @@
 - **P3 shipped 21 Aug** — an as-at date and a rolling window, genuinely independent; a NZ-time correction that was misdating the snapshot trail; and the month-end spreadsheet export.
 - **P4 shipped 21 Aug** — product type and finish as independent facets, nothing suppressed, plus Allied's own free-text tags.
 - **P5+P6 shipped 24 Aug** — the cart fans an item out across every supplier tagged against it, with all five guard rails, measured lead times and per-supplier order sheets.
-- **P7 shipped 25 Aug, simplified 26 Aug** — kits and components are one item in two forms, sourced from purchase bills alone. A stated counting rule quantifies a NZ$36,439 double-count, NZ$47,974 of build work moved off the purchase cart, and build-versus-buy is priced both ways on Products & BOM. The standalone page, the confirmation queue and a third rule worth one item were removed on review.
+- **P7 shipped 25 Aug, reworked 26 Aug** — a kit bought from a supplier is never broken open, so its contents are never counted as component stock. The product answers *total available = kits on the shelf + what the parts allow*, detects the 13 genuinely purchased kits from bills, and prices buying only where a real bill exists. NZ$47,723 of never-bought requirement left the purchase cart.
 
 ---
 
@@ -697,87 +697,70 @@ Per client direction, Allied will tag multi-supplier items themselves rather tha
 
 ---
 
-### P7 — Kits and components ✅ SHIPPED 25 Aug 2026, SIMPLIFIED 26 Aug
+### P7 — Kits and components ✅ SHIPPED 25 Aug, REWORKED 26 Aug 2026
 
-**The client's seventh priority. Built, reviewed as over-featured, and cut back — the second pass is what shipped.**
+**Built, cut back once for over-featuring, then corrected again when the client explained how they actually operate. The third pass is what shipped.**
 
-#### The problem, in Allied's own file
+#### The rule that governs everything
 
-A bolt pack is either bought complete from a specialist supplier, or made here from a bolt, a nut and two washers. Allied do both: `BP1675G` was billed in container loads of 6,000–10,000 every few months and built in-house in batches of 50–1,450 in between. **513 items have a recipe. 56 are both a parent and a component** — a bolt sits in a pack, and the pack sits in a dressing set.
+> **A kit bought from a supplier is never broken open.** It sells as the kit it arrived as.
 
-Three failures followed from treating the two forms as unrelated item codes:
+So its contents are **not** component stock. They are never added into a component's on-hand figure, and a component's order is never reduced because parts are "inside" a pack — those parts are not available. A kit is counted as a kit, a component as a component, and nothing is counted across the two.
 
-1. **Component stock was invisible.** `BN1675G` reads 3,301 on hand; another **32,492 are in the building**, inside packs. Across the file, **70 components hold NZ$36,439** this way.
-2. **The cart bought the same requirement twice.** Recipe parents were suggested for purchase while their components were also suggested.
-3. **Orders were raised for things Allied never buy.** `BP1675S16` carried a **NZ$34,692 line** against an item with no purchase record in two years.
+This corrected two things the earlier build got wrong. It exploded 8,123 packs into 32,492 bolts and displayed them as though available, and a rule then reduced component orders by that figure. Both contradicted how Allied sell. The view and the rule are gone.
 
-#### The counting rule
+#### What the product now answers
 
-> **A unit is counted in the form it is physically held in.** Four loose bolts are four bolts; the same four inside a sealed pack are one pack, and are valued as a pack.
+> **total available = complete kits on the shelf + how many more the parts allow**
 
-Embedded quantities are a *view* of stock already counted under the kit, never an addition to it:
+Kits on the shelf are consumed first — whether the kit is sold on its own or goes into something bigger — so only the shortfall pulls on components. That falls out of the arithmetic rather than needing a rule.
 
-| | |
-|---|---:|
-| Stock value the platform reports | NZ$972,293 |
-| Those same units seen as loose parts | NZ$36,439 |
-| **What a spreadsheet adding both would report** | **NZ$1,008,732** |
-| **Overstatement avoided** | **NZ$36,439 — 3.75%** |
+**The total is never summed across products**, and this is the discipline the brief demands. Four of Allied's M12×40 kits are made from the same `ST1240S16` and `N12S16` pool and each reports 15,492 buildable; the parts stretch to 15,492 in total, not 61,968. Only "complete kits on the shelf" (16,005) is additive, because each is a distinct physical unit.
 
-Verified identical to the Overview total to the decimal, so the feature moves no number it does not intend to. A second guard in `scripts/check-ledger-boundary.mjs` keeps embedded figures inside the kit modules where they cannot reach a total.
+#### Prebuilt kits are detected from purchase history
 
-#### What shipped, after the cut
+Never from a flag. **13 items** have genuinely been bought complete, found by reading purchase bills:
 
-**One question, answered from purchase bills and nothing else: has Allied ever actually bought this complete?** That splits 513 items into **500 made here** and **13 bought complete**. MYOB's "I buy this item" checkbox is ignored outright.
+| Kit | Supplier | Paid each | Parts cost | On shelf | Buildable | Total |
+|---|---|---:|---:|---:|---:|---:|
+| BP1675G | Hanova International | $2.04 | $1.86 | 8,123 | 825 | **8,948** |
+| BP2090G | Hanova International | $3.72 | $3.39 | 1,287 | 1,240 | **2,527** |
+| BP16110G | Hanova International | $2.58 | $2.35 | 1,848 | 792 | **2,640** |
 
-Two rules follow:
+MYOB's "I buy this item" checkbox sits on 51 recipe parents with no purchase behind it and is **ignored outright**.
 
-1. **An item never bought complete is not put on a purchase order.** Its shortfall is a build sheet. **247 lines worth NZ$47,974** left the cart.
-2. **Components already inside packs on the shelf are not ordered again** — capped at the part of demand that came through building, because a bolt sold loose over the counter cannot be picked out of a sealed pack.
+#### The buy price has to be a real price
 
-Plus a **kit + parts double-order flag** where both forms are being ordered at once, and a **two-way override** on the item page for the rare case where the bills mislead. That override is the conversion mechanism the brief asks for: change it and the order list, cart, Products page and build sheet all follow.
+The earlier build priced the buy side from MYOB's `average_cost`. For an item that is built rather than bought, that figure is **the cost of having built it** — so `BP1675S16` displayed "Buy it complete NZ$12.86" against an item never purchased in its life, and a NZ$34,692 order was priced off it.
 
-#### What was removed on review, and why
+Buy price now comes from purchase bills, weighted across every bill, and is **null on the 500 items never bought complete**. Where there is no buy price there is no comparison drawn — the screen shows what it costs to make and says plainly why there is nothing to compare it to.
 
-The first version was over-built. Measured against the live file:
+#### One rule left
 
-| Removed | What it was worth |
+**An item never bought complete is not put on a purchase order.** The requirement is real and survives as a quantity to build. 247 products, 30,325 units, NZ$47,723 out of the cart.
+
+Plus a **kit + parts double-order flag** where both forms are on order at once, and a **two-way override** on the item page — the conversion mechanism the brief asks for.
+
+#### Removed on client review
+
+| Removed | Why |
 |---|---|
-| A standalone **Kits & parts** page | Listed the same **513 items as Products & BOM**, using the identical buildable-now formula. A duplicate page. |
-| The **confirmation queue** (57 items) and the graded-evidence model | Existed only to make the third rule safe. |
-| **Rule 3** — a bought-complete kit's components are not bought | Moved **one item, NZ$455**, even with the whole queue confirmed. |
-| Four-way form enum, eight register filters, three of four inventory filters, the KPI row, a second CSV | Surface without a question behind it. |
+| The standalone **Kits & parts** page | Listed the same 513 items as Products & BOM, using the same buildable formula |
+| The **confirmation queue** and graded evidence | Served one rule worth a single item and NZ$455 |
+| **Embedded stock** — pack contents shown as component units | Contradicts how Allied sell; invited the double-count it was meant to prevent |
+| The **"Build, don't buy"** tag and the pack-stock offset rule | Confusing label, and a rule resting on the same wrong premise |
+| The four-way form enum, eight filters, a KPI row, a second CSV | Surface without a question behind it |
 
-**Honouring the checkbox was worth NZ$0.** All 51 items carrying it have never been bought, so MYOB holds no cost for them — 35 were sitting in the cart as zero-value noise lines. Removing it *improves* the cart.
+#### Where it lives
 
-The cut made the feature measurably better, not just smaller: build plans rose **212 → 247** and false double-order alarms fell **20 → 5**, because the 57 checkbox items are now correctly treated as made here.
-
-#### Where it lives now
-
-| | |
+| Screen | What it gained |
 |---|---|
-| **Products & BOM** | Two new columns — buy each, build each, with the cheaper route marked — plus a "Sourced" column and the counted-once-not-twice reconciliation |
-| **Item page** | Build-versus-buy side by side, what it is made of with shortfalls, where its units sit inside other stock, and the two-way override |
-| **Purchasing** | A notice saying what the rules kept out of the cart, badges on clashing lines, and two extra columns in the export |
+| **Products & BOM** | Sourced, buildable, **total available**, buy each (real bills only), build each — plus the availability panel and the list of kits bought complete |
+| **Item page** | On shelf + buildable = total, the cost comparison where a real buy price exists, what it is made of with shortfalls, and the override |
+| **Purchasing** | What is not in the cart and why, badges on clashing lines |
 | **Inventory** | One filter: kit + parts both ordered |
 
-No new nav item, and nothing for Allied to work through before the feature does its job.
-
-#### Build versus buy — kept, because Allied asked for it
-
-The two routes land within a few percent of each other and **the cheaper one moves**. Measured 24 Aug, every stainless kit was cheaper bought complete (9/9). A Shandong Tengda container landed **25 Aug** well under the standing average — `B1675S16` $2.04 → $1.05, `N16S16M` $1.18 → $0.33 — and four of the nine flipped to cheaper-built within the day. `BP1675S16`'s build route went $13.31 → **$5.94** against $12.86 bought, and buildable-now went 18 → **3,184**.
-
-So **no buy-versus-build verdict is ever stored.** Both figures are recomputed from average cost on every read, and the screen leads with the constraint that usually decides it anyway — how many could be built today, counting stock already on the water.
-
-#### Found and fixed underneath
-
-- **The item page disagreed with every other screen.** `itemDetail` recomputed a single row on its own, so kit rules — relationships between two items — never reached it.
-- **Three parallel requests each recomputed 3,100 items** until the connection pool ran dry and returned 500s. Concurrent callers now share one in-flight computation. Cold 20s → 10.6s, warm 0.17s.
-
-#### Not building
-
-- **No automatic dismantling of packs.** Recovering loose bolts is a physical act with a stock movement behind it; the platform will not invent one.
-- **No automatic decision from incoming stock.** Components serve several parents, so attributing an open order to one kit is a guess. Reported, never applied.
+Changing how an item is sourced now **updates that panel alone** — the earlier build reloaded the whole item page for a two-state toggle, which threw the reader back to the top of a long screen.
 
 ---
 

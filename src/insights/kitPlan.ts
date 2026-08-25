@@ -8,16 +8,11 @@ import {
 } from "./queries.js";
 
 /**
- * The two kit screens that survived (P7).
+ * The kit screens (P7).
  *
- * There was a third — a standalone register with a confirmation queue, eight
- * filters and a KPI row. It listed the same 513 items as Products & BOM, using
- * the same buildable-now formula, so it was removed and its two useful columns
- * folded into that page instead.
- *
- * What is left is the part neither page could provide on its own: the
- * reconciliation that proves nothing is double-counted, and the build-versus-buy
- * comparison for a single item.
+ * Two answers, both living inside pages that already exist: how many kits can
+ * we field right now, and — for the items Allied genuinely buy complete — is it
+ * cheaper to buy or to build.
  *
  * Kept apart from kits.ts, which holds the rules. queries.ts applies the rules
  * on every computed set and must not drag the screens in with them.
@@ -139,26 +134,23 @@ export async function kitDetail(uid: string, opts?: Partial<DemandWindow>) {
     buildableWithIncoming,
     targetCoverWeeks: config.insights.targetCoverWeeks,
     components,
-    heldIn: item.kit?.heldIn ?? [],
     usedIn,
   };
 }
 
 /**
- * The proof that nothing is counted twice.
+ * How many kits Allied can field, and how they are counted.
  *
- * The brief asks for both visibility of component stock held inside kits and a
- * guarantee the two are not double-counted, which sound contradictory until the
- * counting rule is stated: a unit is counted in the form it is physically held
- * in, and embedded quantities are a view of stock already valued under the kit.
+ * The brief asks for stock levels of kits, of the components behind them, and
+ * of the two together. That is this: complete kits on the shelf, plus what the
+ * components allow on top, and the sum of the two.
  *
- * So this returns three numbers and the arithmetic between them. `stockValue`
- * is what the platform reports and is unchanged by this whole feature.
- * `embeddedValue` is the same stock seen through the component's eyes.
- * `ifBothWereCounted` is what a spreadsheet adding them would say — the
- * overstatement Allied are being protected from, in dollars.
+ * It does NOT add pack contents into component stock. A kit bought from a
+ * supplier is never broken open, so its bolts cannot fill a loose bolt order.
+ * Counting them in both places is the double-count the brief warns about, and
+ * the arithmetic here simply never does it.
  */
-export async function kitReconciliation(opts?: Partial<DemandWindow>) {
+export async function kitAvailability(opts?: Partial<DemandWindow>) {
   const win = resolveWindow(opts);
   const [items, graph, summary] = await Promise.all([
     computedItems(win),
@@ -166,50 +158,49 @@ export async function kitReconciliation(opts?: Partial<DemandWindow>) {
     kitRuleSummary(win),
   ]);
 
-  let stockValue = 0;
-  let kitStockValue = 0;
-  let embeddedValue = 0;
-  let embeddedUnits = 0;
-  const rows: {
-    uid: string;
-    number: string | null;
-    name: string | null;
-    loose: number | null;
-    embedded: number;
-    embeddedValue: number;
-    heldIn: string[];
-  }[] = [];
+  const rows = items
+    .filter((i) => i.kit?.form)
+    .map((i) => ({
+      uid: i.uid,
+      number: i.number,
+      name: i.name,
+      boughtFromSupplier: i.kit!.form === "buy_allowed",
+      lastSupplier: i.kit!.lastSupplier,
+      lastBought: graph.form.get(i.uid)?.lastBought ?? null,
+      buyPrice: i.kit!.buyPrice,
+      buildCost: i.kit!.buildCostComplete ? i.kit!.buildCost : null,
+      kitsOnHand: i.kit!.kitsOnHand,
+      buildableNow: i.kit!.buildableNow,
+      totalAvailable: i.kit!.totalAvailable,
+      buildPlanQty: i.kit!.buildPlanQty,
+      doubleOrder: i.kit!.doubleOrder,
+      stockValue: i.currentValue,
+    }))
+    .filter((r) => r.totalAvailable > 0 || r.buildPlanQty > 0);
 
-  for (const item of items) {
-    stockValue += item.currentValue ?? 0;
-    if (graph.form.has(item.uid)) kitStockValue += item.currentValue ?? 0;
-    const e = item.kit?.embeddedUnits ?? 0;
-    if (e <= 0) continue;
-    embeddedUnits += e;
-    embeddedValue += item.kit?.embeddedValue ?? 0;
-    rows.push({
-      uid: item.uid,
-      number: item.number,
-      name: item.name,
-      loose: item.qtyOnHand,
-      embedded: e,
-      embeddedValue: item.kit?.embeddedValue ?? 0,
-      heldIn: (item.kit?.heldIn ?? []).slice(0, 4).map((h) => h.number ?? h.kitUid),
-    });
-  }
-  rows.sort((a, b) => b.embeddedValue - a.embeddedValue);
+  rows.sort((a, b) => b.totalAvailable - a.totalAvailable);
+
+  /*
+   * The kits Allied genuinely buy complete, detected from purchase history
+   * rather than any flag. This is the set the brief calls out as important, so
+   * it is reported explicitly with who supplies each one.
+   */
+  const purchased = rows
+    .filter((r) => r.boughtFromSupplier)
+    .sort((a, b) => (b.kitsOnHand ?? 0) - (a.kitsOnHand ?? 0));
 
   const round = (v: number) => Number(v.toFixed(2));
+  const kitStockValue = items
+    .filter((i) => i.kit?.form)
+    .reduce((a, i) => a + (i.currentValue ?? 0), 0);
+
   return {
     asAt: win.asAt,
-    stockValue: round(stockValue),
-    kitStockValue: round(kitStockValue),
-    embeddedValue: round(embeddedValue),
-    embeddedUnits: Number(embeddedUnits.toFixed(1)),
-    componentsWithEmbedded: rows.length,
-    ifBothWereCounted: round(stockValue + embeddedValue),
-    overstatementPct: stockValue > 0 ? round((embeddedValue / stockValue) * 100) : 0,
     summary,
+    kitStockValue: round(kitStockValue),
+    totalStockValue: round(items.reduce((a, i) => a + (i.currentValue ?? 0), 0)),
+    purchasedCount: purchased.length,
+    purchased: purchased.slice(0, 15),
     rows: rows.slice(0, 15),
   };
 }

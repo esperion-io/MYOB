@@ -1472,7 +1472,7 @@ export async function productsList(
       GROUP BY b.parent_uid
     )
     SELECT p.*, i.number, i.name,
-           i.average_cost::float8 AS buy_cost,
+           kf.buy_price::float8 AS buy_price,
            kf.form AS kit_form, kf.overridden AS kit_overridden,
            kf.bought_qty::float8 AS bought_qty, kf.built_qty::float8 AS built_qty,
            COALESCE(ip.free_stock, 0)::float8 AS stock_free,

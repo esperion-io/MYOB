@@ -20,10 +20,10 @@ const TERMS = {
     short: "Whether Allied have ever actually bought this complete, or only ever made it here.",
     long: "Read from Allied's own purchase bills and nothing else. \"Made here\" means it has never been bought complete, so what it needs is a build sheet rather than a purchase order and it stays off the order list. \"Bought complete\" means it has appeared on a supplier's bill, so buying is a real option — and building may still be, which is why both costs are shown. MYOB's \"I buy this item\" checkbox is deliberately ignored: plenty of items carry it with no purchase behind it. Open an item to change it if the bills mislead.",
   },
-  embedded_stock: {
-    label: "Inside packs",
-    short: "Units of this item that are physically here, but sitting inside assembled packs.",
-    long: "Free stock of every pack containing this item, multiplied by how many go into each one, followed through however many levels deep it goes. It is NOT extra inventory: those units are already counted, and valued, as packs. It is shown so that a low on-hand figure does not send an order out for something that is already in the building.",
+  kit_available: {
+    label: "Total available",
+    short: "Complete kits on the shelf, plus how many more you could build from parts on hand.",
+    long: "Two numbers added together: kits already made up and sitting on the shelf, and how many more the parts on hand would allow. Kits on the shelf get used first — whether the kit is sold on its own or goes into something bigger — so only what is left over pulls on parts. This total is never added up across products, because kits share parts: four of Allied's M12x40 kits draw on the same screws and nuts, so adding their buildable figures would count the same parts four times.",
   },
   build_vs_buy: {
     label: "Build vs buy",
@@ -118,8 +118,6 @@ const FLAG_HELP = {
   dead_stock: "There is stock on the shelf and none of it has moved in 12 months — not sold, not used building anything. Money sitting still. If you look back further than a year, anything that did move in that longer period counts as a slow mover instead.",
   understated_demand: "Packs holding this item sold without being rebuilt, so the demand and cover figures shown for it are lower than the real usage. Open the item to see which packs and how many units.",
   min_above_demand: "MYOB's minimum level for this item is far higher than its demand justifies, so it is being suggested for reorder while it already has too much on the shelf. The minimum is what needs looking at, not the stock.",
-  build_not_buy: "This is made here, not bought. It still needs more, but the answer is a build sheet rather than a purchase order, so it has been taken off the order list and put on the Kits page instead.",
-  kit_covered: "Part of what this item needed is already on the shelf, sitting inside packs. That part has been taken off the order; the rest is still there. Open the item to see which packs and how many units.",
   kit_double_order: "This item and something it is made of are both on the order list. That can be right when Allied genuinely buy both, but it is also how one requirement gets bought twice. Needs a decision.",
 };
 
@@ -133,8 +131,6 @@ const FLAG_LABELS = {
   dead_stock: ["Dead stock", "fail"],
   understated_demand: ["Demand understated", "brand"],
   min_above_demand: ["Min level too high", "warn"],
-  build_not_buy: ["Build, don't buy", "brand"],
-  kit_covered: ["Covered by pack stock", "brand"],
   kit_double_order: ["Kit + parts both ordered", "warn"],
 };
 
@@ -218,8 +214,7 @@ const KIT_FORM_LABEL = {
 
 function withheldReason(reason) {
   return {
-    build_not_buy: "Allied make this here, so what it needs is a build sheet rather than a purchase order",
-    in_pack_stock: "those units are already on the shelf, sitting inside packs",
+    never_bought: "Allied have never bought this complete, so there is no purchase price to put on it — the quantity is reported as something to build instead",
   }[reason] ?? reason;
 }
 
@@ -1926,10 +1921,9 @@ async function renderItem(uid) {
 /**
  * Kits and parts, on the item page.
  *
- * This is where the whole feature lives now that the standalone page is gone,
- * and it answers in whichever direction applies — 56 items on Allied's file are
- * both a finished pack and a part of something bigger. Loaded separately from
- * the item payload because it needs the recipe priced and stock-checked.
+ * Answers the question Allied actually ask — how many of this kit can we field
+ * — and, only where there is a real purchase price to compare against, whether
+ * buying beats building.
  */
 async function renderItemKit(uid, item) {
   const panel = document.getElementById("item-kit");
@@ -1946,70 +1940,111 @@ async function renderItemKit(uid, item) {
     body.innerHTML = `<p class="muted">${esc(err.message)}</p>`;
     return;
   }
+  body.dataset.uid = uid;
+  drawItemKit(body, d);
+}
 
+/**
+ * Rendered separately from the fetch so changing how an item is sourced can
+ * redraw just this panel. Reloading the whole item page for a two-state toggle
+ * threw the reader back to the top of a long screen for no reason.
+ */
+function drawItemKit(body, d) {
+  // Clear the saving state here rather than at the call site, so every path
+  // that redraws the panel also re-enables it. Doing it only on the error path
+  // left the panel dimmed and unclickable after a successful save.
+  body.classList.remove("is-saving");
+  const k = d.item.kit;
   const buildTotal = d.components.reduce((sum, c) => sum + (c.lineCost ?? 0), 0);
   const plan = d.planQty ?? 0;
   const shortLines = d.components.filter((c) => c.shortAfterIncoming > 0);
   const out = [];
 
   /*
-   * Build versus buy, side by side and at equal weight. The cheaper route is
-   * not marked as a winner because it moves: on 24 Aug every stainless pack was
-   * cheaper bought, and a container landing on the 25th flipped four of nine.
-   * The form in force gets the left rule; cost is left for the reader to judge.
+   * Availability first, because it is the question. Kits on hand are complete
+   * kits — bought or built earlier, it makes no difference once they are on the
+   * shelf — and buildable is what the scarcest component allows on top.
    */
-  if (d.components.length) {
+  out.push(`
+    <div class="avail">
+      <div class="avail-cell">
+        <span class="avail-v">${qty(k.kitsOnHand)}</span>
+        <span class="avail-k">complete kits on the shelf</span>
+      </div>
+      <span class="avail-op">+</span>
+      <div class="avail-cell">
+        <span class="avail-v">${qty(k.buildableNow)}</span>
+        <span class="avail-k">more you could build from parts on hand</span>
+      </div>
+      <span class="avail-op">=</span>
+      <div class="avail-cell is-total">
+        <span class="avail-v">${qty(k.totalAvailable)}</span>
+        <span class="avail-k">total you could supply today</span>
+      </div>
+    </div>
+    <p class="hint">Kits on the shelf get used first — whether this is sold on its own or goes into
+    something bigger — so only what is left over pulls on parts.</p>`);
+
+  /*
+   * The cost comparison, and only where there is something real to compare.
+   *
+   * 500 of the 513 recipe parents have never been bought complete. MYOB still
+   * carries an average_cost for them, but it is the cost of having built them,
+   * so presenting it as "buy it complete" invented an option that does not
+   * exist and priced a NZ$34,692 order against it.
+   */
+  if (d.components.length && k.buyPrice != null) {
+    const cheaper = buildTotal > 0 && buildTotal < k.buyPrice ? "build" : "buy";
     out.push(`
+      <h3>Buy it complete, or make it here</h3>
       <div class="kit-choice">
-        <div class="kit-option ${k.form === "buy_allowed" ? "chosen" : ""}">
-          <h3>Buy it complete</h3>
-          <p class="kit-price">${item.averageCost ? price(item.averageCost) : "—"} <span class="muted">each</span></p>
-          <ul class="kit-facts">
-            <li>${d.form?.boughtBills ? `Bought ${qty(d.form.boughtQty)} across ${d.form.boughtBills} bill${d.form.boughtBills === 1 ? "" : "s"}` : "<strong>Never purchased</strong> in two years of records"}</li>
-            <li>${d.form?.lastBought ? `Last bought ${dateFmt(d.form.lastBought)}` : "No purchase on record"}</li>
-            ${plan ? `<li class="kit-total">${qty(plan)} would cost <strong>${money(plan * (item.averageCost ?? 0))}</strong></li>` : ""}
-          </ul>
+        <div class="kit-option ${cheaper === "buy" ? "chosen" : ""}">
+          <h4>Buy it complete</h4>
+          <p class="kit-price">${price(k.buyPrice)} <span class="muted">each</span></p>
+          <p class="kit-note">What Allied have actually paid, across ${d.form.boughtBills}
+            bill${d.form.boughtBills === 1 ? "" : "s"}${d.form.lastBought ? `, last on ${dateFmt(d.form.lastBought)}` : ""}.
+            ${k.lastSupplier ? `From ${esc(k.lastSupplier)}.` : ""}</p>
         </div>
-        <div class="kit-option ${k.form === "made_here" ? "chosen" : ""}">
-          <h3>Make it here</h3>
+        <div class="kit-option ${cheaper === "build" ? "chosen" : ""}">
+          <h4>Make it here</h4>
           <p class="kit-price">${buildTotal ? price(buildTotal) : "—"} <span class="muted">each in parts</span></p>
-          <ul class="kit-facts">
-            <li>${d.form?.builtLines ? `Built ${qty(d.form.builtQty)} across ${qty(d.form.builtLines)} builds` : "Never built"}</li>
-            <li><strong>${qty(k.buildableNow ?? 0)}</strong> buildable now${
-              d.buildableWithIncoming > (k.buildableNow ?? 0)
-                ? `, <strong>${qty(d.buildableWithIncoming)}</strong> once parts on order land`
-                : ""
-            }</li>
-            ${plan ? `<li class="kit-total">${qty(plan)} would cost <strong>${money(plan * buildTotal)}</strong> in parts${shortLines.length ? `, and ${shortLines.length} part${shortLines.length === 1 ? " is" : "s are"} short even after what is on order` : ""}</li>` : ""}
-          </ul>
+          <p class="kit-note">${d.form.builtLines ? `Built ${qty(d.form.builtQty)} across ${qty(d.form.builtLines)} builds. ` : ""}
+            ${k.buildCostComplete ? "" : "<strong>Some parts have no cost in MYOB</strong>, so this is understated."}</p>
         </div>
-      </div>`);
-    if (!k.buildCostComplete && buildTotal > 0) {
-      out.push(`<p class="hint">Some parts have no cost in MYOB, so the parts figure is understated.</p>`);
-    }
+      </div>
+      <p class="hint">Both figures are worked out fresh every time you look. Parts costs move when a
+      container lands, so the cheaper route today may not be the cheaper route next month.</p>`);
+  } else if (d.components.length) {
+    out.push(`
+      <h3>What it costs to make</h3>
+      <p class="kit-price">${buildTotal ? price(buildTotal) : "—"} <span class="muted">each in parts</span></p>
+      <p class="hint"><strong>Allied have never bought this complete</strong>, so there is no purchase
+      price to compare it against. MYOB carries an average cost for it, but that is what it cost to
+      <em>build</em>, not what a supplier would charge.</p>`);
   }
 
-  if (k.withheld) {
+  if (plan > 0) {
     out.push(`<div class="notice">
-      <strong>${qty(k.withheld.qty)} units</strong> were taken off this item's purchase suggestion —
-      ${esc(withheldReason(k.withheld.reason))}.
-      ${k.buildPlanQty ? `It is on the build sheet for ${qty(k.buildPlanQty)} instead.` : ""}
+      Demand needs <strong>${qty(plan)}</strong> more than you can supply today.
+      ${k.buyPrice == null
+        ? "This is a quantity to build — there is no purchase price on file for it."
+        : `That is ${money(plan * k.buyPrice)} bought complete, or ${money(plan * buildTotal)} in parts.`}
+      ${shortLines.length ? `${shortLines.length} part${shortLines.length === 1 ? " is" : "s are"} short even after what is on order.` : ""}
     </div>`);
   }
   if (k.doubleOrder) {
-    out.push(`<div class="notice warn">This item and something it is made of are both on the order list.
+    out.push(`<div class="notice warn">This kit and something it is made of are both on the order list.
       That can be right when Allied genuinely buy both — but it is also how one requirement gets bought twice.</div>`);
   }
 
   if (d.components.length) {
     out.push(`<h3>What it is made of</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Part</th><th class="num">Per unit</th><th class="num">Cost each</th>
+        <thead><tr><th>Part</th><th class="num">Per kit</th><th class="num">Cost each</th>
           <th class="num">Free stock</th>${th("incoming", "Incoming", "num")}
           ${plan ? `<th class="num">Needed for ${qty(plan)}</th><th class="num">Short</th>` : ""}</tr></thead>
         <tbody>${d.components.map((c) => `<tr>
-          <td>${itemLink(c.uid, c.number ?? c.uid)} <span class="muted">${esc((c.name ?? "").slice(0, 26))}</span>
-            ${c.isKit ? '<span class="badge idle" title="This part is itself made of other parts">also a kit</span>' : ""}</td>
+          <td>${itemLink(c.uid, c.number ?? c.uid)} <span class="muted">${esc((c.name ?? "").slice(0, 26))}</span></td>
           <td class="num">${qty(c.qtyPer)}</td>
           <td class="num">${c.lineCost ? price(c.lineCost) : '<span class="muted">no cost</span>'}</td>
           <td class="num">${qty(c.freeStock)}</td>
@@ -2024,57 +2059,70 @@ async function renderItemKit(uid, item) {
       </table></div>`);
   }
 
-  if (k.embeddedUnits > 0) {
-    out.push(`<h3>${qty(Math.round(k.embeddedUnits))} of these are already inside other stock</h3>
-      <p class="hint">Worth ${money(k.embeddedValue)}, and <em>already counted and valued as those packs</em>,
-      not as loose stock. Listed so a low figure here does not send an order out for something already in the building.</p>
-      <ul class="plain">${k.heldIn.slice(0, 8).map((h) => `<li>${itemLink(h.kitUid, h.number ?? h.kitUid)} holds ${qty(Math.round(h.units))}${h.depth > 1 ? ` <span class="muted">(${h.depth} levels down)</span>` : ""}</li>`).join("")}</ul>`);
-  }
-
   if (d.usedIn.length) {
-    out.push(`<h3>Used in</h3>
+    out.push(`<h3>Goes into</h3>
       <ul class="plain">${d.usedIn.slice(0, 10).map((u) => `<li>${itemLink(u.uid, u.number ?? u.uid)} <span class="muted">×${qty(u.qtyPer)}</span></li>`).join("")}</ul>
       ${d.usedIn.length > 10 ? `<p class="hint">…and ${d.usedIn.length - 10} more.</p>` : ""}`);
   }
 
-  // The override. Two buttons, defaulting to what the purchase bills say.
   if (d.form) {
-    const [label] = KIT_FORM_LABEL[d.form.derivedForm] ?? [""];
+    const bills = d.form.boughtBills;
     out.push(`<h3>How this is sourced</h3>
       <p class="hint">${
         d.form.overridden
-          ? `Set by hand${d.form.decidedBy ? ` (${esc(d.form.decidedBy)})` : ""}. Allied's own purchase bills say <strong>${label.toLowerCase()}</strong>.`
-          : `Taken from Allied's own purchase bills. Change it only if the bills mislead for this item.`
+          ? `Set by hand${d.form.decidedBy ? ` (${esc(d.form.decidedBy)})` : ""}. Allied's own purchase bills say <strong>${(KIT_FORM_LABEL[d.form.derivedForm] ?? [""])[0].toLowerCase()}</strong>.`
+          : bills
+            ? `Taken from Allied's own purchase bills — bought complete on ${bills} bill${bills === 1 ? "" : "s"}.`
+            : `Taken from Allied's own purchase bills — never bought complete in two years.`
       }</p>
-      <div class="kit-forms" data-kit="${esc(uid)}">
+      <div class="kit-forms">
         ${[
-          ["made_here", "Made here", "Its shortfall is a build sheet, not a purchase order."],
-          ["buy_allowed", "Bought complete", "Buying it complete is a real option."],
+          ["made_here", "Made here", "Built from parts. No purchase order is raised for it."],
+          ["buy_allowed", "Bought complete", "A supplier sells it ready-made."],
         ].map(([v, lab, note]) => `
           <button class="btn kit-form-btn ${d.form.form === v ? "primary" : ""}" data-form="${v}">
             ${lab}<span class="muted">${note}</span>
           </button>`).join("")}
+        ${d.form.overridden ? '<button class="btn small" data-form="">Use what the bills say</button>' : ""}
       </div>
-      ${d.form.overridden ? '<p class="hint"><button class="btn small" id="kit-form-clear">Use what the bills say</button></p>' : ""}
       <p class="hint" id="kit-form-result"></p>`);
   }
 
   body.innerHTML = out.join("");
+  wireKitForm(body);
+}
 
-  for (const btn of body.querySelectorAll(".kit-form-btn")) {
+/**
+ * Saving a sourcing change updates this panel alone.
+ *
+ * The buttons disable and the panel dims while the server recomputes, so the
+ * change is visibly in progress without the page jumping — the whole screen
+ * reloading for one toggle was jarring enough that people avoided using it.
+ */
+function wireKitForm(body) {
+  const uid = body.dataset.uid;
+  for (const btn of body.querySelectorAll("[data-form]")) {
     btn.addEventListener("click", async () => {
-      document.getElementById("kit-form-result").textContent = "Saving…";
-      await fetchJson(`/api/insights/kits/${encodeURIComponent(uid)}/form`, {
-        method: "POST",
-        body: JSON.stringify({ form: btn.dataset.form, decidedBy: "Allied" }),
-      });
-      renderItem(uid);
+      const form = btn.dataset.form;
+      const result = document.getElementById("kit-form-result");
+      body.querySelectorAll("[data-form]").forEach((b) => (b.disabled = true));
+      body.classList.add("is-saving");
+      result.textContent = form ? "Saving…" : "Restoring…";
+      try {
+        await fetchJson(`/api/insights/kits/${encodeURIComponent(uid)}/form`, {
+          method: form ? "POST" : "DELETE",
+          ...(form ? { body: JSON.stringify({ form, decidedBy: "Allied" }) } : {}),
+        });
+        result.textContent = "Recalculating…";
+        const fresh = await fetchJson(withWindow(`/api/insights/kits/${encodeURIComponent(uid)}`));
+        drawItemKit(body, fresh);
+      } catch (err) {
+        body.classList.remove("is-saving");
+        body.querySelectorAll("[data-form]").forEach((b) => (b.disabled = false));
+        result.textContent = err.message;
+      }
     });
   }
-  body.querySelector("#kit-form-clear")?.addEventListener("click", async () => {
-    await fetchJson(`/api/insights/kits/${encodeURIComponent(uid)}/form`, { method: "DELETE" });
-    renderItem(uid);
-  });
 }
 
 /* ---------- item suppliers (view / edit, multiple per product) ---------- */
@@ -2286,7 +2334,7 @@ async function renderProducts() {
       <div id="bom-preview"></div>
     </section>
 
-    <section class="panel" id="kit-recon"><p class="loading">Loading…</p></section>
+    <section class="panel" id="kit-avail"><p class="loading">Loading…</p></section>
 
     <section class="panel">
       <h2>Products with no known composition <span class="badge idle">blind spot</span></h2>
@@ -2312,7 +2360,7 @@ async function renderProducts() {
     document.getElementById("bom-commit").disabled = true;
   });
 
-  await Promise.all([loadProductsTable(), loadBlindspots(), loadKitReconciliation()]);
+  await Promise.all([loadProductsTable(), loadBlindspots(), loadKitAvailability()]);
 }
 
 /**
@@ -2393,7 +2441,7 @@ async function runBomImport(commit) {
     if (commit) {
       msg.textContent = `Saved ${result.applied} row(s). ${result.errorCount} rejected.`;
       commitBtn.disabled = true;
-      await Promise.all([loadProductsTable(), loadBlindspots(), loadKitReconciliation()]);
+      await Promise.all([loadProductsTable(), loadBlindspots(), loadKitAvailability()]);
     } else {
       msg.textContent = `${result.okCount} row(s) ready, ${result.errorCount} rejected. Nothing saved yet.`;
       commitBtn.disabled = result.okCount === 0;
@@ -2499,7 +2547,8 @@ function productSourcedCell(p) {
 
 function productBuildCostCell(p) {
   if (!p.build_cost) return '<span class="muted">—</span>';
-  const cheaper = p.buy_cost > 0 && p.build_cost < p.buy_cost;
+  // "Cheaper" is only meaningful against a real price from a real bill.
+  const cheaper = p.buy_price > 0 && p.build_cost < p.buy_price;
   return `${price(p.build_cost)}${
     p.build_cost_complete
       ? cheaper ? '<br /><span class="badge ok">cheaper</span>' : ""
@@ -2508,53 +2557,76 @@ function productBuildCostCell(p) {
 }
 
 /**
- * The double-counting reconciliation, on the page that lists the recipes.
+ * Kit availability, on the page that lists the recipes.
  *
- * It has to live somewhere a person looks at month end, and this is the page
- * about what is made of what. Loaded after the table so a slow figure never
- * holds up the list.
+ * The brief asks for stock of kits, stock of the components behind them, and
+ * the two together. That is the arithmetic at the top. It deliberately does not
+ * add pack contents into component stock: a kit bought from a supplier is never
+ * broken open, so its bolts cannot fill a loose bolt order, and counting them
+ * in both places is the double-count the brief warns about.
  */
-async function loadKitReconciliation() {
-  const el = document.getElementById("kit-recon");
+async function loadKitAvailability() {
+  const el = document.getElementById("kit-avail");
   if (!el) return;
   try {
-    const r = await fetchJson(withWindow("/api/insights/kits/reconciliation"));
-    const s = r.summary ?? {};
+    const d = await fetchJson(withWindow("/api/insights/kits/availability"));
+    const s = d.summary ?? {};
     el.innerHTML = `
-      <h2>Counted once, not twice</h2>
-      <p class="hint">A unit is counted in the form it is physically held in. Four loose bolts are four bolts;
-      the same four inside a sealed pack are one pack, and are valued as a pack. "Inside packs" is therefore a
-      <em>view</em> of stock already counted — never an addition to it.</p>
-      <div class="recon">
-        <div class="recon-row"><span class="recon-lab">Stock value the platform reports</span>
-          <span class="recon-val">${money(r.stockValue)}</span></div>
-        <div class="recon-row"><span class="recon-lab">Those same units seen as loose parts</span>
-          <span class="recon-val muted">${money(r.embeddedValue)} <span class="muted">(${qty(Math.round(r.embeddedUnits))} units across ${qty(r.componentsWithEmbedded)} parts)</span></span></div>
-        <div class="recon-row recon-bad"><span class="recon-lab">What a spreadsheet adding both would report</span>
-          <span class="recon-val">${money(r.ifBothWereCounted)}</span></div>
-        <div class="recon-row recon-total"><span class="recon-lab">Overstatement avoided</span>
-          <span class="recon-val">${money(r.embeddedValue)} · ${r.overstatementPct}%</span></div>
+      <h2>How many kits could we supply?</h2>
+      <div class="figure-strip">
+        <div class="fs-cell"><span class="fs-v">${qty(s.kitsOnHand)}</span>
+          <span class="fs-k">complete kits on the shelf, across ${qty(s.kitsWithRecipe)} kit products</span></div>
+        <div class="fs-cell"><span class="fs-v">${qty(s.kitsWithBuildable)}</span>
+          <span class="fs-k">of those could have more built from parts on hand</span></div>
+        <div class="fs-cell"><span class="fs-v">${qty(s.boughtFromSupplier)}</span>
+          <span class="fs-k">are bought complete from a supplier</span></div>
       </div>
-      <p class="hint">${qty(s.buildPlans)} product${s.buildPlans === 1 ? " is" : "s are"} made here rather than bought,
-      so ${money(s.valueWithheld)} of requirement is on a build sheet instead of the purchasing cart.
-      ${s.doubleOrders ? `<strong>${qty(s.doubleOrders)}</strong> have a pack and its own parts both on order —
-        <a href="#/inventory?filter=kit_double_order">review them</a>.` : "Nothing is being ordered in both forms at once."}</p>
+      <p class="hint"><strong>Counted once.</strong> A kit bought from a supplier is never broken
+      open — it sells as the kit it arrived as — so its contents are not added into the stock of the
+      parts inside it. Kits are counted as kits and parts as parts.</p>
+      <p class="hint">Open any kit to see what it could supply: <strong>on the shelf + buildable from
+      parts</strong>. That total is not added up across products here, because kits share parts —
+      four of Allied's M12&times;40 kits draw on the same screws and nuts, so adding their buildable
+      figures together would count the same parts four times.
+      ${s.doubleOrders ? ` <strong>${qty(s.doubleOrders)}</strong> ${s.doubleOrders === 1 ? "kit has" : "kits have"} both the kit and its own parts on order —
+        <a href="#/inventory?filter=kit_double_order">review</a>.` : ""}</p>
+
+      <h3>Bought complete from a supplier <span class="badge brand">${qty(d.purchasedCount)}</span></h3>
+      <p class="hint">Found by looking at what Allied have actually been billed for, not by any
+      setting in MYOB. These are the items where buying ready-made is a real option.</p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Part</th><th class="num">Loose on hand</th>${th("embedded_stock", "Inside packs", "num")}
-          <th class="num">Value inside packs</th><th>Held in</th></tr></thead>
-        <tbody>${r.rows.map((x) => `<tr class="rowlink" data-uid="${esc(x.uid)}">
-          <td>${esc(x.number ?? "")} <span class="muted">${esc((x.name ?? "").slice(0, 30))}</span></td>
-          <td class="num">${qty(x.loose)}</td>
-          <td class="num strong">${qty(Math.round(x.embedded))}</td>
-          <td class="num">${money(x.embeddedValue)}</td>
-          <td class="muted">${x.heldIn.map(esc).join(", ")}</td>
+        <thead><tr><th>Kit</th><th>Supplier</th><th class="num">Last bought</th>
+          <th class="num">Paid each</th><th class="num">Parts cost</th>
+          <th class="num">On shelf</th><th class="num">Buildable</th><th class="num">Total</th></tr></thead>
+        <tbody>${d.purchased.map((r) => `<tr class="rowlink" data-uid="${esc(r.uid)}">
+          <td>${esc(r.number ?? "")} <span class="muted">${esc((r.name ?? "").slice(0, 26))}</span></td>
+          <td class="muted">${esc((r.lastSupplier ?? "").slice(0, 22))}</td>
+          <td class="num muted">${r.lastBought ? dateFmt(r.lastBought) : "—"}</td>
+          <td class="num">${r.buyPrice ? price(r.buyPrice) : "—"}</td>
+          <td class="num">${r.buildCost ? price(r.buildCost) : '<span class="muted">—</span>'}</td>
+          <td class="num">${qty(r.kitsOnHand)}</td>
+          <td class="num">${qty(r.buildableNow)}</td>
+          <td class="num strong">${qty(r.totalAvailable)}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+
+      <h3>Most kits available</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Kit</th><th>Sourced</th><th class="num">On shelf</th>
+          <th class="num">Buildable from parts</th>${th("kit_available", "Total available", "num")}</tr></thead>
+        <tbody>${d.rows.map((r) => `<tr class="rowlink" data-uid="${esc(r.uid)}">
+          <td>${esc(r.number ?? "")} <span class="muted">${esc((r.name ?? "").slice(0, 30))}</span></td>
+          <td>${r.boughtFromSupplier ? '<span class="badge brand">Bought complete</span>' : '<span class="badge ok">Made here</span>'}</td>
+          <td class="num">${qty(r.kitsOnHand)}</td>
+          <td class="num">${qty(r.buildableNow)}</td>
+          <td class="num strong">${qty(r.totalAvailable)}</td>
         </tr>`).join("")}</tbody>
       </table></div>`;
     el.querySelectorAll("tr.rowlink").forEach((tr) =>
       tr.addEventListener("click", () => (location.hash = `#/item/${tr.dataset.uid}`)),
     );
   } catch (err) {
-    el.innerHTML = `<h2>Counted once, not twice</h2><p class="muted">${esc(err.message)}</p>`;
+    el.innerHTML = `<h2>How many kits could we supply?</h2><p class="muted">${esc(err.message)}</p>`;
   }
 }
 
@@ -2571,7 +2643,7 @@ async function loadProductsTable() {
       <thead><tr>
         <th>Product</th>${th("kit_form", "Sourced")}<th class="num">Components</th>
         <th class="num">Free stock</th><th class="num">Sold ${data.window.windowMonths}m</th>
-        <th class="num">Buildable</th>
+        <th class="num">Buildable</th>${th("kit_available", "Total available", "num")}
         ${th("build_vs_buy", "Buy each", "num")}<th class="num">Build each</th>
         <th>Confidence</th>
       </tr></thead>
@@ -2587,7 +2659,8 @@ async function loadProductsTable() {
                     <td class="num">${qty(p.stock_free)}</td>
                     <td class="num">${qty(p.sold_window)}</td>
                     <td class="num">${p.buildable == null ? "—" : qty(p.buildable)}</td>
-                    <td class="num">${p.buy_cost ? price(p.buy_cost) : '<span class="muted">—</span>'}</td>
+                    <td class="num strong">${qty(Math.max(p.stock_free ?? 0, 0) + Math.max(p.buildable ?? 0, 0))}</td>
+                    <td class="num">${p.buy_price ? price(p.buy_price) : '<span class="muted" title="Never bought complete, so there is no purchase price">—</span>'}</td>
                     <td class="num">${productBuildCostCell(p)}</td>
                     <td>${
                       p.has_user_rows
@@ -2597,7 +2670,7 @@ async function loadProductsTable() {
                   </tr>`,
                 )
                 .join("")
-            : `<tr><td colspan="9">${productsEmptyState(data)}</td></tr>`
+            : `<tr><td colspan="10">${productsEmptyState(data)}</td></tr>`
         }
       </tbody>
     </table></div>
@@ -3635,11 +3708,9 @@ function drawCart() {
     ${
       d.kit && (d.kit.buildPlans || d.kit.doubleOrders)
         ? `<div class="notice cart-kit">
-             ${d.kit.buildPlans ? `<strong>${qty(d.kit.buildPlans)} item${d.kit.buildPlans === 1 ? " is" : "s are"} made here, not bought</strong>
-               — ${money(d.kit.buildPlanValue)} of requirement that belongs on a build sheet rather than a purchase
-               order, so it is not in this cart. ` : ""}
-             ${d.kit.linesReduced ? `${qty(d.kit.linesReduced)} more line${d.kit.linesReduced === 1 ? " was" : "s were"} reduced because
-               the parts are already sitting inside packs on the shelf. ` : ""}
+             ${d.kit.buildPlans ? `<strong>${qty(d.kit.buildPlans)} product${d.kit.buildPlans === 1 ? " has" : "s have"} never been bought complete</strong>,
+               so they are not in this cart — there is no purchase price to put on them. They show on
+               <a href="#/products">Products &amp; BOM</a> as a quantity to build. ` : ""}
              ${d.kit.doubleOrders ? `<strong>${qty(d.kit.doubleOrders)} line${d.kit.doubleOrders === 1 ? "" : "s"}</strong> below show a kit and
                something it is made of both being ordered — worth a look before exporting. ` : ""}
            </div>`

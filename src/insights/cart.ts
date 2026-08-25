@@ -60,8 +60,6 @@ export interface CartLine {
    * whether the kit it belongs to is being ordered alongside it.
    */
   kitForm: string | null;
-  kitWithheldQty: number;
-  kitWithheldReason: string | null;
   kitDoubleOrder: boolean;
   otherSuppliers: { supplierUid: string; supplierName: string | null }[];
   rationale: Record<string, number | string | null>;
@@ -90,7 +88,6 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   kit: {
     buildPlans: number;
     buildPlanValue: number;
-    linesReduced: number;
     doubleOrders: number;
   };
   /** Choices already made, so they can be reviewed and reversed. */
@@ -109,15 +106,16 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   /*
    * Items still needing a purchase order.
    *
-   * `build_not_buy` is excluded (P7): an item Allied make here still shows as
-   * below its minimum, and before the kit rules that was enough to put it in a
-   * purchase cart it does not belong in — BP1675S16 arrived as a NZ$32k line
-   * against an item that has never once been bought. Its requirement is real
-   * and is not lost; it moves to the build sheet on the Kits page.
+   * Items Allied have never bought complete are excluded (P7). One still shows
+   * as below its minimum, and before the kit rules that was enough to put it in
+   * a purchase cart it does not belong in — BP1675S16 arrived as a NZ$34,692
+   * line priced off MYOB's average_cost, which for a built item is the cost of
+   * having built it, not a purchase price. The requirement is real and is not
+   * lost: it appears on Products & BOM as a quantity to build.
    */
   const needing = items.filter(
     (i) =>
-      !i.flags.includes("build_not_buy") &&
+      !(i.kit?.buildPlanQty ?? 0) &&
       (i.suggestion != null || i.flags.includes("below_min")),
   );
   if (!needing.length) {
@@ -128,7 +126,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
       totalItems: 0,
       estimatedCost: 0,
       unresolvedDuplicates: 0,
-      kit: { buildPlans: 0, buildPlanValue: 0, linesReduced: 0, doubleOrders: 0 },
+      kit: { buildPlans: 0, buildPlanValue: 0, doubleOrders: 0 },
       decisions: [],
     };
   }
@@ -305,8 +303,6 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         estCost: qty * cost,
         supplierCount: list.length,
         kitForm: item.kit?.form ?? null,
-        kitWithheldQty: item.kit?.withheld?.qty ?? 0,
-        kitWithheldReason: item.kit?.withheld?.reason ?? null,
         kitDoubleOrder: item.kit?.doubleOrder ?? false,
         otherSuppliers: list
           .filter((x) => x.supplierUid !== o.supplierUid)
@@ -385,14 +381,13 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
      * because nobody can tell it is doing it.
      */
     kit: {
-      buildPlans: items.filter((i) => i.flags.includes("build_not_buy")).length,
+      buildPlans: items.filter((i) => (i.kit?.buildPlanQty ?? 0) > 0).length,
       buildPlanValue: Number(
         items
-          .filter((i) => i.flags.includes("build_not_buy"))
+          .filter((i) => (i.kit?.buildPlanQty ?? 0) > 0)
           .reduce((a, i) => a + (i.kit?.buildPlanQty ?? 0) * (i.averageCost ?? 0), 0)
           .toFixed(2),
       ),
-      linesReduced: items.filter((i) => i.flags.includes("kit_covered")).length,
       doubleOrders: suppliers.reduce(
         (a, g) => a + g.lines.filter((l) => l.kitDoubleOrder).length,
         0,
@@ -567,9 +562,7 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
            */
           l.kitDoubleOrder
             ? "CHECK — this item and something it is made of are both on this order"
-            : l.kitWithheldQty > 0
-              ? `${l.kitWithheldQty} units not ordered — already inside packs on the shelf`
-              : "",
+            : "",
           undecided ? "CHECK — also under another supplier, no choice recorded" : "",
         ].join(","),
       );

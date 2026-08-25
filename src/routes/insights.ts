@@ -42,7 +42,7 @@ import {
   suppliersCsv,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
-import { kitDetail, kitReconciliation } from "../insights/kitPlan.js";
+import { kitAvailability, kitDetail } from "../insights/kitPlan.js";
 import { clearKitForm, isKitForm, setKitForm } from "../insights/kits.js";
 import {
   anchorCoverage,
@@ -811,11 +811,11 @@ insightsRouter.post("/cart/undo", async (req, res) => {
  * moved there instead.
  */
 
-/** Stock value with and without the embedded view, and the gap between them. */
-insightsRouter.get("/kits/reconciliation", async (req, res) => {
+/** Kits on hand, kits buildable, and the two together. */
+insightsRouter.get("/kits/availability", async (req, res) => {
   if (!requireDb(res)) return;
   try {
-    res.json(await kitReconciliation(windowParams(req)));
+    res.json(await kitAvailability(windowParams(req)));
   } catch (err) {
     send500(res, err);
   }
