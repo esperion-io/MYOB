@@ -54,6 +54,15 @@ export interface CartLine {
   estCost: number;
   /** How many suppliers this same item sits under, across the whole cart. */
   supplierCount: number;
+  /**
+   * Kit context (P7), so a line can explain itself without a round trip: how
+   * the item is sourced, anything a kit rule took off this quantity, and
+   * whether the kit it belongs to is being ordered alongside it.
+   */
+  kitForm: string | null;
+  kitWithheldQty: number;
+  kitWithheldReason: string | null;
+  kitDoubleOrder: boolean;
   otherSuppliers: { supplierUid: string; supplierName: string | null }[];
   rationale: Record<string, number | string | null>;
 }
@@ -77,6 +86,13 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   estimatedCost: number;
   /** Items sitting under more than one supplier with no decision made yet. */
   unresolvedDuplicates: number;
+  /** What the kit rules (P7) kept out of this cart, and what still clashes. */
+  kit: {
+    buildPlans: number;
+    buildPlanValue: number;
+    linesReduced: number;
+    doubleOrders: number;
+  };
   /** Choices already made, so they can be reviewed and reversed. */
   decisions: {
     itemUid: string;
@@ -90,8 +106,19 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   const pool = getPool();
   const items = await computedItems(opts);
 
+  /*
+   * Items still needing a purchase order.
+   *
+   * `build_not_buy` is excluded (P7): an item Allied make here still shows as
+   * below its minimum, and before the kit rules that was enough to put it in a
+   * purchase cart it does not belong in — BP1675S16 arrived as a NZ$32k line
+   * against an item that has never once been bought. Its requirement is real
+   * and is not lost; it moves to the build sheet on the Kits page.
+   */
   const needing = items.filter(
-    (i) => i.suggestion != null || i.flags.includes("below_min"),
+    (i) =>
+      !i.flags.includes("build_not_buy") &&
+      (i.suggestion != null || i.flags.includes("below_min")),
   );
   if (!needing.length) {
     return {
@@ -101,6 +128,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
       totalItems: 0,
       estimatedCost: 0,
       unresolvedDuplicates: 0,
+      kit: { buildPlans: 0, buildPlanValue: 0, linesReduced: 0, doubleOrders: 0 },
       decisions: [],
     };
   }
@@ -276,6 +304,10 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         note: saved?.note ?? null,
         estCost: qty * cost,
         supplierCount: list.length,
+        kitForm: item.kit?.form ?? null,
+        kitWithheldQty: item.kit?.withheld?.qty ?? 0,
+        kitWithheldReason: item.kit?.withheld?.reason ?? null,
+        kitDoubleOrder: item.kit?.doubleOrder ?? false,
         otherSuppliers: list
           .filter((x) => x.supplierUid !== o.supplierUid)
           .map((x) => ({ supplierUid: x.supplierUid, supplierName: x.supplierName })),
@@ -347,6 +379,25 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
     estimatedCost: suppliers.reduce((a, g) => a + g.estimatedCost, 0),
     unresolvedDuplicates,
     decisions: [...decisions.values()],
+    /*
+     * What the kit rules kept out of this cart, reported rather than assumed.
+     * A cart that quietly holds items back is worse than one that over-orders,
+     * because nobody can tell it is doing it.
+     */
+    kit: {
+      buildPlans: items.filter((i) => i.flags.includes("build_not_buy")).length,
+      buildPlanValue: Number(
+        items
+          .filter((i) => i.flags.includes("build_not_buy"))
+          .reduce((a, i) => a + (i.kit?.buildPlanQty ?? 0) * (i.averageCost ?? 0), 0)
+          .toFixed(2),
+      ),
+      linesReduced: items.filter((i) => i.flags.includes("kit_covered")).length,
+      doubleOrders: suppliers.reduce(
+        (a, g) => a + g.lines.filter((l) => l.kitDoubleOrder).length,
+        0,
+      ),
+    },
   };
 }
 
@@ -452,6 +503,22 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
   };
 
   const lines: string[] = [];
+  if (cart.kit.doubleOrders > 0) {
+    lines.push(
+      esc(
+        `WARNING: ${cart.kit.doubleOrders} line(s) order a kit and something it is made of at the same time. Review the rows marked in "Kit CHECK" before ordering.`,
+      ),
+    );
+    lines.push("");
+  }
+  if (cart.kit.buildPlans > 0) {
+    lines.push(
+      esc(
+        `NOTE: ${cart.kit.buildPlans} item(s) worth ${cart.kit.buildPlanValue.toFixed(2)} are made in-house and are on the build sheet, not this order.`,
+      ),
+    );
+    lines.push("");
+  }
   if (cart.unresolvedDuplicates > 0) {
     lines.push(
       esc(
@@ -466,7 +533,7 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
     "Finish", "Order qty", "Unit cost", "Est cost",
     "On hand", "Free stock", "Incoming", "Min level",
     "Weekly demand", "Demand window", "Cover (weeks)",
-    "Line status", "Also under", "CHECK",
+    "Line status", "Also under", "Kit form", "Kit CHECK", "CHECK",
   ];
 
   for (const g of cart.suppliers) {
@@ -491,6 +558,18 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
           esc(l.coverWeeks),
           esc(l.state === "split" ? "Deliberate split" : l.state === "selected" ? "Chosen supplier" : l.state === "edited" ? "Quantity edited" : "Suggested"),
           esc(l.otherSuppliers.map((o) => o.supplierName).join(" / ")),
+          esc(l.kitForm ?? ""),
+          /*
+           * A second, different duplicate. "Also under" catches the same order
+           * placed with two suppliers; this catches the same requirement bought
+           * in two forms — the pack and the parts that make it. Both leave the
+           * building in this file, so both are flagged in it.
+           */
+          l.kitDoubleOrder
+            ? "CHECK — this item and something it is made of are both on this order"
+            : l.kitWithheldQty > 0
+              ? `${l.kitWithheldQty} units not ordered — already inside packs on the shelf`
+              : "",
           undecided ? "CHECK — also under another supplier, no choice recorded" : "",
         ].join(","),
       );

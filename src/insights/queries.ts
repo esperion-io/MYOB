@@ -2,6 +2,13 @@ import { businessToday } from "./businessDate.js";
 import { config } from "../config.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
+import {
+  applyKitRules,
+  EMPTY_KIT_SUMMARY,
+  loadKitGraph,
+  type KitFacts,
+  type KitRuleSummary,
+} from "./kits.js";
 
 /**
  * Analytics over the mirrored MYOB data.
@@ -378,6 +385,16 @@ export interface ItemComputed {
     qty: number;
     rationale: Record<string, number | string | null>;
   } | null;
+  /**
+   * Prebuilt-kit relationships (P7). Set on any item that has a recipe, sits
+   * inside someone else's, or had its suggestion changed by a kit rule; null
+   * on the ~2,500 items with no kit relationship at all.
+   *
+   * Filled by applyKitRules after every row is computed, because these are
+   * facts about the relationship between two items and cannot be decided one
+   * row at a time.
+   */
+  kit: KitFacts | null;
 }
 
 function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemComputed {
@@ -656,10 +673,35 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     flags,
     risk: { score, factors },
     suggestion,
+    kit: null,
   };
 }
 
-let itemsCache: { key: string; at: number; items: ItemComputed[] } | null = null;
+let itemsCache: {
+  key: string;
+  at: number;
+  items: ItemComputed[];
+  kitSummary: KitRuleSummary;
+} | null = null;
+
+/** The computation currently running, so concurrent callers can share it. */
+let inFlight: { key: string; promise: Promise<ItemComputed[]> } | null = null;
+
+/**
+ * What the kit rules did to the last computed set — how many purchase lines
+ * became build plans, how much was withheld, how many double orders are still
+ * unresolved. Reported on screen so a rule that changes a number is never
+ * silent about it.
+ */
+export async function kitRuleSummary(
+  opts?: Partial<DemandWindow>,
+): Promise<KitRuleSummary> {
+  await computedItems(opts);
+  // The fallback is only reachable if the cache is cleared between the two
+  // statements, by a decision saved on another request. An empty summary is
+  // honest there: the numbers it would describe have just been superseded.
+  return itemsCache?.kitSummary ?? EMPTY_KIT_SUMMARY;
+}
 
 export async function computedItems(
   opts?: Partial<DemandWindow> | boolean,
@@ -671,17 +713,49 @@ export async function computedItems(
   if (!force && itemsCache?.key === key && Date.now() - itemsCache.at < 30_000) {
     return itemsCache.items;
   }
-  await ensureInsightsSchema();
-  const result = await getPool().query(
-    `WITH ${demandCte(win)} ${itemSelect(win)}`,
-  );
-  const items = result.rows.map((r) => computeItem(r, win));
-  itemsCache = { key, at: Date.now(), items };
-  return items;
+  /*
+   * Concurrent callers share one computation.
+   *
+   * The cache is only written when the work finishes, so simultaneous requests
+   * all missed it and all recomputed the whole 3,100-item set. The Kits page
+   * asks for three things at once and turned a two-second page into twenty,
+   * and under load the pool ran dry and the requests failed outright. Holding
+   * the in-flight promise means the second and third callers wait on the first.
+   */
+  if (!force && inFlight?.key === key) return inFlight.promise;
+
+  const promise = (async () => {
+    await ensureInsightsSchema();
+    const result = await getPool().query(
+      `WITH ${demandCte(win)} ${itemSelect(win)}`,
+    );
+    const items = result.rows.map((r) => computeItem(r, win));
+    /*
+     * Kit rules run here, on the whole set, before anything is cached.
+     *
+     * Every consumer — the inventory list, the overview, the cart, an item page
+     * — comes through computedItems, so this is the one place a kit rule can be
+     * applied without some screen quietly disagreeing with another about
+     * whether a component still needs ordering.
+     */
+    const kitSummary = applyKitRules(items, await loadKitGraph());
+    itemsCache = { key, at: Date.now(), items, kitSummary };
+    return items;
+  })();
+
+  inFlight = { key, promise };
+  try {
+    return await promise;
+  } finally {
+    if (inFlight?.promise === promise) inFlight = null;
+  }
 }
 
 export function invalidateItemsCache(): void {
   itemsCache = null;
+  // Any computation already running was started against the old data, so it
+  // must not be handed to a caller who asked after the change.
+  inFlight = null;
 }
 
 export interface ListParams extends Partial<DemandWindow> {
@@ -831,9 +905,25 @@ export async function listItems(params: ListParams) {
     case "understated":
       rows = rows.filter((r) => r.flags.includes("understated_demand"));
       break;
+    // P7. `kits` is the register in list form; the other three are the three
+    // ways a kit rule can have changed what this page is telling you.
+    case "kits":
+      rows = rows.filter((r) => r.kit?.form != null);
+      break;
+    case "kit_covered":
+      rows = rows.filter((r) => r.flags.includes("kit_covered"));
+      break;
+    case "build_not_buy":
+      rows = rows.filter((r) => r.flags.includes("build_not_buy"));
+      break;
+    case "kit_double_order":
+      rows = rows.filter((r) => r.flags.includes("kit_double_order"));
+      break;
     case "excess":
       rows = rows.filter((r) => r.excess != null);
       break;
+    // No dead-stock exclusion needed: computeItem sets one flag or the other,
+    // never both, so the two worklists cannot overlap.
     case "slow_mover":
       rows = rows.filter((r) => r.flags.includes("slow_mover"));
       break;
@@ -1194,12 +1284,18 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
   const win = resolveWindow(opts);
   const pool = getPool();
 
-  const itemResult = await pool.query(
-    `WITH ${demandCte(win)} ${itemSelect(win)} WHERE it.uid = $1`,
-    [uid],
-  );
-  if (!itemResult.rows.length) return null;
-  const item = computeItem(itemResult.rows[0], win);
+  /*
+   * The item comes from the whole computed set, not from a single-row recompute.
+   *
+   * The kit rules (P7) are relationships between two items — a pack and the
+   * bolt inside it — so they can only be applied over the full set. Computing
+   * one row here in isolation would leave this page showing a purchase
+   * suggestion the inventory list and the cart had already withdrawn, which is
+   * precisely the kind of disagreement between screens the rules exist to end.
+   * The set is cached for 30 seconds, so this is a map lookup in practice.
+   */
+  const item = (await computedItems(win)).find((i) => i.uid === uid);
+  if (!item) return null;
   const chartMonths = Math.max(12, win.windowMonths);
 
   const [monthly, movements, commitments, incoming, purchases, rels, freshness, potentialParents] =

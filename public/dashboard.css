@@ -1017,3 +1017,102 @@ body.modal-open { overflow: hidden; }
   width: 9rem;
 }
 .compare th { text-transform: none; letter-spacing: 0; font-size: 0.72rem; }
+
+/* ---------- P7: kits and parts ----------
+ *
+ * Two shapes carry this page. The reconciliation is a ledger — labels left,
+ * money right, one line disagreeing with the others on purpose — so the
+ * overstatement reads as arithmetic rather than as a claim. The two source
+ * routes are set side by side at equal weight, because the whole point is that
+ * neither is the default: on Allied's file the cheaper one flips by finish.
+ */
+
+.kpi .k-sub {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.kpi.ok .k-value { color: var(--ok); }
+
+.recon {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  margin: 0.8rem 0 1rem;
+}
+.recon-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--panel);
+}
+.recon-lab { color: var(--ink); }
+.recon-val { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.recon-bad { background: var(--fail-bg); }
+.recon-bad .recon-val { color: var(--fail); }
+/* The point of the whole panel, so it gets the emphasis. */
+.recon-total { background: var(--ok-bg); }
+.recon-total .recon-lab,
+.recon-total .recon-val {
+  color: var(--ok);
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+
+.kit-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin: 0.9rem 0 1.1rem;
+}
+.kit-option {
+  border: 1px solid var(--line);
+  padding: 0.8rem 0.85rem;
+  background: var(--panel);
+}
+/* The form currently in force. A left rule rather than a fill, so the two
+   options keep the same visual weight — this marks the choice, not a winner. */
+.kit-option.chosen {
+  border-left: 3px solid var(--brand);
+  background: var(--brand-soft);
+}
+.kit-option h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  color: var(--ink-deep);
+}
+.kit-price {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 800;
+  color: var(--ink-deep);
+  letter-spacing: -0.02em;
+}
+.kit-price .muted { font-size: 0.7rem; font-weight: 500; }
+.kit-facts { margin: 0; padding-left: 1rem; display: grid; gap: 0.25rem; }
+.kit-facts li { font-size: 0.78rem; }
+.kit-facts .kit-total {
+  list-style: none;
+  margin-left: -1rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--line);
+}
+
+.kit-forms { display: grid; gap: 0.4rem; margin: 0.5rem 0 0.8rem; }
+.kit-form-btn { text-align: left; display: grid; gap: 0.15rem; }
+.kit-form-btn .muted { font-size: 0.72rem; font-weight: 400; }
+.kit-form-btn.primary .muted { color: rgba(255, 255, 255, 0.75); }
+
+.panel-warn { border-left: 3px solid var(--warn); }
+tr.row-warn > td { background: var(--warn-bg); }
+
+ul.plain { margin: 0.3rem 0 0.8rem; padding-left: 1rem; display: grid; gap: 0.2rem; }
+.good { color: var(--ok); font-weight: 600; }
+.brandtext { color: var(--brand-deep); font-weight: 600; }
+.strong { font-weight: 700; color: var(--ink-deep); }

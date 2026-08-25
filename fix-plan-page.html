@@ -205,18 +205,18 @@
 <div class="wrap">
 
   <header class="masthead">
-    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v3</p>
+    <p class="eyebrow">Allied Fastenings · Inventory Intelligence · v4</p>
     <h1>Allied Priority Fix Plan</h1>
-    <p class="standfirst">Implementation plan for the six client priorities, rebuilt around a stocktake-anchored stock ledger — plus one blocking defect found while verifying the numbers.</p>
+    <p class="standfirst">Implementation plan for the seven client priorities, rebuilt around a stocktake-anchored stock ledger — plus one blocking defect found while verifying the numbers.</p>
     <div class="meta">
-      <span><b>Revised</b> 24 Aug 2026</span>
-      <span><b>Status</b> All six priorities shipped</span>
+      <span><b>Revised</b> 25 Aug 2026</span>
+      <span><b>Status</b> All seven priorities shipped</span>
       <span><b>Verified against</b> Live MYOB file, 3,100 items</span>
     </div>
   </header>
 
   <div class="changelog">
-    <h2>What changed in v2</h2>
+    <h2>What has shipped</h2>
     <ul>
       <li><strong>P1 is rewritten.</strong> Stock on hand now comes from a stocktake-anchored ledger, not MYOB's <code>QuantityOnHand</code>. This is the client's direction, and the data supports it.</li>
       <li><strong>P3 is clarified</strong> — yes, we start persisting data now. The plan states exactly which dates will be exact, which reconstructed, and which unreliable.</li>
@@ -227,6 +227,7 @@
       <li><strong>P3 shipped 21 Aug.</strong> An as-at date and a rolling window that move independently, a month-end spreadsheet export, and a New Zealand time correction that was misdating the snapshot trail by a day.</li>
       <li><strong>P4 shipped 21 Aug.</strong> Product type and finish as independent facets — "stainless washers" is 89 items from two filters, with no compound category anywhere — plus Allied's own free-text tags.</li>
       <li><strong>P5 + P6 shipped 24 Aug.</strong> The cart fans an item out across every supplier tagged against it — 1,346 items become 1,681 lines across 69 suppliers — with all five guard rails, lead times measured from Allied's own orders, and per-supplier order sheets.</li>
+      <li><strong>P7 shipped 25 Aug.</strong> Prebuilt kits and components become one item in two forms. A stated counting rule quantifies a NZ$40,509 double-count, NZ$45,601 of build work leaves the purchase cart for a build sheet, and every kit is priced both ways — a comparison that flipped for four stainless kits the day a container landed, which is why no verdict is ever stored.</li>
     </ul>
   </div>
 
@@ -646,6 +647,104 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
       <h4>Prerequisite — Allied tags their own items</h4>
       <p>Per client direction, Allied will tag multi-supplier items themselves. Two consequences: <strong>stages 1–3 cannot be demonstrated until some items are tagged</strong>, so we should ask for a starter set of <strong>~20 items with 2+ suppliers each, ideally including stainless lines</strong>, before the demo. Meanwhile we build a throwaway seeded fixture for our own testing, so development is not blocked waiting on them.</p>
     </article>
+
+    <article class="card is-core">
+      <h3><span class="pid">P7</span> Prebuilt kits and components <span class="tag good">Shipped 25 Aug</span></h3>
+      <p class="dep">Raised after the first six shipped · One item, two forms · The counting rule is the deliverable</p>
+      <p class="quote">"The same item can exist as a prebuilt kit bought from a specialist supplier, or as components we assemble here. The system treats them as unrelated codes — so we double-count stock, order parts we already have, and reconcile it by hand in a spreadsheet."</p>
+
+      <div class="evidence">
+        <p class="etitle">Allied already run both routes, and their own file shows it</p>
+        <p style="margin:0 0 10px"><code>BP1675G</code> (M16x75 bolt pack) is billed in container loads of <strong>6,000–10,000</strong> every few months — Aug 24, Nov, Mar, May, Jul — and built in-house in batches of <strong>50–1,450</strong> in the months between. That is the brief's "emergency assembly when kit shipments are delayed", visible without anyone having to describe it.</p>
+        <p style="margin:0"><strong>513 items have a recipe.</strong> 70 carry some evidence of being bought complete: 13 on real purchase bills, 6 on an order never billed, 51 on a checkbox alone. <strong>56 items are both a parent and a component</strong> — a bolt sits in a pack, and the pack sits in a dressing set.</p>
+      </div>
+
+      <h4>What it was costing</h4>
+      <ol>
+        <li><strong>Component stock was invisible.</strong> <code>BN1675G</code> reads 3,301 on hand. Another <strong>32,612 are in the building</strong>, inside 8,093 <code>BP1675G</code> packs. Across the file, 70 components hold <strong>NZ$40,509</strong> of stock this way.</li>
+        <li><strong>The cart bought the same requirement twice.</strong> 179 recipe parents were suggested for purchase while a component of theirs was also suggested.</li>
+        <li><strong>Orders were raised for things Allied never buy.</strong> <code>BP1675S16</code> carried a <strong>2,483-unit line worth NZ$31,939</strong> against an item with no purchase record in two years and no supplier on file. It is built here — 28,441 units across 286 builds.</li>
+      </ol>
+
+      <h4>The counting rule</h4>
+      <p>Stated once, and enforced everywhere: <strong>a unit is counted in the form it is physically held in.</strong> Four loose bolts are four bolts; the same four inside a sealed pack are one pack, and are valued as a pack.</p>
+      <p>Embedded quantities are therefore a <em>view</em> of stock already counted under the kit, never an addition to it. That is what lets the product show both figures without double-counting either — and the page proves it with arithmetic rather than assertion:</p>
+      <div class="scroll">
+        <table>
+          <tbody>
+            <tr><td>Stock value the platform reports</td><td class="num">NZ$864,133</td></tr>
+            <tr><td>Of which sits in kits, valued as kits</td><td class="num">NZ$41,679</td></tr>
+            <tr><td>Those same units seen as loose parts</td><td class="num">NZ$40,509 <span style="color:var(--muted)">(180,005 units)</span></td></tr>
+            <tr><td><strong>What a spreadsheet adding both would report</strong></td><td class="bad">NZ$904,642</td></tr>
+            <tr><td><strong>Overstatement avoided</strong></td><td class="num"><strong>NZ$40,509 — 4.69%</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A second static guard now sits beside the ledger-boundary check: embedded quantities may only be touched by the two kit modules and the dashboard that displays them. Arithmetic cannot be enforced by types, but the blast radius can.</p>
+
+      <h4>The three rules</h4>
+      <ol>
+        <li><strong>An assembled kit is not bought.</strong> Its shortfall becomes a build plan, not a purchase line. <strong>212 lines worth NZ$45,601</strong> left the cart for the build sheet.</li>
+        <li><strong>A prebuilt kit's components are not bought to build it.</strong> If the pack is bought complete, ordering the bolts to make it buys the same requirement twice.</li>
+        <li><strong>Prebuilt stock is used before components are ordered</strong> — the brief's "prioritise prebuilt kit usage".</li>
+      </ol>
+      <p><strong>The cap is what makes rule 3 safe.</strong> A component's order is reduced only by the build-driven share of its demand, because a bolt sold loose over the counter cannot be picked out of a sealed pack — and that split is already measured. The reduction comes off the demand-driven part of the suggestion only, so where a suggestion is really MYOB's minimum level talking, the minimum survives. Over-ordering is the complaint; a stockout is the worse of the two failures.</p>
+
+      <div class="evidence">
+        <p class="etitle">The first working version was wrong, and the data said so</p>
+        <p style="margin:0">It withheld <strong>1,539 stainless nuts</strong> from a real order on the strength of a checkbox on <code>KITST1040S</code> — an item that has never once been purchased. That is exactly the unearned conclusion the stocktake work refused to make. Evidence is now graded, and only two grades act on their own: <strong>a real purchase bill</strong>, and <strong>the complete absence of one across two years</strong>. A checkbox and an unbilled order go to a queue. <strong>57 proposals sit there</strong>, ranked by what confirming would change.</p>
+      </div>
+
+      <h4>Build versus buy — and why cost rarely settles it</h4>
+      <p>The two routes land within a few percent of each other, and <strong>the cheaper one flips by finish</strong>, across the whole file:</p>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Finish</th><th>Kits priced both ways</th><th>Cheaper to build</th><th>Cheaper to buy</th></tr></thead>
+          <tbody>
+            <tr><td>GALVANIZED</td><td class="num">10</td><td class="num">6</td><td class="num">4</td></tr>
+            <tr><td>STAINLESS STEEL</td><td class="num">9</td><td class="num">4</td><td class="num">5</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>This table moves, and watching it move is the finding.</strong> Measured on 24 Aug it read 0 / 9 — <em>every</em> stainless kit cheaper bought complete, matching Allied's buying habit exactly. A Shandong Tengda container of stainless bolts and nuts landed on <strong>25 Aug</strong> well under the standing average, and four of the nine flipped to cheaper-to-build within the day. Nothing about the products changed; only what Allied paid for the parts.</p>
+      <p>So <strong>no buy-versus-build verdict is ever stored.</strong> Both figures are recomputed from average cost on every read, and the screen leads with the constraint that usually decides it anyway — <strong>how many could be built today</strong>, set by the scarcest component.</p>
+
+      <div class="evidence">
+        <p class="etitle">What using it caught — and it changed the answer</p>
+        <p style="margin:0 0 10px"><code>BP1675S16</code> is the case the feature was built for. It needs 2,483, only <strong>18 are buildable today</strong>, and buying complete at $12.86 beats building at $13.31 — so the screen read as an argument for finding a prebuilt supplier.</p>
+        <p style="margin:0 0 10px"><strong>Except 30,000 <code>B1675S16</code> and 60,000 <code>N16S16M</code> were already on open purchase orders.</strong> Buying the packs as well would have been paying twice for the same requirement. Incoming stock is now on every component line and in the headline. It is <em>surfaced, not decided</em>: a component serves several parents, so attributing an open order to one of them is a guess.</p>
+        <p style="margin:0"><strong>It then resolved on the same day.</strong> The Shandong Tengda container landed 25 Aug. <code>B1675S16</code> fell from $2.04 to <strong>$1.05</strong> average cost and <code>N16S16M</code> from $1.18 to <strong>$0.33</strong>, taking the build route from $13.31 to <strong>$5.94</strong> against $12.86 bought, and buildable-now from 18 to <strong>3,184</strong> — more than the whole requirement. The NZ$34,692 the rules withheld turned out to be avoidable in full.</p>
+      </div>
+
+      <h4>Conversion is a single field</h4>
+      <p>The brief asks for seamless conversion between kit and component tracking. It is one field: <code>prebuilt</code>, <code>assembled</code>, <code>hybrid</code> or <code>not_a_kit</code>. Change it and the order list, the cart, the register and the build sheet all follow — nothing migrates, nothing reconciles. Verified end to end: flipping <code>BP1675S16</code> to prebuilt moved 2,483 units from a withheld build plan back into a live purchase suggestion, and clearing the decision put it back.</p>
+
+      <h4>Verified against the live file, 25 Aug 2026</h4>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Success criterion from the brief</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Clear distinction between kits and components</td><td>✅ 513 in one register — 25 prebuilt, 443 assembled, 45 hybrid</td></tr>
+            <tr><td>Prebuilt used before component purchases are suggested</td><td>✅ live, capped at build-driven demand</td></tr>
+            <tr><td>No double-counting across the two forms</td><td>✅ NZ$40,509 quantified; static guard added</td></tr>
+            <tr><td>Both kit and component levels visible</td><td>✅ 70 components show loose and embedded, labelled with the kit they are valued under</td></tr>
+            <tr><td>Conversion between forms supported</td><td>✅ one field; round trip verified</td></tr>
+            <tr><td>Integrates with supplier and purchasing workflows</td><td>✅ 212 build plans out of the cart, 47 clashes flagged, both exports carry the reasoning</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="evidence">
+        <p class="etitle">Two faults found underneath, while building on top</p>
+        <ul>
+          <li><strong>The item page disagreed with every other screen.</strong> It recomputed a single row on its own, so kit rules — which are relationships between two items — never reached it. It would have shown a purchase suggestion the cart had already withdrawn.</li>
+          <li><strong>The new page took twenty seconds, then failed.</strong> The item cache is only written when the work finishes, so three simultaneous requests all missed it and all recomputed 3,100 items; the connection pool ran dry and requests returned 500. Concurrent callers now share one computation. Cold <strong>20s → 10.6s</strong>, warm <strong>0.17s</strong>.</li>
+        </ul>
+      </div>
+
+      <h4>Not building</h4>
+      <p><strong>No automatic dismantling of packs</strong> — recovering loose bolts from a pack is a physical act with a stock movement behind it, and the platform will not invent one. <strong>No automatic decision from incoming stock</strong>, for the reason above.</p>
+    </article>
   </section>
 
   <hr />
@@ -746,7 +845,11 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
    (blocker)              (the new core)               │
                                                        ├──> P3 as-at + windows  [Aug deadline]
                                                        │
-                          P4 facets + tags ────────────┴──> P5+P6 cart rebuild</code></pre>
+                          P4 facets + tags ────────────┴──> P5+P6 cart rebuild
+                                                                       │
+                                                                       └──> P7 kits + components
+                                                                            (on P0's BOM and P1's free stock;
+                                                                             changes what the cart contains)</code></pre>
 
     <div class="scroll">
       <table>
@@ -758,13 +861,14 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
           <tr><td class="num">P3</td><td>As-at + rolling window + backfill</td><td class="num">L</td><td>Snapshots, confidence tiers, 2-year backfill.</td></tr>
           <tr><td class="num">P4</td><td>Facets + tags</td><td class="num">S–M</td><td>Reduced — no suppression logic.</td></tr>
           <tr><td class="num">P5+P6</td><td>Cart rebuild</td><td class="num">XL</td><td>New persistence, fan-out, guard rails, xlsx.</td></tr>
+          <tr><td class="num">P7</td><td>Prebuilt kits and components</td><td class="num">L</td><td>Raised after the first six. Rests on P0's Bill of Materials and P1's free stock; changes what the P5+P6 cart contains.</td></tr>
         </tbody>
       </table>
     </div>
 
     <div class="evidence">
       <p class="etitle">Recommended order</p>
-      <p style="margin:0 0 10px"><strong>P0 → P1 → P2 → P3 → P4 → P5+P6</strong></p>
+      <p style="margin:0 0 10px"><strong>P0 → P1 → P2 → P3 → P4 → P5+P6 → P7</strong></p>
       <p style="margin:0 0 10px">P1 now sits directly behind P0 rather than beside P2, because on-hand is an input to valuation, cover, below-minimum flags and every purchasing suggestion. P2 follows immediately and is nearly free. P3 must not slip — it is the only item with a hard external deadline.</p>
       <p style="margin:0"><strong>Note on P1's new size.</strong> The rewrite moves roughly a week of work into the critical path. If the August run is at risk, the sequencing that protects it is P0 → P1 (ledger + anchors, no UI polish) → P3 (as-at + 6-month window), deferring the divergence panel and audit-trail UI to immediately after. The maths ships; the presentation follows.</p>
     </div>
@@ -797,7 +901,7 @@ divergence(i)   = on_hand_ledger(i, today) − myob_qty_on_hand(i)</code></pre>
   </section>
 
   <footer>
-    Allied Fastenings · Inventory Intelligence — priority fix plan v2, 17 Aug 2026.<br />
+    Allied Fastenings · Inventory Intelligence — priority fix plan v4, 25 Aug 2026.<br />
     Findings verified against the live MYOB company file and the production database.
   </footer>
 

@@ -43,6 +43,14 @@ import {
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 import {
+  kitDetail,
+  kitQueue,
+  kitReconciliation,
+  kitRegister,
+  kitRegisterCsv,
+} from "../insights/kitPlan.js";
+import { clearKitForm, isKitForm, setKitForm } from "../insights/kits.js";
+import {
   anchorCoverage,
   confirmStocktake,
   itemLedger,
@@ -801,6 +809,126 @@ insightsRouter.post("/cart/undo", async (req, res) => {
 });
 
 /** The inventory list as a spreadsheet, honouring the filters in the URL. */
+/*
+ * ---- P7: prebuilt kits and components ------------------------------------
+ *
+ * One register for every item that exists in two forms, the queue of proposals
+ * still waiting on a person, the build-versus-buy comparison for a single item,
+ * and the reconciliation that proves nothing is counted twice.
+ */
+insightsRouter.get("/kits", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(
+      await kitRegister({
+        q: typeof req.query.q === "string" ? req.query.q : undefined,
+        filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
+        sort: typeof req.query.sort === "string" ? req.query.sort : undefined,
+        dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
+        ...windowParams(req),
+      }),
+    );
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Proposals the platform declines to act on until Allied confirm them. */
+insightsRouter.get("/kits/queue", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await kitQueue(windowParams(req)));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Stock value with and without the embedded view, and the gap between them. */
+insightsRouter.get("/kits/reconciliation", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await kitReconciliation(windowParams(req)));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.get("/kits.csv", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const csv = await kitRegisterCsv({
+      q: typeof req.query.q === "string" ? req.query.q : undefined,
+      filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
+      sort: typeof req.query.sort === "string" ? req.query.sort : undefined,
+      dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
+      ...windowParams(req),
+    });
+    res
+      .type("text/csv; charset=utf-8")
+      .setHeader("Content-Disposition", `attachment; filename="allied-kits-${businessToday()}.csv"`)
+      .send(csv);
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.get("/kits/:uid", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const detail = await kitDetail(req.params.uid, windowParams(req));
+    if (!detail) {
+      res.status(404).json({ error: "Item not found." });
+      return;
+    }
+    res.json(detail);
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/*
+ * Allied's decision on how an item is sourced.
+ *
+ * This one field is also the conversion mechanism the brief asks for: moving an
+ * item between kit and component tracking is a change of form, and every figure
+ * downstream recomputes from it. Hence the cache invalidation — suggestions,
+ * the cart and the register all change on the next read.
+ */
+insightsRouter.post("/kits/:uid/form", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const form = req.body?.form;
+    if (!isKitForm(form)) {
+      res.status(400).json({
+        error: "form must be one of prebuilt, assembled, hybrid, not_a_kit.",
+      });
+      return;
+    }
+    await setKitForm({
+      itemUid: req.params.uid,
+      form,
+      note: typeof req.body?.note === "string" ? req.body.note : null,
+      decidedBy: typeof req.body?.decidedBy === "string" ? req.body.decidedBy : null,
+    });
+    invalidateItemsCache();
+    res.json({ ok: true, form });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Undo a decision, so the item falls back to the proposed form. */
+insightsRouter.delete("/kits/:uid/form", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    await clearKitForm(req.params.uid);
+    invalidateItemsCache();
+    res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
 insightsRouter.get("/items.csv", async (req, res) => {
   if (!requireDb(res)) return;
   try {

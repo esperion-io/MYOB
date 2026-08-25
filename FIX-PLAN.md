@@ -1,6 +1,6 @@
-# Allied Priority Fix Plan — v2
+# Allied Priority Fix Plan — v3
 
-**Status:** All six priorities shipped. P0 18 Aug, P1 and P2 19 Aug, P3 21 Aug, P4 21 Aug, P5+P6 24 Aug 2026. Two backlog items raised and parked. Revised after client direction on stocktake-anchored stock maths.
+**Status:** All seven priorities shipped. P0 18 Aug, P1 and P2 19 Aug, P3 21 Aug, P4 21 Aug, P5+P6 24 Aug, P7 25 Aug 2026. Two backlog items raised and parked. Revised after client direction on stocktake-anchored stock maths.
 
 **What changed in v2**
 
@@ -13,6 +13,7 @@
 - **P3 shipped 21 Aug** — an as-at date and a rolling window, genuinely independent; a NZ-time correction that was misdating the snapshot trail; and the month-end spreadsheet export.
 - **P4 shipped 21 Aug** — product type and finish as independent facets, nothing suppressed, plus Allied's own free-text tags.
 - **P5+P6 shipped 24 Aug** — the cart fans an item out across every supplier tagged against it, with all five guard rails, measured lead times and per-supplier order sheets.
+- **P7 shipped 25 Aug** — prebuilt kits and components are one item in two forms, with a stated counting rule that quantifies a NZ$40,509 double-count, NZ$45,601 of build work moved off the purchase cart, and build-versus-buy priced both ways.
 
 ---
 
@@ -693,6 +694,142 @@ Per client direction, Allied will tag multi-supplier items themselves rather tha
 
 - **Stages 1–3 cannot be demonstrated until some items are tagged.** We should ask for a **small starter set — around 20 items with 2+ suppliers each, ideally including some stainless lines** — before the demo, so the guard rails can be shown working on real data.
 - We will build a **throwaway seeded fixture** for our own testing so development is not blocked waiting on them. It never ships to production.
+
+---
+
+### P7 — Prebuilt kits and components ✅ SHIPPED 25 Aug 2026
+
+**The client's seventh priority, raised after the six were delivered. The same physical thing exists in two forms, and the platform treated them as unrelated item codes.**
+
+#### The problem, in Allied's own file
+
+A bolt pack is either bought complete from a specialist supplier or made here from a bolt, a nut and two washers. Allied do both, and their documents show both routes running at the same time:
+
+| BP1675G — M16x75 BOLT PACK HDG | Built in-house | Bought complete |
+|---|---:|---:|
+| Aug 2024 | — | 6,205 |
+| Mar–May 2025 | 3,704 | 8,064 |
+| Oct–Nov 2025 | 1,030 | 6,076 |
+| Mar 2026 | 602 | 6,030 |
+| May–Jun 2026 | 1,468 | — |
+| Jul 2026 | 510 | 10,263 |
+
+Container loads every few months, small batches in between. That is the brief's "emergency assembly when kit shipments are delayed", visible without anyone having to describe it.
+
+**513 items have a recipe. 70 carry some evidence of being bought complete** — 13 appear on actual purchase bills, 6 on a purchase order never billed, and 51 carry only MYOB's "I buy this item" checkbox. **56 items are both a parent and a component**, which is the layer that matters: a bolt sits in a bolt pack, and the pack sits in a dressing set.
+
+Three failures followed from treating the two forms as unrelated:
+
+1. **Component stock was invisible.** `BN1675G` reads 3,301 on hand. There are another **32,612 of them in the building**, inside 8,093 `BP1675G` packs. Across the file, **70 components hold NZ$40,509 of stock this way.**
+2. **The cart bought the same requirement twice.** 179 recipe parents were suggested for purchase while a component of theirs was also suggested.
+3. **Purchase orders were raised for things Allied never buy.** `BP1675S16` carried a **2,483-unit suggestion worth NZ$31,939** against an item with **no purchase record in two years** and no supplier on file. It is built here, 28,441 units across 286 builds.
+
+#### The counting rule
+
+Stated once, and enforced everywhere:
+
+> **A unit is counted in the form it is physically held in.** Four loose bolts are four bolts; the same four inside a sealed pack are one pack, and are valued as a pack.
+
+So embedded quantities are a **view** of stock already counted under the kit, never an addition to it. That is what lets the product show both figures without double-counting either, and the Kits page proves it with arithmetic rather than assertion:
+
+| | |
+|---|---:|
+| Stock value the platform reports | NZ$864,133 |
+| Of which sits in kits, valued as kits | NZ$41,679 |
+| Those same units seen as loose parts | NZ$40,509 (180,005 units) |
+| **What a spreadsheet adding both would report** | **NZ$904,642** |
+| **Overstatement avoided** | **NZ$40,509 — 4.69%** |
+
+`scripts/check-ledger-boundary.mjs` now carries a second guard: embedded quantities may only be touched by the two kit modules and the dashboard that displays them. Arithmetic cannot be enforced by types, but the blast radius can, and anything summing them into a total has to come through that check first.
+
+#### The three rules
+
+Each one is visible, reversible, and reported rather than applied silently.
+
+1. **An assembled kit is not bought.** Its shortfall becomes a build plan, not a purchase line. **212 lines worth NZ$45,601** left the purchase cart for the build sheet.
+2. **A prebuilt kit's components are not bought in order to build it.** If the pack is bought complete, ordering the bolts to make it is ordering the same requirement twice.
+3. **Prebuilt stock is used before components are ordered** — the brief's "prioritise prebuilt kit usage", capped at the part of demand that actually came through building.
+
+**The cap matters.** A component's order is reduced only by the build-driven share of its demand, because a bolt sold loose over the counter cannot be picked out of a sealed pack. That split is already measured: build consumption against invoiced sales. And the reduction is taken from the demand-driven part of the suggestion only — where a suggestion is really MYOB's minimum level talking, the minimum survives the rule. Over-ordering is the complaint in the brief; a stockout is the worse of the two failures.
+
+#### Evidence is graded, and weak evidence does not act
+
+The first working version withheld **1,539 stainless nuts** from a real order on the strength of a checkbox on `KITST1040S` — an item that has never been purchased. That is exactly the unearned conclusion the stocktake work refused to make, so the rules are gated:
+
+| Evidence | Items | Acts on its own? |
+|---|---:|---|
+| Confirmed by Allied | 0 so far | Always |
+| `purchased` — on a purchase bill | 13 | Yes. It has genuinely been bought complete. |
+| `none` — no purchase signal in two years | 443 | Yes, and this is where the value is. Proposing "made here, not bought" from a complete absence of purchase records is safe. |
+| `on_order` — ordered, never billed | 6 | **No.** Intent, not history. |
+| `flagged` — MYOB's "I buy this item" checkbox | 51 | **No.** A checkbox is not a purchase. |
+
+**57 proposals sit in a confirmation queue**, ranked by what confirming would change, each stating plainly what is currently being ordered in parts for that item. Detection proposes; Allied confirm.
+
+#### Build versus buy — and why cost rarely settles it
+
+The two routes land within a few percent of each other, and **the cheaper one flips by finish**, across the whole file:
+
+| Finish | Kits with a complete roll-up | Cheaper to build | Cheaper to buy |
+|---|---:|---:|---:|
+| GALVANIZED | 10 | 6 | 4 |
+| STAINLESS STEEL | 9 | 4 | 5 |
+
+**This table moves, and watching it move is the finding.** Measured on 24 Aug it read 0 / 9 — *every* stainless kit cheaper bought complete, which matched Allied's buying habit exactly. A Shandong Tengda container of stainless bolts and nuts landed on 25 Aug at well under the standing average, and four of the nine flipped to cheaper-to-build within the day. Nothing about the products changed; only what Allied paid for the parts.
+
+The lesson is designed into the feature rather than written down beside it: **no buy-versus-build verdict is ever stored.** Both figures are recomputed from `average_cost` on every read, so the comparison follows the file instead of a note someone made last month.
+
+So the screen leads with the constraint that usually decides it instead: **how many could be built today**, set by the scarcest component.
+
+#### What using it caught
+
+`BP1675S16` is the case the whole feature was built for, and it turned out to have a second answer:
+
+- Needs 2,483. **18 buildable today.** Buy complete NZ$12.86, build NZ$13.31 — so buying looks right, except it has never been purchased and has no supplier on file.
+- **30,000 `B1675S16` and 60,000 `N16S16M` were already on open purchase orders.** The prebuilt purchase would have been paying twice for the same requirement.
+
+**And then it resolved, on the same day.** The Shandong Tengda container landed 25 Aug. `B1675S16` fell from $2.04 to **$1.05** average cost and `N16S16M` from $1.18 to **$0.33**, so the build route went from $13.31 to **$5.94** against $12.86 bought, and buildable-now went from 18 to **3,184** — more than the whole 2,697 requirement. The NZ$34,692 purchase suggestion the rules withheld turned out to be avoidable in full.
+
+Buying 2,483 packs at NZ$31,939 would be paying for the same requirement a second time. The first version of the screen missed this entirely and read as an argument for buying prebuilt; incoming stock is now on every component line and in the headline.
+
+**It is surfaced, not decided.** A component can serve several parents, so attributing incoming stock to one of them is a guess. The screen states the arithmetic and a person makes the call.
+
+#### Conversion is a single field
+
+The brief asks for "seamless conversion between kit and component tracking as business needs change". It is one field on `platform_kit_policy`: `prebuilt`, `assembled`, `hybrid`, or `not_a_kit`. Change it and the order list, the cart, the register and the build sheet all follow. Nothing migrates, nothing reconciles. Verified end to end: flipping `BP1675S16` from assembled to prebuilt moved 2,483 units from a withheld build plan back into a live purchase suggestion, and clearing the decision put it back.
+
+#### What shipped
+
+| | |
+|---|---|
+| Schema | `platform_kit_policy`; views `kit_candidate`, `kit_form`, `kit_embedded_stock` (recursive, depth-capped, cycle-guarded), `kit_build_option` |
+| Rules | `src/insights/kits.ts` — graph, the three rules, the evidence gate |
+| Screens | `src/insights/kitPlan.ts` — register, confirmation queue, build-vs-buy, reconciliation, CSV |
+| API | `GET/POST/DELETE /api/insights/kits*` |
+| UI | New **Kits & parts** page; kit panel on every item page; four new inventory filters; kit badges, a summary notice and two new export columns on Purchasing |
+| Guard | Second rule in `scripts/check-ledger-boundary.mjs` |
+
+#### Verified against the live file, 25 Aug 2026
+
+| Acceptance criterion | Result |
+|---|---|
+| Kits and components clearly distinguished | ✅ 513 in the register — 25 prebuilt, 443 assembled, 45 hybrid |
+| Prebuilt stock used before components are ordered | ✅ rule 3 live; 4 lines reduced, capped at build-driven demand |
+| No double-counting across the two forms | ✅ NZ$40,509 overstatement quantified; static guard added |
+| Both kit and component levels visible | ✅ 70 components show loose and embedded, labelled with the kit they are valued under |
+| Conversion between forms supported | ✅ one field; round trip verified on `BP1675S16` |
+| Integrates with supplier and purchasing workflows | ✅ 212 build plans out of the cart, 47 kit/part clashes flagged, both exports carry the reasoning |
+| Weak evidence never changes a number silently | ✅ 57 proposals held in a queue rather than acted on |
+
+#### Found and fixed while building
+
+- **The item page disagreed with every other screen.** `itemDetail` recomputed a single row on its own, so kit rules — which are relationships between two items and need the whole set — never reached it. It would have shown a purchase suggestion the inventory list and the cart had already withdrawn. It now reads from the same computed set as everything else.
+- **The Kits page took twenty seconds and then failed.** The item cache is only written when the work finishes, so three simultaneous requests all missed it and all recomputed 3,100 items; under that load the connection pool ran dry and requests returned 500. Concurrent callers now share one in-flight computation, and the kit graph — a recursive walk over the anchored ledger, about a second and a half — is cached alongside it. Cold **20s → 10.6s shared**, warm **0.17s**.
+
+#### Not building
+
+- **No automatic dismantling of packs.** Recovering loose bolts from a pack is a physical act with a stock movement behind it; the platform will not invent one.
+- **No automatic decision from incoming stock.** Components serve several parents, so attributing an open purchase order to one kit is a guess. Reported, never applied.
 
 ---
 
