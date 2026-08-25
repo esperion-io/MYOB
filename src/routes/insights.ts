@@ -42,13 +42,7 @@ import {
   suppliersCsv,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
-import {
-  kitDetail,
-  kitQueue,
-  kitReconciliation,
-  kitRegister,
-  kitRegisterCsv,
-} from "../insights/kitPlan.js";
+import { kitDetail, kitReconciliation } from "../insights/kitPlan.js";
 import { clearKitForm, isKitForm, setKitForm } from "../insights/kits.js";
 import {
   anchorCoverage,
@@ -810,38 +804,12 @@ insightsRouter.post("/cart/undo", async (req, res) => {
 
 /** The inventory list as a spreadsheet, honouring the filters in the URL. */
 /*
- * ---- P7: prebuilt kits and components ------------------------------------
+ * ---- P7: kits and components ---------------------------------------------
  *
- * One register for every item that exists in two forms, the queue of proposals
- * still waiting on a person, the build-versus-buy comparison for a single item,
- * and the reconciliation that proves nothing is counted twice.
+ * Two endpoints. The register and its confirmation queue were removed: the
+ * register listed the same 513 items as /products, so its two useful columns
+ * moved there instead.
  */
-insightsRouter.get("/kits", async (req, res) => {
-  if (!requireDb(res)) return;
-  try {
-    res.json(
-      await kitRegister({
-        q: typeof req.query.q === "string" ? req.query.q : undefined,
-        filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
-        sort: typeof req.query.sort === "string" ? req.query.sort : undefined,
-        dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
-        ...windowParams(req),
-      }),
-    );
-  } catch (err) {
-    send500(res, err);
-  }
-});
-
-/** Proposals the platform declines to act on until Allied confirm them. */
-insightsRouter.get("/kits/queue", async (req, res) => {
-  if (!requireDb(res)) return;
-  try {
-    res.json(await kitQueue(windowParams(req)));
-  } catch (err) {
-    send500(res, err);
-  }
-});
 
 /** Stock value with and without the embedded view, and the gap between them. */
 insightsRouter.get("/kits/reconciliation", async (req, res) => {
@@ -853,25 +821,7 @@ insightsRouter.get("/kits/reconciliation", async (req, res) => {
   }
 });
 
-insightsRouter.get("/kits.csv", async (req, res) => {
-  if (!requireDb(res)) return;
-  try {
-    const csv = await kitRegisterCsv({
-      q: typeof req.query.q === "string" ? req.query.q : undefined,
-      filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
-      sort: typeof req.query.sort === "string" ? req.query.sort : undefined,
-      dir: typeof req.query.dir === "string" ? req.query.dir : undefined,
-      ...windowParams(req),
-    });
-    res
-      .type("text/csv; charset=utf-8")
-      .setHeader("Content-Disposition", `attachment; filename="allied-kits-${businessToday()}.csv"`)
-      .send(csv);
-  } catch (err) {
-    send500(res, err);
-  }
-});
-
+/** Build versus buy for one item, with what it is made of. */
 insightsRouter.get("/kits/:uid", async (req, res) => {
   if (!requireDb(res)) return;
   try {
@@ -887,21 +837,16 @@ insightsRouter.get("/kits/:uid", async (req, res) => {
 });
 
 /*
- * Allied's decision on how an item is sourced.
- *
- * This one field is also the conversion mechanism the brief asks for: moving an
- * item between kit and component tracking is a change of form, and every figure
- * downstream recomputes from it. Hence the cache invalidation — suggestions,
- * the cart and the register all change on the next read.
+ * Allied overriding what the purchase bills imply — 'made_here' or
+ * 'buy_allowed'. This is also the conversion mechanism the brief asks for:
+ * every figure downstream recomputes from it, hence the cache invalidation.
  */
 insightsRouter.post("/kits/:uid/form", async (req, res) => {
   if (!requireDb(res)) return;
   try {
     const form = req.body?.form;
     if (!isKitForm(form)) {
-      res.status(400).json({
-        error: "form must be one of prebuilt, assembled, hybrid, not_a_kit.",
-      });
+      res.status(400).json({ error: "form must be made_here or buy_allowed." });
       return;
     }
     await setKitForm({
@@ -917,7 +862,7 @@ insightsRouter.post("/kits/:uid/form", async (req, res) => {
   }
 });
 
-/** Undo a decision, so the item falls back to the proposed form. */
+/** Undo the override, so the item falls back to what its bills say. */
 insightsRouter.delete("/kits/:uid/form", async (req, res) => {
   if (!requireDb(res)) return;
   try {

@@ -905,17 +905,9 @@ export async function listItems(params: ListParams) {
     case "understated":
       rows = rows.filter((r) => r.flags.includes("understated_demand"));
       break;
-    // P7. `kits` is the register in list form; the other three are the three
-    // ways a kit rule can have changed what this page is telling you.
-    case "kits":
-      rows = rows.filter((r) => r.kit?.form != null);
-      break;
-    case "kit_covered":
-      rows = rows.filter((r) => r.flags.includes("kit_covered"));
-      break;
-    case "build_not_buy":
-      rows = rows.filter((r) => r.flags.includes("build_not_buy"));
-      break;
+    // P7. One filter, not four: a kit and its own parts both being ordered is
+    // the only one of these worth a worklist of its own. "Made here" and
+    // "covered by pack stock" are per-item facts, shown on the item itself.
     case "kit_double_order":
       rows = rows.filter((r) => r.flags.includes("kit_double_order"));
       break;
@@ -1468,13 +1460,21 @@ export async function productsList(
              COUNT(*)::int AS component_count,
              MIN(FLOOR(GREATEST(COALESCE(cp.free_stock,0), 0) / NULLIF(b.qty_per,0)))::float8 AS buildable,
              BOOL_OR(b.source = 'user') AS has_user_rows,
-             MIN(b.confidence)::float8 AS min_confidence
+             MIN(b.confidence)::float8 AS min_confidence,
+             -- P7: what one costs made from parts, and whether every part is
+             -- priced. An incomplete roll-up would make an item look free to
+             -- build, so the UI needs to know not to draw a conclusion from it.
+             SUM(b.qty_per * COALESCE(ci.average_cost, 0))::float8 AS build_cost,
+             (COUNT(*) FILTER (WHERE COALESCE(ci.average_cost, 0) > 0) = COUNT(*)) AS build_cost_complete
       FROM effective_bom b
       JOIN myob_items ci ON ci.uid = b.component_uid
       JOIN item_position_at('${win.asAt}'::date) cp ON cp.item_uid = b.component_uid
       GROUP BY b.parent_uid
     )
     SELECT p.*, i.number, i.name,
+           i.average_cost::float8 AS buy_cost,
+           kf.form AS kit_form, kf.overridden AS kit_overridden,
+           kf.bought_qty::float8 AS bought_qty, kf.built_qty::float8 AS built_qty,
            COALESCE(ip.free_stock, 0)::float8 AS stock_free,
            COALESCE(ip.committed, 0)::float8 AS committed, i.is_active,
            (SELECT COALESCE(SUM(l.qty),0)::float8
@@ -1487,6 +1487,7 @@ export async function productsList(
     FROM parent_build p
     JOIN myob_items i ON i.uid = p.parent_uid
     JOIN item_position_at('${win.asAt}'::date) ip ON ip.item_uid = p.parent_uid
+    LEFT JOIN kit_form kf ON kf.item_uid = p.parent_uid
     ORDER BY sold_window DESC NULLS LAST
   `);
 

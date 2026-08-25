@@ -712,33 +712,37 @@ const DDL: string[] = [
    HAVING COUNT(*) FILTER (WHERE days > 0) > 0`,
 
   /*
-   * ---- P7: prebuilt kits and components -----------------------------------
+   * ---- P7: kits and components --------------------------------------------
    *
    * The same physical thing exists in two forms. A bolt pack is either bought
-   * complete from a specialist supplier, or made in-house from a bolt, a nut
-   * and two washers. Allied do both, and the file proves it: BP1675G was billed
-   * in container loads of 6,000-10,000 in Aug 24, May, Nov, Mar and Jul, and
-   * built in-house in batches of 50-1,450 in the months between. That is the
-   * behaviour the brief describes as "emergency assembly when kit shipments are
-   * delayed", visible in their own documents.
+   * complete from a specialist supplier, or made here from a bolt, a nut and
+   * two washers. Allied do both, and the file proves it: BP1675G was billed in
+   * container loads of 6,000-10,000 every few months and built in-house in
+   * batches of 50-1,450 in between.
    *
-   * Treating those two forms as unrelated item codes is what produces the three
-   * failures in the brief:
-   *
-   *   - components are ordered while the same components sit inside packs on
-   *     the shelf (62 components hold NZ$39,051 of stock this way);
-   *   - a kit and its components are both suggested in the same cart, so the
-   *     same requirement is bought twice;
-   *   - "how many M16x75 bolt/nuts do we have" has two right answers and no
-   *     stated rule for which one the money is counted under.
+   * Treating those two forms as unrelated item codes is what produced the three
+   * failures in the brief: stock counted twice, components ordered that are
+   * already in the building, and an afternoon of spreadsheet reconciliation
+   * each month.
    *
    * THE COUNTING RULE, stated once and enforced everywhere below: a unit is
    * counted in the form it is physically held in. Four loose bolts are four
    * bolts; the same four inside a sealed pack are one pack. Embedded quantities
    * are therefore a VIEW of stock already valued under the kit, never an
-   * addition to it. Every embedded figure in this product is labelled with the
-   * kit it is counted under, and kitReconciliation() proves the total is
-   * unchanged by the feature.
+   * addition to it, and kitReconciliation() proves the total is unchanged.
+   */
+
+  /*
+   * Allied's override, for the rare item where the bills mislead.
+   *
+   * Two values only, and the default is derived rather than stored:
+   *   made_here   — its shortfall is a build sheet, not a purchase order
+   *   buy_allowed — buying it complete is a real option
+   *
+   * An earlier version carried four states plus a graded-evidence model plus a
+   * confirmation queue, all of it built to serve one rule that turned out to
+   * move a single item. It was removed. What survives is the part that pays:
+   * a default read straight from purchase bills, and a way to disagree with it.
    */
   `CREATE TABLE IF NOT EXISTS platform_kit_policy (
     item_uid TEXT PRIMARY KEY,
@@ -749,25 +753,23 @@ const DDL: string[] = [
   )`,
 
   /*
-   * What the file already knows about each recipe parent, so the product can
-   * propose a form rather than ask Allied to classify 513 items from nothing.
+   * How each recipe parent is sourced, decided by one question: has Allied ever
+   * actually bought it complete?
    *
-   * Evidence is graded because the grades are genuinely different in strength,
-   * and hiding that would repeat the mistake the stocktake work avoided:
+   * Purchase bills answer that and nothing else is consulted. In particular
+   * MYOB's "I buy this item" checkbox is ignored: 51 recipe parents carry it
+   * with no purchase behind it, and acting on it once withheld 1,539 stainless
+   * nuts from an order Allied genuinely needed. A checkbox is not a purchase.
    *
-   *   purchased — the item appears on a purchase bill. It has actually been
-   *               bought complete. 13 items.
-   *   on_order  — it appears on a purchase order but has never been billed.
-   *               Intent, not history. 6 items.
-   *   flagged   — MYOB's "I buy this item" checkbox and nothing else. 51 items,
-   *               and a checkbox is not evidence of a purchase, so these are
-   *               proposed weakly and sorted last.
-   *   none      — no purchase signal at all. Proposed as assembled. 443 items.
-   *
-   * Proposal, never truth: platform_kit_policy overrides this the moment a
-   * person decides, exactly as confirmed stocktakes override memo matching.
+   * On the live file this splits 500 made-here against 13 bought-complete.
+   * "Hybrid" needs no state of its own — an item bought before simply has
+   * buying allowed, and the build comparison sits alongside it either way.
    */
-  `CREATE OR REPLACE VIEW kit_candidate AS
+  // Both views changed shape, and CREATE OR REPLACE cannot drop or reorder
+  // columns. kit_form depended on kit_candidate, so it goes first.
+  `DROP VIEW IF EXISTS kit_form`,
+  `DROP VIEW IF EXISTS kit_candidate`,
+  `CREATE VIEW kit_form AS
    WITH billed AS (
      SELECT l.item_uid, SUM(l.qty)::double precision AS qty,
             COUNT(DISTINCT l.bill_uid)::int AS bills, MAX(h.date) AS last_bought
@@ -775,9 +777,6 @@ const DDL: string[] = [
      JOIN myob_purchase_bills h ON h.uid = l.bill_uid
      WHERE l.item_uid IS NOT NULL AND l.qty > 0
      GROUP BY l.item_uid
-   ),
-   on_po AS (
-     SELECT DISTINCT l.item_uid FROM myob_purchase_order_lines l WHERE l.item_uid IS NOT NULL
    ),
    built AS (
      SELECT bl.item_uid, SUM(bl.qty)::double precision AS qty,
@@ -791,6 +790,10 @@ const DDL: string[] = [
      SELECT parent_uid, COUNT(*)::int AS component_count FROM effective_bom GROUP BY parent_uid
    )
    SELECT r.parent_uid AS item_uid,
+          COALESCE(p.form,
+                   CASE WHEN bi.item_uid IS NOT NULL THEN 'buy_allowed' ELSE 'made_here' END) AS form,
+          (CASE WHEN bi.item_uid IS NOT NULL THEN 'buy_allowed' ELSE 'made_here' END) AS derived_form,
+          (p.item_uid IS NOT NULL) AS overridden,
           r.component_count,
           COALESCE(bi.qty, 0) AS bought_qty,
           COALESCE(bi.bills, 0) AS bought_bills,
@@ -798,64 +801,12 @@ const DDL: string[] = [
           COALESCE(bu.qty, 0) AS built_qty,
           COALESCE(bu.build_lines, 0) AS built_lines,
           bu.last_built,
-          CASE
-            WHEN bi.item_uid IS NOT NULL THEN 'purchased'
-            WHEN po.item_uid IS NOT NULL THEN 'on_order'
-            WHEN i.is_bought THEN 'flagged'
-            ELSE 'none'
-          END AS evidence,
-          CASE
-            WHEN (bi.item_uid IS NOT NULL OR po.item_uid IS NOT NULL OR i.is_bought)
-                 AND bu.item_uid IS NOT NULL THEN 'hybrid'
-            WHEN (bi.item_uid IS NOT NULL OR po.item_uid IS NOT NULL OR i.is_bought) THEN 'prebuilt'
-            ELSE 'assembled'
-          END AS proposed_form
-   FROM recipe r
-   JOIN myob_items i ON i.uid = r.parent_uid
-   LEFT JOIN billed bi ON bi.item_uid = r.parent_uid
-   LEFT JOIN on_po po ON po.item_uid = r.parent_uid
-   LEFT JOIN built bu ON bu.item_uid = r.parent_uid`,
-
-  /*
-   * The form actually in force. Allied's decision wins; otherwise the proposal
-   * stands, so the product behaves sensibly on day one and gets more accurate
-   * as they work through the queue.
-   *
-   *   prebuilt  — buy it complete. Its components are not ordered to build it.
-   *   assembled — make it here. The kit itself is not ordered.
-   *   hybrid    — both routes are live. Prebuilt stock is used first, and the
-   *               build route covers what prebuilt cannot.
-   *   not_a_kit — has a recipe, but is not managed as two forms. Drops out of
-   *               the register and out of every rule below.
-   */
-  `CREATE OR REPLACE VIEW kit_form AS
-   SELECT c.item_uid,
-          COALESCE(p.form, c.proposed_form) AS form,
-          (p.item_uid IS NOT NULL) AS confirmed,
-          c.proposed_form, c.evidence, c.component_count,
-          c.bought_qty, c.bought_bills, c.last_bought,
-          c.built_qty, c.built_lines, c.last_built,
           p.note, p.decided_by, p.decided_at
-   FROM kit_candidate c
-   LEFT JOIN platform_kit_policy p ON p.item_uid = c.item_uid`,
+   FROM recipe r
+   LEFT JOIN billed bi ON bi.item_uid = r.parent_uid
+   LEFT JOIN built bu ON bu.item_uid = r.parent_uid
+   LEFT JOIN platform_kit_policy p ON p.item_uid = r.parent_uid`,
 
-  /*
-   * Components physically present inside kit stock, at the (component, holding
-   * kit) grain.
-   *
-   * Recursion is real here, not defensive: a bolt sits in a bolt pack, and the
-   * pack sits in a dressing set, so a component can be two levels down from the
-   * stock that holds it. 56 items are both a parent and a component. Capped at
-   * six levels and cycle-guarded on the path, the same shape as bom_usage_deep.
-   *
-   * Free stock, not on hand — units already committed to a sale order are not
-   * available to cover anything else. Each level multiplies the parent's free
-   * stock by the recipe quantity, so 340 packs at 4 bolts each is 1,360 bolts.
-   *
-   * THIS IS NOT INVENTORY. Those 1,360 bolts are already counted, and valued,
-   * as 340 packs. This view exists so the product can say where they are, and
-   * so a purchase suggestion can decline to buy what is already in the building.
-   */
   `CREATE OR REPLACE VIEW kit_embedded_stock AS
    WITH RECURSIVE holding AS (
      SELECT e.parent_uid AS kit_uid, e.component_uid,
