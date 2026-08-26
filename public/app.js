@@ -19,13 +19,74 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-async function fetchJson(url, options) {
-  const res = await fetch(url, options);
+/* ---------- access key ----------
+ *
+ * The console talks to /auth and /api, which are now behind the same shared
+ * key as the dashboard — they were open to the internet, including the logout
+ * route that wipes the MYOB connection. The key is stored under the same name
+ * the dashboard uses, so unlocking either one unlocks both.
+ */
+const KEY_STORAGE = "afDashboardKey";
+let memoryKey = "";
+
+function accessKey() {
+  try {
+    return localStorage.getItem(KEY_STORAGE) || memoryKey;
+  } catch {
+    return memoryKey;
+  }
+}
+
+function saveKey(value) {
+  memoryKey = value;
+  try {
+    localStorage.setItem(KEY_STORAGE, value);
+  } catch {
+    // Private browsing or blocked storage: memoryKey keeps this tab working.
+  }
+}
+
+/** Append the key to a plain navigation, which cannot carry a header. */
+function withKey(url) {
+  const key = accessKey();
+  if (!key) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}`;
+}
+
+function promptForKey(message) {
+  const entered = window.prompt(
+    message || "Dashboard access key required to manage the MYOB connection.",
+  );
+  if (entered && entered.trim()) {
+    saveKey(entered.trim());
+    return true;
+  }
+  return false;
+}
+
+async function fetchJson(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const key = accessKey();
+  if (key) headers["x-dashboard-key"] = key;
+  const res = await fetch(url, { ...options, headers });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // Ask once, then retry; a second 401 is a wrong key, not a missing one.
+    if (promptForKey()) return fetchJson(url, options);
+    throw new Error("Dashboard access key required.");
+  }
   if (!res.ok) {
     throw new Error(data.error || `Request failed (${res.status})`);
   }
   return data;
+}
+
+// Unlock via /?key=XXXX, then strip it from the address bar so it is not left
+// visible or bookmarked. Mirrors the dashboard's behaviour.
+const urlKey = new URLSearchParams(location.search).get("key");
+if (urlKey && urlKey.trim()) {
+  saveKey(urlKey.trim());
+  history.replaceState({}, "", location.pathname);
 }
 
 function renderActions(hasConnection) {
@@ -41,7 +102,7 @@ function renderActions(hasConnection) {
 
   const connect = document.createElement("a");
   connect.className = hasConnection ? "btn secondary" : "btn primary";
-  connect.href = "/auth/login";
+  connect.href = withKey("/auth/login");
   connect.textContent = hasConnection ? "Reconnect MYOB" : "Connect MYOB";
   actions.appendChild(connect);
 

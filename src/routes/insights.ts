@@ -1,5 +1,6 @@
 import { businessToday } from "../insights/businessDate.js";
 import { Router } from "express";
+import { dashboardGuard } from "./guard.js";
 import type { NextFunction, Request, Response } from "express";
 import { config } from "../config.js";
 import { hasDatabaseUrl } from "../db.js";
@@ -60,30 +61,9 @@ import {
 
 export const insightsRouter = Router();
 
-/**
- * Shared-key guard for dashboard APIs. When DASHBOARD_ACCESS_KEY is unset the
- * guard is a no-op (local development). The connection console and its
- * existing routes are intentionally not touched by this.
- */
-export function dashboardGuard(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void {
-  const key = config.insights.dashboardAccessKey;
-  if (!key) {
-    next();
-    return;
-  }
-  const provided =
-    req.get("x-dashboard-key") ||
-    (typeof req.query.key === "string" ? req.query.key : undefined);
-  if (provided === key) {
-    next();
-    return;
-  }
-  res.status(401).json({ error: "Dashboard access key required." });
-}
+// The shared-key guard now lives in guard.ts, because it protects /api and
+// /auth as well as this router. Re-exported so existing importers still work.
+export { dashboardGuard };
 
 
 /**

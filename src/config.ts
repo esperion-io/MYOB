@@ -61,6 +61,19 @@ export const config = {
     targetCoverWeeks: Number(process.env.TARGET_COVER_WEEKS || 8),
     /** Optional auto-refresh interval (hours). 0 disables. */
     syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS || 0),
+    /*
+     * The run that closes each business day, as HH:MM in Allied's timezone.
+     *
+     * A daily position row freezes in whatever state the last sync of its NZ
+     * day left it in, so this time decides how much of the trading day the
+     * permanent record captures. The whole schedule is counted backwards from
+     * here in SYNC_INTERVAL_HOURS steps, which keeps it fixed across deploys
+     * instead of drifting with process start.
+     *
+     * 23:45 leaves the day essentially complete while staying clear of
+     * midnight, where an overrun would land the snapshot on the wrong date.
+     */
+    syncCloseTime: optional("SYNC_CLOSE_TIME") || "23:45",
     /** Cover beyond which stock counts as excess. */
     excessCoverWeeks: Number(process.env.EXCESS_COVER_WEEKS || 26),
     /** Ignore excess worth less than this (NZD) to avoid noise. */

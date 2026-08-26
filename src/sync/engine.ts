@@ -616,6 +616,16 @@ export function isSyncRunning(): boolean {
   return running;
 }
 
+/** When any sync last completed, for the boot catch-up check. */
+export async function lastSyncedAt(): Promise<Date | null> {
+  await ensureInsightsSchema();
+  const r = await getPool().query(
+    `SELECT MAX(finished_at) AS at FROM sync_runs WHERE status = 'success'`,
+  );
+  const at = r.rows[0]?.at;
+  return at ? new Date(at) : null;
+}
+
 export interface SyncResult {
   runId: number;
   status: string;

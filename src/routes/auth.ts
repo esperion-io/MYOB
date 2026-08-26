@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { hasMyobCredentials } from "../config.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens } from "../myob/auth.js";
@@ -12,6 +13,49 @@ import {
 } from "../store/connections.js";
 
 export const authRouter = Router();
+
+/*
+ * One-time OAuth `state`, which is what keeps the open callback safe.
+ *
+ * `/auth/callback` cannot require the dashboard key — MYOB redirects the
+ * browser there and will not carry our header — so it verifies instead that
+ * the round trip began at our own `/auth/login`, which does require the key.
+ * Without this, anyone could complete an OAuth flow against their own MYOB
+ * file and `upsertConnection` would mark it the active company, quietly
+ * repointing the whole dashboard.
+ *
+ * A state is single-use and short-lived. It lives in memory rather than the
+ * database because the window is seconds long and losing them on restart costs
+ * nothing worse than clicking Connect again.
+ *
+ * The previous code accepted `?state=` from the caller and never checked it
+ * coming back, which is the shape of a CSRF hole rather than a defence.
+ */
+const STATE_TTL_MS = 10 * 60 * 1000;
+const pendingStates = new Map<string, number>();
+
+function pruneStates(): void {
+  const now = Date.now();
+  for (const [state, expires] of pendingStates) {
+    if (expires <= now) pendingStates.delete(state);
+  }
+}
+
+function mintState(): string {
+  pruneStates();
+  const state = randomUUID();
+  pendingStates.set(state, Date.now() + STATE_TTL_MS);
+  return state;
+}
+
+function consumeState(state: string | undefined): boolean {
+  pruneStates();
+  if (!state) return false;
+  const expires = pendingStates.get(state);
+  // Deleted whether or not it had expired: a state is good for one attempt.
+  pendingStates.delete(state);
+  return expires != null && expires > Date.now();
+}
 
 authRouter.get("/status", async (_req, res) => {
   const store = await loadStore();
@@ -39,10 +83,8 @@ authRouter.get("/login", (req, res) => {
     return;
   }
 
-  const state =
-    typeof req.query.state === "string" ? req.query.state : crypto.randomUUID();
-  const url = buildAuthorizeUrl(state);
-  res.redirect(url);
+  // Always our own state, never the caller's — see the note above.
+  res.redirect(buildAuthorizeUrl(mintState()));
 });
 
 authRouter.get("/callback", async (req, res) => {
@@ -62,6 +104,24 @@ authRouter.get("/callback", async (req, res) => {
 
   if (error) {
     res.status(400).send(renderResultPage(false, errorDescription || error));
+    return;
+  }
+
+  /*
+   * Prove this round trip started at our own guarded /auth/login before any
+   * code is exchanged. Everything below writes to the connection store and
+   * changes which company file the dashboard reads.
+   */
+  const state = typeof req.query.state === "string" ? req.query.state : undefined;
+  if (!consumeState(state)) {
+    res
+      .status(400)
+      .send(
+        renderResultPage(
+          false,
+          "This sign-in link has expired or did not start from the connection console. Open the console and choose Connect MYOB again.",
+        ),
+      );
     return;
   }
 
