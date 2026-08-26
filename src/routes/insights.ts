@@ -43,7 +43,7 @@ import {
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 import { kitAvailability, kitDetail } from "../insights/kitPlan.js";
-import { clearKitForm, isKitForm, setKitForm } from "../insights/kits.js";
+import { clearKitForm, invalidateKitGraph, isKitForm, setKitForm } from "../insights/kits.js";
 import {
   anchorCoverage,
   confirmStocktake,
@@ -106,6 +106,23 @@ function windowParams(req: Request): {
     windowMonths: req.query.windowMonths ? Number(req.query.windowMonths) : undefined,
     longMonths: req.query.longMonths ? Number(req.query.longMonths) : undefined,
   };
+}
+
+/*
+ * A recorded count changes the shelf, so everything computed from the shelf has
+ * to be recomputed.
+ *
+ * The item set is cached for 30 seconds and the kit graph with it. Every
+ * supplier, tag and BOM mutation already dropped both; the three routes that
+ * write stock counts did not, so for half a minute after entering a count the
+ * inventory list, the Overview, the cart and the item page all kept serving the
+ * figure the count had just corrected. That is the one feature whose whole
+ * point is that Allied's number beats MYOB's, and it looked like it had done
+ * nothing.
+ */
+function invalidatePositionCaches(): void {
+  invalidateItemsCache();
+  invalidateKitGraph();
 }
 
 const CART_STATES = ["suggested", "edited", "removed", "selected", "split"];
@@ -438,6 +455,7 @@ insightsRouter.post("/stocktakes/:uid/confirm", async (req, res) => {
       confirmedBy: typeof req.body?.confirmedBy === "string" ? req.body.confirmedBy : null,
       note: typeof req.body?.note === "string" ? req.body.note : null,
     });
+    invalidatePositionCaches();
     res.json({ ok: true, ...result });
   } catch (err) {
     send500(res, err);
@@ -519,15 +537,15 @@ insightsRouter.post("/counts", async (req, res) => {
       res.status(400).json({ error: "countDate must be yyyy-mm-dd." });
       return;
     }
-    res.json(
-      await recordManualCount({
-        itemUid,
-        countDate,
-        countedQty,
-        enteredBy: typeof req.body?.enteredBy === "string" ? req.body.enteredBy : null,
-        note: typeof req.body?.note === "string" ? req.body.note : null,
-      }),
-    );
+    const result = await recordManualCount({
+      itemUid,
+      countDate,
+      countedQty,
+      enteredBy: typeof req.body?.enteredBy === "string" ? req.body.enteredBy : null,
+      note: typeof req.body?.note === "string" ? req.body.note : null,
+    });
+    invalidatePositionCaches();
+    res.json(result);
   } catch (err) {
     send500(res, err);
   }
@@ -546,14 +564,15 @@ insightsRouter.post("/counts/import", async (req, res) => {
       typeof req.body?.countDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.body.countDate)
         ? req.body.countDate
         : businessToday();
-    res.json(
-      await importCounts({
-        rows,
-        countDate,
-        enteredBy: typeof req.body?.enteredBy === "string" ? req.body.enteredBy : null,
-        dryRun: req.body?.dryRun === true,
-      }),
-    );
+    const result = await importCounts({
+      rows,
+      countDate,
+      enteredBy: typeof req.body?.enteredBy === "string" ? req.body.enteredBy : null,
+      dryRun: req.body?.dryRun === true,
+    });
+    // A dry run writes nothing, so there is nothing to drop.
+    if (result.written > 0) invalidatePositionCaches();
+    res.json(result);
   } catch (err) {
     send500(res, err);
   }
@@ -877,6 +896,7 @@ insightsRouter.delete("/kits/:uid/form", async (req, res) => {
 insightsRouter.get("/items.csv", async (req, res) => {
   if (!requireDb(res)) return;
   try {
+    const win = windowParams(req);
     const csv = await itemsCsv({
       q: typeof req.query.q === "string" ? req.query.q : undefined,
       filter: typeof req.query.filter === "string" ? req.query.filter : undefined,
@@ -890,7 +910,12 @@ insightsRouter.get("/items.csv", async (req, res) => {
     });
     res
       .type("text/csv; charset=utf-8")
-      .setHeader("Content-Disposition", `attachment; filename="allied-inventory-${businessToday()}.csv"`)
+      // Named for the date the figures describe, not the day of the download —
+      // two exports of different as-at dates otherwise share a filename.
+      .setHeader(
+        "Content-Disposition",
+        `attachment; filename="allied-inventory-${win.asAt ?? businessToday()}.csv"`,
+      )
       .send(csv);
   } catch (err) {
     send500(res, err);

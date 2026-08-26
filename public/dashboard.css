@@ -288,6 +288,23 @@ tr.rowlink:hover { background: var(--brand-soft); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
 
+/* Supplier region on the purchasing cards and the comparison drawer. This had
+   no rule, so the region rendered as bare text run together with the supplier
+   name and the lead time — the same silent-fallback fault as the missing CSS
+   variables found during P5. */
+.chip {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 /* ---------- toolbar ---------- */
 
 .toolbar {

@@ -1,3 +1,4 @@
+import { businessToday } from "./businessDate.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { computedItems, type DemandWindow, type ItemComputed } from "./queries.js";
@@ -570,7 +571,10 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
   }
 
   return {
-    filename: `allied-purchase-order-${new Date().toISOString().slice(0, 10)}.csv`,
+    // businessToday(), not toISOString(): Allied are in New Zealand, the server
+    // is in UTC, and for half of each NZ day toISOString() names yesterday. The
+    // P3 timezone sweep covered export filenames and this one was missed.
+    filename: `allied-purchase-order-${businessToday()}.csv`,
     csv: `﻿${lines.join("\r\n")}\r\n`,
     unresolvedDuplicates: cart.unresolvedDuplicates,
   };

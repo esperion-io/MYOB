@@ -74,6 +74,19 @@ export interface KitEdge {
   qtyPer: number;
 }
 
+/**
+ * The build route for one recipe parent, priced and stock-checked.
+ *
+ * Computed from the item set the caller is already holding, NOT from a SQL
+ * view. It used to come from `kit_build_option`, which read `item_position` —
+ * today's position — while its output was attached to items computed at the
+ * selected date. On any historical view the two halves of "total available"
+ * then described different moments: BP1675G at 31 July reported 8,853 kits on
+ * the shelf (correctly as at July) plus 825 buildable (today's parts), and
+ * Products & BOM, which does bound by the date, said 835. Deriving it here
+ * means buildable is always measured at the same moment as everything else on
+ * the screen.
+ */
 export interface KitBuildOption {
   componentCount: number;
   costedComponents: number;
@@ -86,7 +99,6 @@ export interface KitGraph {
   childrenOf: Map<string, KitEdge[]>;
   parentsOf: Map<string, KitEdge[]>;
   form: Map<string, KitFormRow>;
-  buildOption: Map<string, KitBuildOption>;
 }
 
 let graphCache: { at: number; graph: KitGraph } | null = null;
@@ -97,7 +109,7 @@ export function invalidateKitGraph(): void {
 }
 
 /**
- * Everything the rules need, in four small queries.
+ * Everything the rules need, in two small queries.
  *
  * Cached for the same 30 seconds as the computed item set — every
  * computedItems call needs it, and the Products page asks twice over.
@@ -107,7 +119,7 @@ export async function loadKitGraph(): Promise<KitGraph> {
   await ensureInsightsSchema();
   const pool = getPool();
 
-  const [edges, forms, build] = await Promise.all([
+  const [edges, forms] = await Promise.all([
     pool.query(`SELECT parent_uid, component_uid, qty_per FROM effective_bom WHERE qty_per > 0`),
     pool.query(
       `SELECT item_uid, form, derived_form, overridden, component_count,
@@ -116,11 +128,6 @@ export async function loadKitGraph(): Promise<KitGraph> {
               built_qty, built_lines, last_built::date::text AS last_built,
               note, decided_by, decided_at::text AS decided_at
        FROM kit_form`,
-    ),
-    pool.query(
-      `SELECT item_uid, component_count, costed_components, component_cost,
-              buildable_now, components_out_of_stock
-       FROM kit_build_option`,
     ),
   ]);
 
@@ -162,18 +169,7 @@ export async function loadKitGraph(): Promise<KitGraph> {
     });
   }
 
-  const buildOption = new Map<string, KitBuildOption>();
-  for (const r of build.rows) {
-    buildOption.set(String(r.item_uid), {
-      componentCount: Number(r.component_count ?? 0),
-      costedComponents: Number(r.costed_components ?? 0),
-      componentCost: Number(r.component_cost ?? 0),
-      buildableNow: Number(r.buildable_now ?? 0),
-      componentsOutOfStock: Number(r.components_out_of_stock ?? 0),
-    });
-  }
-
-  const graph = { childrenOf, parentsOf, form, buildOption };
+  const graph = { childrenOf, parentsOf, form };
   graphCache = { at: Date.now(), graph };
   return graph;
 }
@@ -263,10 +259,46 @@ export function applyKitRules(items: ItemComputed[], graph: KitGraph): KitRuleSu
   const byUid = new Map(items.map((i) => [i.uid, i]));
   const summary: KitRuleSummary = { ...EMPTY_KIT_SUMMARY, kitsWithRecipe: graph.form.size };
 
+  /*
+   * The build route for one parent, measured against the item set in hand — so
+   * at whatever date the caller asked for, never at today's.
+   *
+   * The scarcest component sets the ceiling. A component whose position we
+   * cannot see (not inventoried, or a date before its last count) contributes
+   * zero rather than being skipped: an unknown shelf is not a full one.
+   * `costedComponents` is carried so the UI can refuse to draw a conclusion
+   * from a roll-up with holes in it, since an uncosted part would otherwise
+   * make an item look free to build.
+   */
+  const buildOptionFor = (parentUid: string): KitBuildOption | null => {
+    const edges = graph.childrenOf.get(parentUid);
+    if (!edges?.length) return null;
+    let componentCost = 0;
+    let costedComponents = 0;
+    let componentsOutOfStock = 0;
+    let buildableNow = Infinity;
+    for (const e of edges) {
+      const c = byUid.get(e.componentUid);
+      const cost = c?.averageCost ?? 0;
+      if (cost > 0) costedComponents += 1;
+      componentCost += e.qtyPer * cost;
+      const free = Math.max(c?.qtyFreeStock ?? 0, 0);
+      if (free <= 0) componentsOutOfStock += 1;
+      buildableNow = Math.min(buildableNow, Math.floor(free / e.qtyPer));
+    }
+    return {
+      componentCount: edges.length,
+      costedComponents,
+      componentCost,
+      buildableNow: Number.isFinite(buildableNow) ? buildableNow : 0,
+      componentsOutOfStock,
+    };
+  };
+
   for (const item of items) {
     const row = graph.form.get(item.uid);
     if (!row) continue;
-    const build = graph.buildOption.get(item.uid);
+    const build = buildOptionFor(item.uid);
 
     /*
      * Availability, which is the whole point of the feature.

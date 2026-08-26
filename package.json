@@ -9,7 +9,8 @@
     "build": "node scripts/check-ledger-boundary.mjs && tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "check:ledger": "node scripts/check-ledger-boundary.mjs"
+    "check:ledger": "node scripts/check-ledger-boundary.mjs",
+    "dev:local": "sh -c 'set -a; . ./.env.local; set +a; case \"$DATABASE_URL\" in *localhost*) ;; *) echo \"REFUSING TO START: DATABASE_URL is not localhost\" >&2; exit 1;; esac; exec npx tsx src/index.ts'"
   },
   "engines": {
     "node": ">=20"

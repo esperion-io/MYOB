@@ -1,4 +1,5 @@
-import { businessToday } from "./businessDate.js";
+import type pg from "pg";
+import { BUSINESS_TODAY_SQL, businessToday } from "./businessDate.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 
@@ -214,99 +215,20 @@ export async function rebuildCountsFromConfirmed(
 
 export type PositionBasis = "counted" | "reconstructed" | "precedes_count";
 
-export interface LedgerPosition {
-  uid: string;
-  number: string | null;
-  name: string | null;
-  onHand: number | null;
-  myobOnHand: number | null;
-  divergence: number | null;
-  anchorDate: string | null;
-  anchorQty: number | null;
-  anchorSource: CountSource | null;
-  anchorDrift: number | null;
-  movementsSinceAnchor: number;
-  basis: PositionBasis;
-}
 
-/**
- * On-hand position for every inventoried item as at a date.
+/*
+ * positionsAsAt() was removed on 26 Aug 2026.
  *
- * Anchored items roll forward from their count. Items with no count on or
- * before the date fall back to rolling today's MYOB figure backwards, labelled
- * `reconstructed` — honest, but only as good as MYOB. Items whose only counts
- * fall *after* the date are reported `precedes_count` with no number, because
- * rolling back through a count is invalid.
+ * Nothing called it, and its anchor logic had drifted away from the live one:
+ * it treated the conversion balance as a blocking count, so it would have
+ * reported "before the last count — not reported" for every item on every
+ * historical date. A second, wrong definition of the product's central
+ * calculation sitting unused is worse than no definition at all, because the
+ * next person to need it would have reached for it.
+ *
+ * ownedPositions() and item_position_at() are the two that are real, and they
+ * agree with each other by construction.
  */
-export async function positionsAsAt(asAt: string): Promise<LedgerPosition[]> {
-  await ensureInsightsSchema();
-  const result = await getPool().query(
-    `WITH anchor AS (
-       SELECT DISTINCT ON (item_uid)
-              item_uid, count_date, counted_qty, drift_qty, source
-       FROM platform_stock_count
-       WHERE count_date <= $1::date
-       ORDER BY item_uid, count_date DESC, id DESC
-     ),
-     later_count AS (
-       SELECT DISTINCT ON (item_uid) item_uid, count_date
-       FROM platform_stock_count
-       WHERE count_date > $1::date
-       ORDER BY item_uid, count_date ASC, id ASC
-     ),
-     since_anchor AS (
-       SELECT m.item_uid, SUM(m.qty)::float8 AS qty
-       FROM stock_movements m
-       JOIN anchor a ON a.item_uid = m.item_uid
-       WHERE m.moved_on > a.count_date AND m.moved_on <= $1::date
-       GROUP BY m.item_uid
-     ),
-     after_asat AS (
-       SELECT item_uid, SUM(qty)::float8 AS qty
-       FROM stock_movements
-       WHERE moved_on > $1::date
-       GROUP BY item_uid
-     )
-     SELECT i.uid, i.number, i.name, i.qty_on_hand::float8 AS myob_on_hand,
-            a.count_date::text AS count_date, a.counted_qty::float8, a.drift_qty::float8, a.source,
-            COALESCE(sa.qty, 0)::float8 AS since_anchor,
-            COALESCE(aa.qty, 0)::float8 AS after_asat,
-            (a.item_uid IS NULL AND lc.item_uid IS NOT NULL) AS precedes_count
-     FROM myob_items i
-     LEFT JOIN anchor a ON a.item_uid = i.uid
-     LEFT JOIN later_count lc ON lc.item_uid = i.uid
-     LEFT JOIN since_anchor sa ON sa.item_uid = i.uid
-     LEFT JOIN after_asat aa ON aa.item_uid = i.uid
-     WHERE i.is_inventoried
-     ORDER BY i.number`,
-    [asAt],
-  );
-
-  return result.rows.map((r) => {
-    const anchored = r.count_date != null;
-    const precedes = Boolean(r.precedes_count);
-    const onHand = precedes
-      ? null
-      : anchored
-        ? Number(r.counted_qty) + Number(r.since_anchor)
-        : Number(r.myob_on_hand ?? 0) - Number(r.after_asat);
-    return {
-      uid: r.uid as string,
-      number: r.number as string | null,
-      name: r.name as string | null,
-      onHand,
-      myobOnHand: r.myob_on_hand as number | null,
-      divergence:
-        onHand == null || r.myob_on_hand == null ? null : onHand - Number(r.myob_on_hand),
-      anchorDate: anchored ? String(r.count_date) : null,
-      anchorQty: anchored ? Number(r.counted_qty) : null,
-      anchorSource: anchored ? (r.source as CountSource) : null,
-      anchorDrift: r.drift_qty == null ? null : Number(r.drift_qty),
-      movementsSinceAnchor: Number(r.since_anchor),
-      basis: precedes ? "precedes_count" : anchored ? "counted" : "reconstructed",
-    };
-  });
-}
 
 export interface LedgerEntry {
   date: string;
@@ -319,9 +241,27 @@ export interface LedgerEntry {
 }
 
 /**
- * The audit trail behind one item's on-hand figure: the anchor, then every
- * movement since, with a running balance. This is what "show the working"
- * means for the number Allied are asked to trust.
+ * The audit trail behind one item's on-hand figure: the reference point, then
+ * every document between it and the date, with a running balance. This is what
+ * "show the working" means for the number Allied are asked to trust.
+ *
+ * It runs in whichever direction the ledger ran, and that is the whole point of
+ * this function existing rather than a simple forward loop:
+ *
+ *   forward  — a count on or before the date. Start at the counted quantity and
+ *              apply each document since. The ordinary case.
+ *   backward — no count yet at that date, but the conversion balance sits after
+ *              it. Start at the balance and UNDO each document back to the date.
+ *              This is the case that used to be answered with "no reference
+ *              point recorded for this item yet", which sent Allied off to count
+ *              something that did not need counting, while the position screens
+ *              were happily reporting a figure for the same item and date.
+ *   blocked  — a physical count sits between the date and now. A count absorbs
+ *              drift no document explains, so reading back through one is
+ *              invalid and no trail is offered.
+ *
+ * `closing` always equals the figure `item_position_at` reports for the same
+ * item and date; they are two renderings of one calculation.
  */
 export async function itemLedger(
   itemUid: string,
@@ -331,51 +271,104 @@ export async function itemLedger(
   entries: LedgerEntry[];
   closing: number | null;
   myobOnHand: number | null;
+  asAt: string;
+  /** Which way the ledger ran, so the UI can say so rather than imply forward. */
+  direction: "forward" | "backward" | null;
+  /** Set when no trail can honestly be drawn, with the reason in plain words. */
+  blocked: { reason: "precedes_count"; countDate: string } | null;
 }> {
   await ensureInsightsSchema();
   const pool = getPool();
   const end = asAt ?? businessToday();
 
-  const [anchorRes, itemRes] = await Promise.all([
+  const [anchorRes, laterRes, openingRes, itemRes] = await Promise.all([
+    /*
+     * The applicable reference point. The tiebreak matters and is shared with
+     * item_position_at and ownedPositions: where a real count and the opening
+     * balance carry the same date, the count wins, because the opening balance
+     * is a bookkeeping conversion and the count is an observation of the shelf.
+     */
     pool.query(
       `SELECT count_date::text AS count_date, counted_qty::float8, drift_qty::float8, source
        FROM platform_stock_count
        WHERE item_uid = $1 AND count_date <= $2::date
-       ORDER BY count_date DESC, id DESC LIMIT 1`,
+       ORDER BY count_date DESC, (source <> 'opening_balance') DESC, id DESC
+       LIMIT 1`,
       [itemUid, end],
+    ),
+    pool.query(
+      `SELECT count_date::text AS count_date
+       FROM platform_stock_count
+       WHERE item_uid = $1 AND count_date > $2::date AND source <> 'opening_balance'
+       ORDER BY count_date ASC, id ASC LIMIT 1`,
+      [itemUid, end],
+    ),
+    pool.query(
+      `SELECT count_date::text AS count_date, counted_qty::float8
+       FROM platform_stock_count
+       WHERE item_uid = $1 AND source = 'opening_balance'
+       ORDER BY count_date ASC LIMIT 1`,
+      [itemUid],
     ),
     pool.query(`SELECT qty_on_hand::float8 FROM myob_items WHERE uid = $1`, [itemUid]),
   ]);
 
-  const anchorRow = anchorRes.rows[0];
-  const anchor = anchorRow
-    ? {
-        date: String(anchorRow.count_date),
-        qty: Number(anchorRow.counted_qty),
-        source: anchorRow.source as CountSource,
-        drift: anchorRow.drift_qty == null ? null : Number(anchorRow.drift_qty),
-      }
-    : null;
+  const myobOnHand = (itemRes.rows[0]?.qty_on_hand as number | null) ?? null;
+  const empty = { entries: [] as LedgerEntry[], closing: null, myobOnHand, asAt: end };
 
-  // With no anchor there is no defensible opening balance, so the trail starts
-  // from the beginning of held history and is labelled reconstructed upstream.
-  const from = anchor?.date ?? "1900-01-01";
+  const anchorRow = anchorRes.rows[0];
+  const openingRow = openingRes.rows[0];
+
+  // A count between the date and now. Reading back through it is invalid.
+  if (!anchorRow && laterRes.rows[0]) {
+    return {
+      ...empty,
+      anchor: null,
+      direction: null,
+      blocked: { reason: "precedes_count", countDate: String(laterRes.rows[0].count_date) },
+    };
+  }
+
+  const backward = !anchorRow && Boolean(openingRow);
+  const reference = anchorRow ?? openingRow;
+  if (!reference) {
+    // No count and no conversion balance: nothing to measure from. Only
+    // reachable for items MYOB does not inventory.
+    return { ...empty, anchor: null, direction: null, blocked: null };
+  }
+
+  const anchor = {
+    date: String(reference.count_date),
+    qty: Number(reference.counted_qty),
+    source: (anchorRow?.source ?? "opening_balance") as CountSource,
+    drift: anchorRow?.drift_qty == null ? null : Number(anchorRow.drift_qty),
+  };
+
+  /*
+   * Forward: documents after the reference, up to the date, oldest first.
+   * Backward: documents after the date, up to the reference, newest first —
+   * so the running balance walks back from the balance to the date.
+   */
+  const [from, to] = backward ? [end, anchor.date] : [anchor.date, end];
   const movements = await pool.query(
     `SELECT moved_on::text AS date, kind, doc_number, qty::float8, party, memo
      FROM stock_movements
      WHERE item_uid = $1 AND moved_on > $2::date AND moved_on <= $3::date
-     ORDER BY moved_on, kind, doc_number`,
-    [itemUid, from, end],
+     ORDER BY moved_on ${backward ? "DESC" : "ASC"}, kind, doc_number`,
+    [itemUid, from, to],
   );
 
-  let balance = anchor?.qty ?? 0;
+  let balance = anchor.qty;
   const entries: LedgerEntry[] = movements.rows.map((m) => {
-    balance += Number(m.qty);
+    const qty = Number(m.qty);
+    // Going backwards, each document is undone rather than applied, and the
+    // balance shown against it is the balance *before* it happened.
+    balance += backward ? -qty : qty;
     return {
       date: String(m.date),
       kind: m.kind as string,
       docNumber: m.doc_number as string | null,
-      qty: Number(m.qty),
+      qty,
       party: m.party as string | null,
       memo: m.memo as string | null,
       balance,
@@ -385,8 +378,11 @@ export async function itemLedger(
   return {
     anchor,
     entries,
-    closing: anchor ? balance : null,
-    myobOnHand: itemRes.rows[0]?.qty_on_hand ?? null,
+    closing: balance,
+    myobOnHand,
+    asAt: end,
+    direction: backward ? "backward" : "forward",
+    blocked: null,
   };
 }
 
@@ -449,10 +445,91 @@ export async function anchorCoverage(): Promise<Record<string, unknown>> {
  * Safe to call repeatedly: it will not move an existing opening balance, since
  * doing so would silently rewrite history.
  */
+/**
+ * Re-derive the conversion balance for every item that still has nothing better.
+ *
+ * THE BUG THIS FIXES. The opening balance is a snapshot taken at one instant,
+ * but it was written as a normal anchor and so inherited the physical-count
+ * rule: movements apply only from the day *after* it. A document dated on or
+ * before the cutover date but keyed into MYOB after the snapshot instant is
+ * then in neither half — not in the anchor, and excluded from the movements.
+ * It was dropped from the ledger permanently, and nothing ever corrected it.
+ *
+ * On the live file that lost 17 items' worth of stock, every one of them with
+ * movements dated on the cutover day, six matching a single late-entered
+ * document exactly (DSSS200P +13 against a −13 adjustment, and so on).
+ *
+ * The repair is the same arithmetic `rebuildCountsFromConfirmed` already uses
+ * to recover a counted quantity from a MYOB adjustment: work back from what
+ * MYOB holds now.
+ *
+ *     counted_qty = qty_on_hand(now) − Σ movements after the anchor, to today
+ *
+ * Late entries land inside `qty_on_hand` and outside the subtracted window, so
+ * they are absorbed into the anchor where they belong. Running it every sync
+ * makes the conversion balance self-healing rather than a one-shot guess.
+ *
+ * TWO THINGS IT DELIBERATELY DOES NOT DO. It never touches an item that has a
+ * real physical count — the whole point of a count is that Allied's figure
+ * beats MYOB's, and re-deriving from `qty_on_hand` would hand the file back to
+ * MYOB. And it never moves `count_date`, so the ledger's validity boundary and
+ * every audit trail hanging off it stay where they were.
+ *
+ * The upper bound is today, not open-ended: it makes on-hand agree with MYOB
+ * exactly at today's date. There are no post-dated movements on the file, so
+ * the bound costs nothing now, and if one ever appears it will project forward
+ * from the anchor instead of being silently folded into it.
+ */
+export async function reconcileOpeningBalances(): Promise<{
+  itemsCorrected: number;
+  unitsCorrected: number;
+}> {
+  const today = businessToday();
+  const result = await getPool().query(
+    `WITH target AS (
+       SELECT sc.id, sc.counted_qty AS was,
+              (i.qty_on_hand - COALESCE((
+                 SELECT SUM(m.qty) FROM stock_movements m
+                 WHERE m.item_uid = sc.item_uid
+                   AND m.moved_on > sc.count_date
+                   AND m.moved_on <= $1::date
+               ), 0))::float8 AS should_be
+       FROM platform_stock_count sc
+       JOIN myob_items i ON i.uid = sc.item_uid
+       WHERE sc.source = 'opening_balance'
+         AND NOT EXISTS (
+           SELECT 1 FROM platform_stock_count x
+           WHERE x.item_uid = sc.item_uid AND x.source <> 'opening_balance'
+         )
+     ),
+     changed AS (
+       SELECT * FROM target WHERE ABS(should_be - was) > 0.0001
+     ),
+     applied AS (
+       UPDATE platform_stock_count sc
+       SET counted_qty = c.should_be, updated_at = NOW()
+       FROM changed c WHERE c.id = sc.id
+       RETURNING 1
+     )
+     SELECT (SELECT COUNT(*)::int FROM applied) AS items_corrected,
+            (SELECT COALESCE(SUM(ABS(should_be - was)), 0)::float8 FROM changed) AS units_corrected`,
+    [today],
+  );
+  return {
+    itemsCorrected: result.rows[0].items_corrected as number,
+    unitsCorrected: result.rows[0].units_corrected as number,
+  };
+}
+
 export async function establishOpeningBalance(params?: {
   asOf?: string;
   force?: boolean;
-}): Promise<{ asOf: string; itemsAnchored: number; alreadyExisted: boolean }> {
+}): Promise<{
+  asOf: string;
+  itemsAnchored: number;
+  alreadyExisted: boolean;
+  reconciled?: { itemsCorrected: number; unitsCorrected: number };
+}> {
   await ensureInsightsSchema();
   const pool = getPool();
   const asOf = params?.asOf ?? businessToday();
@@ -469,21 +546,27 @@ export async function establishOpeningBalance(params?: {
      * them its own opening balance dated today. Existing anchors are untouched:
      * re-dating them would rewrite history.
      */
+    const reconciled = await reconcileOpeningBalances();
     const topUp = await pool.query(
       `INSERT INTO platform_stock_count
          (item_uid, count_date, counted_qty, drift_qty, source, source_ref, entered_by, note)
-       SELECT i.uid, CURRENT_DATE, COALESCE(i.qty_on_hand, 0), NULL,
+       SELECT i.uid, $1::date, COALESCE(i.qty_on_hand, 0), NULL,
               'opening_balance', NULL, 'system',
               'Opening balance for an item first seen after cutover.'
        FROM myob_items i
        WHERE i.is_inventoried
          AND NOT EXISTS (SELECT 1 FROM platform_stock_count c WHERE c.item_uid = i.uid)
        ON CONFLICT (item_uid, count_date, COALESCE(source_ref, '')) DO NOTHING`,
+      // CURRENT_DATE is the database's date and the database runs in UTC, which
+      // names yesterday for half of every New Zealand day. Allied's calendar
+      // decides what "today" means, here as everywhere else.
+      [asOf],
     );
     return {
       asOf: existing.rows[0].d as string,
       itemsAnchored: (existing.rows[0].n as number) + (topUp.rowCount ?? 0),
       alreadyExisted: true,
+      reconciled,
     };
   }
   if (params?.force) {
@@ -574,12 +657,19 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
        WHERE m.moved_on > a.count_date AND m.moved_on <= $1::date
        GROUP BY m.item_uid
      ),
+     /*
+      * Open orders, as at the date. The bound applies only to historical dates
+      * — see the matching note in item_position_at(). A future-dated order is
+      * open now, so it is committed now; bounding today's figure by the order
+      * date hid 31,600 reserved units and showed them as free to sell.
+      */
      our_committed AS (
        SELECT l.item_uid, SUM(l.qty)::float8 AS qty
        FROM myob_sale_order_lines l
        JOIN myob_sale_orders o ON o.uid = l.order_uid
        WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
-         AND l.item_uid IS NOT NULL AND o.date::date <= $1::date
+         AND l.item_uid IS NOT NULL
+         AND (o.date::date <= $1::date OR $1::date >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),
      our_on_order AS (
@@ -587,7 +677,8 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
        FROM myob_purchase_order_lines l
        JOIN myob_purchase_orders o ON o.uid = l.order_uid
        WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
-         AND l.item_uid IS NOT NULL AND o.date::date <= $1::date
+         AND l.item_uid IS NOT NULL
+         AND (o.date::date <= $1::date OR $1::date >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      )
      SELECT i.uid, i.number, i.name, i.average_cost::float8,
@@ -675,7 +766,7 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
 export async function snapshotPositions(params?: {
   asAt?: string;
   overwrite?: boolean;
-}): Promise<{ asAt: string; rows: number }> {
+}): Promise<{ asAt: string; rows: number; rewritten: boolean }> {
   await ensureInsightsSchema();
   const asAt = params?.asAt ?? businessToday();
   const positions = await ownedPositions(asAt);
@@ -684,6 +775,33 @@ export async function snapshotPositions(params?: {
   if (params?.overwrite) {
     await pool.query(`DELETE FROM platform_daily_position WHERE as_at_date = $1::date`, [asAt]);
   }
+
+  /*
+   * A day that has not finished is not history yet.
+   *
+   * The row used to be written with ON CONFLICT DO NOTHING, so the first sync
+   * of each New Zealand day claimed it and the five later syncs were silently
+   * discarded (run #77 reported `rows: 0` for exactly this reason). Today's
+   * snapshot was therefore a 9am figure carrying the whole day's date, and
+   * every transaction Allied entered afterwards was missing from it forever.
+   * For a month-end valuation, "31 July as at nine in the morning" is not what
+   * anyone means by 31 July.
+   *
+   * So the current day's row is rewritten on every sync, and freezes on its own
+   * once the date passes. Rows for dates already closed stay immutable, which
+   * is the property the history table exists to provide.
+   */
+  const stillOpen = asAt >= businessToday();
+  const conflict = stillOpen
+    ? `ON CONFLICT (as_at_date, item_uid) DO UPDATE SET
+         on_hand = EXCLUDED.on_hand, committed = EXCLUDED.committed,
+         free_stock = EXCLUDED.free_stock, on_order = EXCLUDED.on_order,
+         average_cost = EXCLUDED.average_cost, stock_value = EXCLUDED.stock_value,
+         basis = EXCLUDED.basis, anchor_date = EXCLUDED.anchor_date,
+         anchor_source = EXCLUDED.anchor_source, myob_on_hand = EXCLUDED.myob_on_hand,
+         myob_committed = EXCLUDED.myob_committed, divergence = EXCLUDED.divergence,
+         created_at = NOW()`
+    : `ON CONFLICT (as_at_date, item_uid) DO NOTHING`;
 
   let rows = 0;
   const batch = 500;
@@ -707,12 +825,12 @@ export async function snapshotPositions(params?: {
           average_cost, stock_value, basis, anchor_date, anchor_source,
           myob_on_hand, myob_committed, divergence)
        VALUES ${tuples}
-       ON CONFLICT (as_at_date, item_uid) DO NOTHING`,
+       ${conflict}`,
       values,
     );
     rows += res.rowCount ?? 0;
   }
-  return { asAt, rows };
+  return { asAt, rows, rewritten: stillOpen };
 }
 
 /** Dates for which a stored snapshot exists, newest first. */
@@ -752,9 +870,11 @@ export async function recordManualCount(params: {
   enteredBy?: string | null;
   note?: string | null;
   source?: "manual" | "csv_import";
+  /** Join a caller's transaction, so a bulk import commits as one unit. */
+  client?: { query: pg.Pool["query"] };
 }): Promise<{ itemUid: string; countDate: string; countedQty: number; drift: number | null }> {
   await ensureInsightsSchema();
-  const pool = getPool();
+  const pool = params.client ?? getPool();
 
   // What we believed on that date, before the count lands.
   const before = await pool.query(
@@ -843,18 +963,38 @@ export async function importCounts(params: {
 
   if (params.dryRun) return { accepted, rejected, written: 0 };
 
+  /*
+   * All of it or none of it.
+   *
+   * The rows were already validated as a batch, but they were then written one
+   * at a time with no transaction, so a failure partway down — a dropped
+   * connection, a constraint nobody anticipated — left half a counting sheet in
+   * the ledger and half of it not. A half-applied stocktake is worse than a
+   * rejected one, because nothing on screen says which half landed.
+   */
+  const client = await pool.connect();
   let written = 0;
-  for (const a of accepted) {
-    const res = await recordManualCount({
-      itemUid: byNumber.get(a.itemNumber)!,
-      countDate: a.countDate,
-      countedQty: a.countedQty,
-      enteredBy: params.enteredBy,
-      source: "csv_import",
-      note: "Bulk count import",
-    });
-    a.drift = res.drift;
-    written += 1;
+  try {
+    await client.query("BEGIN");
+    for (const a of accepted) {
+      const res = await recordManualCount({
+        itemUid: byNumber.get(a.itemNumber)!,
+        countDate: a.countDate,
+        countedQty: a.countedQty,
+        enteredBy: params.enteredBy,
+        source: "csv_import",
+        note: "Bulk count import",
+        client,
+      });
+      a.drift = res.drift;
+      written += 1;
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
   }
   return { accepted, rejected, written };
 }
@@ -925,8 +1065,38 @@ export async function positionExport(asAt?: string): Promise<{
   await ensureInsightsSchema();
   const date = asAt ?? businessToday();
   const result = await getPool().query(
-    `SELECT i.number, i.name, i.product_type, i.product_finish,
-            i.is_active, i.primary_supplier_name, i.supplier_item_number,
+    /*
+     * The supplier column is the EFFECTIVE supplier, the same three-deep rule
+     * the rest of the product uses: Allied's own preferred assignment, then
+     * MYOB's primary field, then whoever has billed the item most.
+     *
+     * It used to read i.primary_supplier_name alone, which is blank on 1,093 of
+     * 3,103 items — so a third of the month-end file had no supplier against it
+     * while the inventory export sitting beside it did.
+     */
+    `WITH assigned AS (
+       SELECT ps.item_uid, sup.name
+       FROM platform_item_suppliers ps
+       JOIN myob_suppliers sup ON sup.uid = ps.supplier_uid
+       WHERE ps.is_preferred
+     ),
+     billed AS (
+       SELECT DISTINCT ON (l.item_uid) l.item_uid, b.supplier_name AS name
+       FROM myob_purchase_bill_lines l
+       JOIN myob_purchase_bills b ON b.uid = l.bill_uid
+       WHERE l.item_uid IS NOT NULL AND b.supplier_uid IS NOT NULL
+       GROUP BY l.item_uid, b.supplier_uid, b.supplier_name
+       ORDER BY l.item_uid, SUM(COALESCE(l.total, 0)) DESC
+     )
+     SELECT i.number, i.name, i.product_type, i.product_finish,
+            i.is_active,
+            COALESCE(asg.name, i.primary_supplier_name, bl.name) AS supplier_name,
+            CASE
+              WHEN asg.name IS NOT NULL THEN 'Set by Allied'
+              WHEN i.primary_supplier_name IS NOT NULL THEN 'MYOB primary'
+              WHEN bl.name IS NOT NULL THEN 'Inferred from bills'
+            END AS supplier_source,
+            i.supplier_item_number,
             p.on_hand, p.committed, p.free_stock, p.on_order,
             i.average_cost, (p.on_hand * COALESCE(i.average_cost, 0)) AS stock_value,
             i.min_level, p.basis, p.anchor_date::text AS anchor_date,
@@ -934,6 +1104,8 @@ export async function positionExport(asAt?: string): Promise<{
             p.myob_on_hand, p.myob_committed, p.divergence
      FROM item_position_at($1::date) p
      JOIN myob_items i ON i.uid = p.item_uid
+     LEFT JOIN assigned asg ON asg.item_uid = i.uid
+     LEFT JOIN billed bl ON bl.item_uid = i.uid
      WHERE i.is_inventoried
      ORDER BY i.number`,
     [date],
@@ -961,7 +1133,7 @@ export async function positionExport(asAt?: string): Promise<{
 
   const header = [
     "Item number", "Item name", "Product type", "Product finish", "Active",
-    "Supplier", "Supplier item no",
+    "Supplier", "Supplier source", "Supplier item no",
     "On hand", "Committed", "Free stock", "On order",
     "Average cost", "Stock value", "Min level",
     "How it was reached", "Reference point", "Reference date", "Reference qty",
@@ -973,7 +1145,7 @@ export async function positionExport(asAt?: string): Promise<{
     lines.push([
       esc(r.number), esc(r.name), esc(r.product_type), esc(r.product_finish),
       r.is_active ? "Yes" : "No",
-      esc(r.primary_supplier_name), esc(r.supplier_item_number),
+      esc(r.supplier_name), esc(r.supplier_source), esc(r.supplier_item_number),
       esc(r.on_hand), esc(r.committed), esc(r.free_stock), esc(r.on_order),
       esc(r.average_cost), esc(r.stock_value), esc(r.min_level),
       esc(basisLabel[r.basis as string] ?? r.basis),

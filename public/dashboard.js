@@ -43,7 +43,7 @@ const TERMS = {
   committed: {
     label: "Committed",
     short: "Stock already promised to customers on open sales orders.",
-    long: "Quantity MYOB has reserved against open sales orders. Sorting by this shows what is most spoken for.",
+    long: "Counted here from your own open sales orders, not read from MYOB — the two currently disagree on a handful of items, which the Divergence panel on Data & Sync lists and prices. Sorting by this shows what is most spoken for.",
   },
   incoming: {
     label: "Incoming",
@@ -83,7 +83,7 @@ const TERMS = {
   supplier_source: {
     label: "Supplier source",
     short: "Whether the supplier was set by Allied, taken from MYOB, or inferred from purchase history.",
-    long: "Allied-set (a preferred supplier recorded on the item) wins, then MYOB's primary supplier field, then the supplier who has billed the item most. Allied's file sets a MYOB primary on almost no items, so most are inferred until someone records one.",
+    long: "Allied-set (a preferred supplier recorded on the item) wins, then MYOB's primary supplier field, then the supplier who has billed the item most. About two thirds of items carry a supplier in MYOB itself; the rest are inferred from purchase history until someone records one.",
   },
   region: {
     label: "Region",
@@ -98,7 +98,7 @@ const TERMS = {
   buildable: {
     label: "Buildable now",
     short: "How many units could be made from free component stock.",
-    long: "Two answers where a product contains sub-assemblies: from stock as it sits, and including building those sub-assemblies first. Both ignore incoming purchase orders.",
+    long: "Two answers where a product contains sub-assemblies: from stock as it sits, and including building those sub-assemblies first. Neither counts stock still on order — the item page shows that as a separate \"once everything on order lands\" figure, so the two are never confused.",
   },
 };
 
@@ -330,13 +330,26 @@ function sortTh(sortKey, termKey, label, cls = "") {
     ><span class="th-inner">${esc(label ?? t?.label ?? sortKey)}<span class="sort-arrow">${arrow}</span></span></th>`;
 }
 
+/*
+ * `basis` is "window" | "long" | "none". It used to be "90d" | "365d", and this
+ * function was still testing for "365d" after P3 renamed them — so the note
+ * telling the reader that a cover figure came from the wider look-back, rather
+ * than from the period they had selected, silently stopped appearing.
+ */
 function coverFmt(cover, basis) {
   if (cover == null) return '<span class="muted">no demand</span>';
-  const suffix = basis === "365d" ? " (365d rate)" : "";
+  const suffix = basis === "long" ? " (longer look-back)" : "";
   if (cover < 2) return `<span class="badge fail">${cover}w${suffix}</span>`;
   if (cover < 4) return `<span class="badge warn">${cover}w${suffix}</span>`;
   return `${cover}w${suffix}`;
 }
+
+/** Said in words, because "window" and "long" mean nothing to a reader. */
+const DEMAND_BASIS_LABEL = {
+  window: "rate measured over the period selected above",
+  long: "nothing sold in the selected period, so the rate comes from the wider look-back",
+  none: "no sales or build usage recorded at all",
+};
 
 const MOVEMENT_KIND = {
   sale: ["Sale", "fail"],
@@ -652,8 +665,30 @@ function isoLocal(d) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/*
+ * Allied's today, not the reader's.
+ *
+ * This decides the default as-at date and whether the historical banner shows,
+ * and it used the browser's own zone — so anyone opening the dashboard from
+ * outside New Zealand landed on a different date from the one the server
+ * defaults to, and was told they were looking at a custom historical view when
+ * they were not. BUSINESS_TIMEZONE on the server is Pacific/Auckland; this is
+ * the same decision made in the browser.
+ */
+const BUSINESS_TIME_ZONE = "Pacific/Auckland";
+
 function todayLocal() {
-  return isoLocal(new Date());
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: BUSINESS_TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+  } catch {
+    // A browser without that zone database still gets a usable date.
+    return isoLocal(new Date());
+  }
 }
 
 function lastMonthEnd() {
@@ -835,7 +870,8 @@ async function renderOverview() {
     <div class="page-head">
       <div>
         <h1>Overview</h1>
-        <p class="page-sub">Position facts from MYOB · analysis by this platform · target cover ${data.targetCoverWeeks} weeks</p>
+        <p class="page-sub">Stock position and analysis computed here from Allied's own documents ·
+        MYOB shown alongside for comparison · target cover ${data.targetCoverWeeks} weeks</p>
       </div>
       <div class="head-actions">
         <a class="btn" id="export-position" href="${exportPositionUrl()}"
@@ -1530,6 +1566,10 @@ async function loadExpandExtras(uid, el) {
 
 const ANCHOR_LABEL = {
   opening_balance: "opening balance",
+  // Present whenever the reader picks a date before the conversion balance.
+  // Missing, this rendered the raw column value — "opening_balance_rolled_back"
+  // — into a sentence shown to warehouse staff.
+  opening_balance_rolled_back: "opening balance, worked backwards",
   myob_adjustment: "stocktake recorded in MYOB",
   manual: "count entered by Allied",
   csv_import: "count imported by Allied",
@@ -1639,17 +1679,28 @@ async function renderItem(uid) {
       </p>
     </div>
 
+    <!--
+      Source badges, corrected 26 Aug 2026. On hand, committed, on order and
+      available were all badged "MYOB fact" — the four figures P1 and P2 moved
+      onto our own ledger, and the four the build-failing boundary guard exists
+      to keep away from MYOB's columns. Free stock was badged as ours while the
+      on-hand figure it is derived from was badged as theirs, on the same strip.
+      Only the minimum level and the average cost are genuinely MYOB's.
+
+      "Open PO incoming" is gone with them: it was the same number as "On order"
+      computed a second way, which is exactly how the two came to disagree on
+      historical dates.
+    -->
     <div class="fact-grid">
-      <div class="fact src-myob"><span class="f-label">On hand</span><span class="f-value">${qty(i.qtyOnHand)}</span></div>
-      <div class="fact src-myob"><span class="f-label">Committed</span><span class="f-value">${qty(i.qtyCommitted)}</span></div>
-      <div class="fact src-myob"><span class="f-label">On order</span><span class="f-value">${qty(i.qtyOnOrder)}</span></div>
-      <div class="fact src-myob"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
-      <div class="fact src-myob"><span class="f-label">Min level</span><span class="f-value">${qty(i.minLevel)}</span></div>
-      <div class="fact src-myob"><span class="f-label">Avg cost</span><span class="f-value">${money(i.averageCost)}</span></div>
+      <div class="fact src-platform"><span class="f-label">On hand</span><span class="f-value">${qty(i.qtyOnHand)}</span></div>
+      <div class="fact src-platform"><span class="f-label">Committed</span><span class="f-value">${qty(i.qtyCommitted)}</span></div>
       <div class="fact src-platform"><span class="f-label">Free stock</span><span class="f-value">${qty(i.qtyFreeStock)}</span></div>
+      <div class="fact src-platform"><span class="f-label">On order</span><span class="f-value">${qty(i.qtyOnOrder)}</span></div>
+      <div class="fact src-platform"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
       <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${i.coverWeeks == null ? "—" : `${i.coverWeeks}w`}</span></div>
-      <div class="fact src-platform"><span class="f-label">Open PO incoming</span><span class="f-value">${qty(i.incomingQty)}</span></div>
+      <div class="fact src-myob"><span class="f-label">Min level</span><span class="f-value">${qty(i.minLevel)}</span></div>
+      <div class="fact src-myob"><span class="f-label">Avg cost</span><span class="f-value">${money(i.averageCost)}</span></div>
       <div class="fact src-platform" title="${i.parentCountDeep > i.parentCount ? `${i.parentCount} directly, ${i.parentCountDeep - i.parentCount} more via sub-assemblies` : "Direct parents"}"><span class="f-label">Used in products</span><span class="f-value">${i.parentCountDeep || i.parentCount}${i.parentCountDeep > i.parentCount ? `<span class="muted" style="font-size:0.7rem"> (${i.parentCount} direct)</span>` : ""}</span></div>
       ${
         i.potential.qtyWindow > 0
@@ -1675,7 +1726,7 @@ async function renderItem(uid) {
           <p class="hint" style="margin-top:0.6rem">
             Last ${i.demand.windowMonths} months: ${qty(i.demand.directWindow)} direct + ${qty(i.demand.componentWindow)} via builds ·
             Last ${i.demand.longMonths} months: ${qty(i.demand.directLong)} direct + ${qty(i.demand.componentLong)} via builds ·
-            rate basis: ${i.demand.basis}
+            ${DEMAND_BASIS_LABEL[i.demand.basis] ?? ""}
           </p>
         </section>
 
@@ -2610,7 +2661,7 @@ async function loadKitAvailability() {
         </tr>`).join("")}</tbody>
       </table></div>
 
-      <h3>Most kits available</h3>
+      <h3>Most kits available${d.rowsTotal > d.rows.length ? ` <span class="badge idle">top ${qty(d.rows.length)} of ${qty(d.rowsTotal)}</span>` : ""}</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Kit</th><th>Sourced</th><th class="num">On shelf</th>
           <th class="num">Buildable from parts</th>${th("kit_available", "Total available", "num")}</tr></thead>
@@ -2707,10 +2758,13 @@ async function renderSuppliers() {
         <p class="page-sub">MYOB supplier facts with Allied-managed labels: region, lead time, notes.
         Labels live in this platform only — never written to MYOB — and drive the region split on
         Overview, Inventory and Purchasing.</p>
-        <div class="head-actions">
+      </div>
+      <!-- Sibling of the title block, not a child of it: .page-head is a
+           space-between row, so nesting this inside the first child left the
+           export button stranded under the subtitle on this page alone. -->
+      <div class="head-actions">
         <a class="btn" href="${suppliersCsvUrl()}" download>Export suppliers</a>
       </div>
-    </div>
     </div>
     <div class="toolbar">
       <input type="search" id="sup-q" placeholder="Search name, city, country, region…" value="${esc(supState.q)}" />
@@ -2830,10 +2884,43 @@ async function loadSuppliersTable() {
 
 /* ---------- purchasing ---------- */
 
-function freshnessNotice(f) {
+/*
+ * Two different faults, and the banner used to detect only one of them.
+ *
+ * `stale_items` compares each item against the newest item read, so it catches
+ * a sync that died halfway through. It cannot catch a sync that never started:
+ * with the scheduler stopped, every item is equally old, nothing is "stale"
+ * relative to anything else, and the page reported a green "quantities are
+ * current" against data last refreshed ten hours earlier.
+ *
+ * The refresh runs on a timer inside the app process, which resets on every
+ * restart and deploy and leaves no record when it fails to fire — so the age of
+ * the last completed run has to be checked on its own.
+ */
+function freshnessNotice(f, runs, settings) {
   if (!f) return "";
   const stale = Number(f.stale_items ?? 0);
   const asOf = f.oldest_quantities_as_of;
+
+  const intervalHours = Number(settings?.syncIntervalHours ?? 0);
+  const lastOk = (runs ?? []).find((r) => r.status === "success" && r.finished_at);
+  const hoursSince = lastOk
+    ? (Date.now() - new Date(lastOk.finished_at).getTime()) / 3_600_000
+    : null;
+  // 1.5 intervals: one missed run is a restart, two is something to look at.
+  const overdue =
+    intervalHours > 0 && hoursSince != null && hoursSince > intervalHours * 1.5;
+
+  const overdueNotice = overdue
+    ? `<div class="notice warn">
+        <strong>No refresh has completed for ${Math.round(hoursSince)} hours</strong>, against a
+        schedule of every ${intervalHours}. Anything entered in MYOB since then is not here yet.
+        The figures below are accurate as at the last refresh, not as at now.
+        Press <strong>Incremental sync</strong> above to pull it in now, and if it keeps
+        falling behind, the scheduled refresh needs looking at.
+      </div>`
+    : "";
+
   if (stale > 0) {
     return `<div class="notice fail">
       <strong>${qty(stale)} of ${qty(f.inventoried_items)} stocked items did not refresh in the last sync.</strong>
@@ -2841,8 +2928,9 @@ function freshnessNotice(f) {
       (cover, valuation, purchasing suggestions) is wrong for those items.
       This is a sync fault, not a data condition — run a full sync, and if it persists it needs investigating.
       ${asOf ? `Oldest quantities were read ${ago(asOf)}.` : ""}
-    </div>`;
+    </div>${overdueNotice}`;
   }
+  if (overdue) return overdueNotice;
   return `<div class="notice ok">Stock quantities are current — all ${qty(f.inventoried_items)} stocked items
     were re-read from MYOB in the last sync${f.newest_quantities_as_of ? ` (${ago(f.newest_quantities_as_of)})` : ""}.</div>`;
 }
@@ -2923,7 +3011,7 @@ async function renderData() {
     </div>
 
     ${syncStatus.running ? '<div class="notice warn">A sync is currently running — data below refreshes as it completes.</div>' : ""}
-    ${freshnessNotice(d.freshness)}
+    ${freshnessNotice(d.freshness, d.recentRuns, d.settings)}
 
     <div class="two-col">
       <section class="panel">
@@ -3283,7 +3371,9 @@ function wireCountForm() {
     if (term.length < 2) { list.hidden = true; return; }
     timer = setTimeout(async () => {
       try {
-        const r = await fetchJson(`/api/insights/items?q=${encodeURIComponent(term)}&limit=8`);
+        // pageSize, not limit — the API reads pageSize, so `limit` was ignored
+        // and the type-ahead dropped 50 rows into a dropdown built for 8.
+        const r = await fetchJson(`/api/insights/items?q=${encodeURIComponent(term)}&pageSize=10`);
         const rows = r.items ?? r.rows ?? [];
         list.hidden = false;
         list.innerHTML = rows.length
@@ -3405,35 +3495,61 @@ async function loadItemLedger(uid) {
   const panel = document.getElementById("item-ledger");
   if (!panel) return;
   try {
-    const d = await fetchJson(`/api/insights/ledger/${encodeURIComponent(uid)}`);
-    if (!d.anchor) {
+    const d = await fetchJson(withWindow(`/api/insights/ledger/${encodeURIComponent(uid)}`));
+    if (d.blocked) {
       panel.innerHTML = `<h2>How this stock figure was reached</h2>
-        <p class="muted">No reference point recorded for this item yet, so its figure cannot be traced.
-        Record a count on the <a href="#/counts">Stock counts</a> page to anchor it.</p>`;
+        <div class="notice warn">A physical count was taken on
+        <strong>${dateFmt(d.blocked.countDate)}</strong>, after the date you are looking at.
+        A count corrects drift that no paperwork explains, so working backwards through one
+        would produce a figure nobody could defend. Pick a date on or after
+        ${dateFmt(d.blocked.countDate)} to see the trail.</div>`;
       return;
     }
+    if (!d.anchor) {
+      panel.innerHTML = `<h2>How this stock figure was reached</h2>
+        <p class="muted">This item is not stocked in MYOB, so there is no shelf figure to trace.</p>`;
+      return;
+    }
+    // Rolling back from the conversion balance is still a reference point and a
+    // movement — the movement is just undone rather than applied. Saying so is
+    // the difference between a trail that reads as evidence and one that reads
+    // as a contradiction of the figure above it.
+    const back = d.direction === "backward";
     const src = COUNT_SOURCE_LABEL[d.anchor.source] ?? d.anchor.source;
     const agrees = d.myobOnHand != null && Math.abs((d.closing ?? 0) - d.myobOnHand) < 0.001;
-    const rows = d.entries.slice(-40);
+    // Forward trails are oldest-first, so the interesting end is the last 40;
+    // backward trails already arrive newest-first.
+    const rows = back ? d.entries.slice(0, 40) : d.entries.slice(-40);
+    const anchorRow = `<tr class="ledger-anchor"><td>${dateFmt(d.anchor.date)}</td>
+      <td colspan="2"><strong>${esc(src)}</strong></td>
+      <td class="num">—</td><td class="num"><strong>${qty(d.anchor.qty)}</strong></td></tr>`;
 
     panel.innerHTML = `
       <h2>How this stock figure was reached</h2>
       <p class="hint">Everything below is computed here from Allied's own documents. MYOB's own figure is
-      shown only so any disagreement is visible.</p>
+      shown only so any disagreement is visible.${
+        back
+          ? ` This date sits before the reference point, so the documents below are
+             <strong>worked backwards</strong> — each one undone to get from the reference point
+             back to ${dateFmt(d.asAt)}.`
+          : ""
+      }</p>
 
       <div class="ledger-head">
         <div><span class="k-label">Reference point</span>
           <span class="k-value">${qty(d.anchor.qty)}</span>
           <span class="muted">${esc(src)} · ${dateFmt(d.anchor.date)}</span></div>
-        <div><span class="k-label">Movements since</span>
-          <span class="k-value">${d.entries.length ? qty(d.entries.reduce((a, e) => a + e.qty, 0)) : "0"}</span>
+        <div><span class="k-label">${back ? "Movements undone" : "Movements since"}</span>
+          <span class="k-value">${d.entries.length ? qty(d.entries.reduce((a, e) => a + (back ? -e.qty : e.qty), 0)) : "0"}</span>
           <span class="muted">${qty(d.entries.length)} document(s)</span></div>
-        <div><span class="k-label">Our stock figure</span>
+        <div><span class="k-label">Our stock figure${back ? ` at ${dateFmt(d.asAt)}` : ""}</span>
           <span class="k-value">${qty(d.closing)}</span>
           <span class="muted">${
-            agrees
-              ? "MYOB agrees"
-              : `MYOB says ${qty(d.myobOnHand)} — a difference of ${qty((d.closing ?? 0) - (d.myobOnHand ?? 0))}`
+            back
+              ? "MYOB holds no figure for a past date"
+              : agrees
+                ? "MYOB agrees"
+                : `MYOB says ${qty(d.myobOnHand)} — a difference of ${qty((d.closing ?? 0) - (d.myobOnHand ?? 0))}`
           }</span></div>
       </div>
       ${
@@ -3448,9 +3564,7 @@ async function loadItemLedger(uid) {
           ? `<div class="table-wrap"><table>
               <thead><tr><th>Date</th><th>Movement</th><th>Reference</th><th class="num">Change</th><th class="num">Running total</th></tr></thead>
               <tbody>
-                <tr class="ledger-anchor"><td>${dateFmt(d.anchor.date)}</td>
-                  <td colspan="2"><strong>${esc(src)}</strong></td>
-                  <td class="num">—</td><td class="num"><strong>${qty(d.anchor.qty)}</strong></td></tr>
+                ${back ? "" : anchorRow}
                 ${rows.map((e) => `<tr>
                   <td>${dateFmt(e.date)}</td>
                   <td>${esc(LEDGER_KIND_LABEL[e.kind] ?? e.kind)}</td>
@@ -3460,10 +3574,11 @@ async function loadItemLedger(uid) {
                   <td class="num ${e.qty < 0 ? "alert" : ""}">${e.qty > 0 ? "+" : ""}${qty(e.qty)}</td>
                   <td class="num">${qty(e.balance)}</td>
                 </tr>`).join("")}
+                ${back ? anchorRow : ""}
               </tbody>
             </table></div>
             ${d.entries.length > rows.length ? `<p class="hint">Showing the most recent ${rows.length} of ${qty(d.entries.length)} movements.</p>` : ""}`
-          : '<p class="muted">Nothing has moved since the reference point.</p>'
+          : `<p class="muted">Nothing moved between ${dateFmt(d.asAt)} and the reference point.</p>`
       }`;
   } catch (err) {
     panel.innerHTML = `<h2>How this stock figure was reached</h2>

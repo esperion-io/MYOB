@@ -12,7 +12,26 @@ type Raw = Record<string, unknown>;
 function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v : null;
 }
+/*
+ * A number MYOB actually sent, or null.
+ *
+ * `Number(null)` is 0, so the obvious one-liner turned every field MYOB
+ * explicitly returns as null into a hard zero — indistinguishable afterwards
+ * from a real zero. On the live file that stored 0 average cost against 39
+ * items and 0 minimum level against 23, and the moment one of those items
+ * holds stock its value silently reads as nothing.
+ *
+ * Booleans and objects coerce just as quietly (`Number(true)` is 1,
+ * `Number([])` is 0), so only numbers and numeric strings are accepted —
+ * MYOB does return some decimals as strings.
+ *
+ * This also repairs `lineQty`'s fallback chain: `??` does not step over a 0,
+ * so a null ShipQuantity used to pin a line at zero instead of falling through
+ * to BillQuantity or Quantity.
+ */
 function num(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v !== "number" && typeof v !== "string") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }

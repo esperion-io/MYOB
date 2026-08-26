@@ -537,12 +537,28 @@ const DDL: string[] = [
        WHERE m.moved_on > p_as_at AND m.moved_on <= o.count_date
        GROUP BY m.item_uid
      ),
+     /*
+      * Open orders, as at the date.
+      *
+      * THE DATE BOUND IS NOT SYMMETRIC, and it has to not be. Whether an order
+      * is open is a fact about right now — MYOB keeps no status history — so
+      * for today's position every currently-open order counts, whatever date it
+      * carries. Bounding today's figure by the order date dropped future-dated
+      * orders entirely: 31,600 units across two orders (00064178 dated 1 Dec,
+      * 00064685 dated 1 Sep) were reserved in MYOB and read here as free stock,
+      * which is the exact failure this product exists to prevent.
+      *
+      * For a date in the past the bound is the best proxy available for "had
+      * this order been raised yet", so it stays. Hence: apply it only while the
+      * as-at date is behind today.
+      */
      our_committed AS (
        SELECT l.item_uid, SUM(l.qty)::double precision AS qty
        FROM myob_sale_order_lines l
        JOIN myob_sale_orders o ON o.uid = l.order_uid
        WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
-         AND l.item_uid IS NOT NULL AND o.date::date <= p_as_at
+         AND l.item_uid IS NOT NULL
+         AND (o.date::date <= p_as_at OR p_as_at >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),
      our_on_order AS (
@@ -551,7 +567,8 @@ const DDL: string[] = [
        FROM myob_purchase_order_lines l
        JOIN myob_purchase_orders o ON o.uid = l.order_uid
        WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
-         AND l.item_uid IS NOT NULL AND o.date::date <= p_as_at
+         AND l.item_uid IS NOT NULL
+         AND (o.date::date <= p_as_at OR p_as_at >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),
      resolved AS (
@@ -572,8 +589,31 @@ const DDL: string[] = [
                 WHEN lc.item_uid IS NOT NULL THEN NULL
                 WHEN op.item_uid IS NOT NULL THEN 'opening_balance_rolled_back'
               END AS anchor_source,
-              a.counted_qty::double precision AS anchor_qty,
-              COALESCE(sa.qty, 0)::double precision AS movements_since_anchor,
+              /*
+               * The working, in both directions.
+               *
+               * Rolling BACK from the conversion balance is still a reference
+               * point plus a movement — the movement is just negative, being
+               * the documents between this date and the balance, undone. These
+               * two columns used to be null and zero in that branch, so the
+               * month-end export shipped 3,064 rows whose "reference qty" and
+               * "movements since" were blank, and the item page said "no
+               * movements since" against a figure that had plainly moved.
+               *
+               * The invariant now holds whichever way the ledger ran:
+               *   anchor_qty + movements_since_anchor = on_hand
+               */
+              CASE
+                WHEN a.item_uid IS NOT NULL THEN a.counted_qty
+                WHEN lc.item_uid IS NOT NULL THEN NULL
+                WHEN op.item_uid IS NOT NULL THEN op.counted_qty
+              END::double precision AS anchor_qty,
+              CASE
+                WHEN a.item_uid IS NOT NULL THEN COALESCE(sa.qty, 0)
+                WHEN lc.item_uid IS NOT NULL THEN NULL
+                WHEN op.item_uid IS NOT NULL THEN -COALESCE(bo.qty, 0)
+                ELSE 0
+              END::double precision AS movements_since_anchor,
               (a.item_uid IS NOT NULL) AS has_anchor,
               i.qty_on_hand::double precision AS myob_on_hand,
               i.qty_committed::double precision AS myob_committed,
@@ -770,6 +810,9 @@ const DDL: string[] = [
   `DROP VIEW IF EXISTS kit_form`,
   `DROP VIEW IF EXISTS kit_candidate`,
   `DROP VIEW IF EXISTS kit_embedded_stock`,
+  // Dropped on 26 Aug 2026 — see the note further down. It read today's
+  // position, so it must not be left behind for someone to reach for again.
+  `DROP VIEW IF EXISTS kit_build_option`,
   `CREATE VIEW kit_form AS
    WITH billed AS (
      /*
@@ -836,33 +879,19 @@ const DDL: string[] = [
    * kits can we field, on hand plus buildable.
    */
   /*
-   * The build route, priced and stock-checked, for every item with a recipe.
+   * kit_build_option was removed on 26 Aug 2026.
    *
-   * component_cost is the roll-up at average cost. It is only ever compared
-   * against kit_form.buy_price — a real price from a real bill — and never
-   * against MYOB's average_cost for the parent, which for a built item is just
-   * the cost of having built it. 500 of the 513 recipe parents have no buy
-   * price at all, and for those there is no comparison to draw.
+   * It computed the build route — parts cost, buildable now, components out of
+   * stock — against `item_position`, which is always TODAY. Its output was then
+   * attached to items computed at whatever date the reader had selected, so on
+   * a historical view "total available" added July's kits on the shelf to
+   * today's buildable-from-parts, and Products & BOM (which does bound by the
+   * date) disagreed with the item page about the same kit.
    *
-   * buildable_now is the binding constraint, not the cost: the scarcest
-   * component decides how many can be made today, and it is frequently zero.
-   *
-   * costed_components is carried so the UI can refuse to draw a conclusion from
-   * a roll-up with holes in it. An item whose components have no average cost
-   * would otherwise look free to build.
+   * It now lives in applyKitRules, derived from the item set the caller is
+   * already holding. There is only one position in play, so the two halves of
+   * the total can no longer describe different moments.
    */
-  `CREATE OR REPLACE VIEW kit_build_option AS
-   SELECT e.parent_uid AS item_uid,
-          COUNT(*)::int AS component_count,
-          COUNT(*) FILTER (WHERE COALESCE(ci.average_cost, 0) > 0)::int AS costed_components,
-          SUM(e.qty_per * COALESCE(ci.average_cost, 0))::double precision AS component_cost,
-          MIN(FLOOR(GREATEST(COALESCE(pos.free_stock, 0), 0) / e.qty_per))::double precision AS buildable_now,
-          COUNT(*) FILTER (WHERE COALESCE(pos.free_stock, 0) <= 0)::int AS components_out_of_stock
-   FROM effective_bom e
-   JOIN myob_items ci ON ci.uid = e.component_uid
-   JOIN item_position pos ON pos.item_uid = e.component_uid
-   WHERE e.qty_per > 0
-   GROUP BY e.parent_uid`,
 
   `CREATE INDEX IF NOT EXISTS idx_inv_lines_item ON myob_sale_invoice_lines (item_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_so_lines_item ON myob_sale_order_lines (item_uid)`,

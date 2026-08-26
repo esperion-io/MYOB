@@ -78,13 +78,26 @@ export interface DemandWindow {
 
 export const DEFAULT_WINDOW_MONTHS = 6;
 
+/**
+ * A date that exists, not merely one shaped like a date.
+ *
+ * The pattern alone let "2026-02-31" through to be interpolated into SQL, where
+ * Postgres rejected it and the reader got a 500 carrying a raw database error.
+ * Round-tripping through Date catches the impossible ones; the upper bound
+ * catches a far-future date, which the picker prevents but a hand-edited or
+ * bookmarked URL does not.
+ */
+function validAsAt(v: unknown): string | null {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const d = new Date(`${v}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) return null;
+  return v > businessToday() ? null : v;
+}
+
 export function resolveWindow(o?: Partial<DemandWindow>): DemandWindow {
   const windowMonths = clampMonths(o?.windowMonths, DEFAULT_WINDOW_MONTHS);
   return {
-    asAt:
-      typeof o?.asAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o.asAt)
-        ? o.asAt
-        : businessToday(),
+    asAt: validAsAt(o?.asAt) ?? businessToday(),
     windowMonths,
     longMonths: Math.max(
       clampMonths(o?.longMonths, 12),
@@ -111,36 +124,49 @@ function clampMonths(v: unknown, fallback: number): number {
  */
 const DEAD_STOCK_MONTHS = 12;
 
+/*
+ * THE WINDOW IS HALF-OPEN, and that is deliberate: `(asAt − N months, asAt]`.
+ *
+ * Both bounds used to be inclusive, which made a "6 month" window 184 days
+ * long while the rate divided it by `weeksIn(6)` = 26.09 weeks, or 182.6 days.
+ * Every demand rate in the product was therefore ~0.5% high, and with it every
+ * cover figure, every excess calculation and every order quantity. Small, but
+ * it was a bias rather than noise — it only ever leaned one way.
+ */
 const demandCte = (w: DemandWindow): string => `
   direct_demand AS (
     SELECT l.item_uid,
-           COALESCE(SUM(l.qty) FILTER (WHERE i.date <= '${w.asAt}'::date AND i.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS direct_window,
-           COALESCE(SUM(l.qty) FILTER (WHERE i.date >= '${w.asAt}'::date - make_interval(months => ${DEAD_STOCK_MONTHS})), 0)::float8 AS direct_year,
+           COALESCE(SUM(l.qty) FILTER (WHERE i.date <= '${w.asAt}'::date AND i.date > '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS direct_window,
+           COALESCE(SUM(l.qty) FILTER (WHERE i.date > '${w.asAt}'::date - make_interval(months => ${DEAD_STOCK_MONTHS})), 0)::float8 AS direct_year,
            COALESCE(SUM(l.qty), 0)::float8 AS direct_long
     FROM myob_sale_invoice_lines l
     JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
-    WHERE i.date <= '${w.asAt}'::date AND i.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths}) AND l.item_uid IS NOT NULL
+    WHERE i.date <= '${w.asAt}'::date AND i.date > '${w.asAt}'::date - make_interval(months => ${w.longMonths}) AND l.item_uid IS NOT NULL
     GROUP BY l.item_uid
   ),
   component_demand AS (
     SELECT bl.item_uid,
-           COALESCE(SUM(-bl.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS comp_window,
-           COALESCE(SUM(-bl.qty) FILTER (WHERE b.date >= '${w.asAt}'::date - make_interval(months => ${DEAD_STOCK_MONTHS})), 0)::float8 AS comp_year,
+           COALESCE(SUM(-bl.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date > '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS comp_window,
+           COALESCE(SUM(-bl.qty) FILTER (WHERE b.date > '${w.asAt}'::date - make_interval(months => ${DEAD_STOCK_MONTHS})), 0)::float8 AS comp_year,
            COALESCE(SUM(-bl.qty), 0)::float8 AS comp_long
     FROM myob_build_lines bl
     JOIN myob_builds b ON b.uid = bl.build_uid
     WHERE bl.qty < 0 AND bl.item_uid IS NOT NULL
-      AND b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths})
+      AND b.date <= '${w.asAt}'::date AND b.date > '${w.asAt}'::date - make_interval(months => ${w.longMonths})
     GROUP BY bl.item_uid
   ),
-  incoming AS (
-    SELECT l.item_uid,
-           COALESCE(SUM(GREATEST(COALESCE(l.qty, 0) - COALESCE(l.received_qty, 0), 0)), 0)::float8 AS qty
-    FROM myob_purchase_order_lines l
-    JOIN myob_purchase_orders o ON o.uid = l.order_uid
-    WHERE UPPER(COALESCE(o.status, '')) = 'OPEN' AND l.item_uid IS NOT NULL
-    GROUP BY l.item_uid
-  ),
+  /*
+   * Incoming is NOT computed here.
+   *
+   * It used to be, with no as-at bound, while item_position_at bounded its own
+   * on-order figure by the selected date. The two then disagreed on every
+   * historical view: WR16301.5S16 at 31 July showed "On order 0" beside "Open
+   * PO incoming 158,000", and the purchase suggestion was netted off against
+   * 812,053 units of orders that had not been raised yet.
+   *
+   * One definition, in one place. incomingQty is read from pos.on_order, so
+   * the two cannot drift apart again.
+   */
   bom_usage AS (
     SELECT component_uid AS item_uid,
            COUNT(DISTINCT parent_uid)::int AS parent_count
@@ -173,19 +199,19 @@ const demandCte = (w: DemandWindow): string => `
   ),
   built_output AS (
     SELECT bl.item_uid,
-           COALESCE(SUM(bl.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS built_window
+           COALESCE(SUM(bl.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date > '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS built_window
     FROM myob_build_lines bl
     JOIN myob_builds b ON b.uid = bl.build_uid
     WHERE bl.qty > 0 AND bl.item_uid IS NOT NULL
-      AND b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths})
+      AND b.date <= '${w.asAt}'::date AND b.date > '${w.asAt}'::date - make_interval(months => ${w.longMonths})
     GROUP BY bl.item_uid
   ),
   purchased_qty AS (
     SELECT l.item_uid,
-           COALESCE(SUM(l.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS bought_window
+           COALESCE(SUM(l.qty) FILTER (WHERE b.date <= '${w.asAt}'::date AND b.date > '${w.asAt}'::date - make_interval(months => ${w.windowMonths})), 0)::float8 AS bought_window
     FROM myob_purchase_bill_lines l
     JOIN myob_purchase_bills b ON b.uid = l.bill_uid
-    WHERE l.item_uid IS NOT NULL AND b.date <= '${w.asAt}'::date AND b.date >= '${w.asAt}'::date - make_interval(months => ${w.longMonths})
+    WHERE l.item_uid IS NOT NULL AND b.date <= '${w.asAt}'::date AND b.date > '${w.asAt}'::date - make_interval(months => ${w.longMonths})
     GROUP BY l.item_uid
   ),
   -- Parent units sold in the last 90 days that were NOT built or bought in
@@ -245,7 +271,23 @@ const itemSelect = (w: DemandWindow): string => `
          pos.anchor_date::text AS anchor_date, pos.anchor_source, pos.anchor_qty,
          pos.movements_since_anchor, pos.myob_on_hand, pos.myob_committed,
          pos.divergence,
-         it.average_cost, it.current_value, it.base_selling_price,
+         /*
+          * Average cost AS AT THE DATE, not as at today.
+          *
+          * The myob_items.average_cost column is a live figure that moves with every
+          * receipt, so valuing a historical shelf with it prices July's stock
+          * at today's cost. B1675S16 moved from $2.04 to $1.05 in a single day
+          * on a container arrival — enough to make a month-end valuation wrong
+          * and, worse, to make this screen disagree with the daily snapshot
+          * table, which has always stored the cost that applied on the day.
+          *
+          * The snapshot is the authority wherever one exists. Before the
+          * history starts there is no cost history to consult, so it falls back
+          * to the live figure — the best available answer, and the same one it
+          * gave before.
+          */
+         COALESCE(dp.average_cost, it.average_cost) AS average_cost,
+         it.current_value, it.base_selling_price,
          it.min_level, it.reorder_qty,
          it.primary_supplier_uid, it.primary_supplier_name, it.supplier_item_number,
          it.product_type, it.product_finish,
@@ -259,13 +301,22 @@ const itemSelect = (w: DemandWindow): string => `
          COALESCE(aa.assigned_count, 0) AS assigned_supplier_count,
          sup.country AS supplier_country,
          sm.region AS supplier_region_override,
+         /*
+          * How long a replacement actually takes to arrive. Allied's own figure
+          * wins over the measured one; the measured one excludes same-day
+          * pairs, which are paperwork entered after the goods landed rather
+          * than a wait. Null means never measured, and the arithmetic then
+          * behaves exactly as it did before lead time existed.
+          */
+         COALESCE(sm.lead_time_days, slt.median_lead_days)::float8 AS lead_time_days,
+         slt.median_lead_days::float8 AS measured_lead_days,
+         slt.orders_measured AS lead_time_orders,
          COALESCE(dd.direct_window, 0) AS direct_window,
          COALESCE(dd.direct_year, 0) AS direct_year,
          COALESCE(dd.direct_long, 0) AS direct_long,
          COALESCE(cd.comp_window, 0) AS comp_window,
          COALESCE(cd.comp_year, 0) AS comp_year,
          COALESCE(cd.comp_long, 0) AS comp_long,
-         COALESCE(inc.qty, 0) AS incoming_qty,
          COALESCE(u.parent_count, 0) AS parent_count,
          COALESCE(ud.parent_count_deep, 0) AS parent_count_deep,
          COALESCE(p.component_count, 0) AS component_count,
@@ -279,7 +330,6 @@ const itemSelect = (w: DemandWindow): string => `
   ) tg ON tg.item_uid = it.uid
   LEFT JOIN direct_demand dd ON dd.item_uid = it.uid
   LEFT JOIN component_demand cd ON cd.item_uid = it.uid
-  LEFT JOIN incoming inc ON inc.item_uid = it.uid
   LEFT JOIN bom_usage u ON u.item_uid = it.uid
   LEFT JOIN bom_usage_deep ud ON ud.item_uid = it.uid
   LEFT JOIN bom_parents p ON p.item_uid = it.uid
@@ -291,6 +341,10 @@ const itemSelect = (w: DemandWindow): string => `
     ON sup.uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
   LEFT JOIN platform_supplier_meta sm
     ON sm.supplier_uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
+  LEFT JOIN supplier_lead_time slt
+    ON slt.supplier_uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
+  LEFT JOIN platform_daily_position dp
+    ON dp.item_uid = it.uid AND dp.as_at_date = '${w.asAt}'::date
 `;
 
 export interface ItemComputed {
@@ -375,6 +429,16 @@ export interface ItemComputed {
   };
   coverWeeks: number | null;
   /**
+   * Measured wait between raising a purchase order and the goods being billed,
+   * for this item's effective supplier. Allied's own override wins; null means
+   * it has never been measured, and lead time then contributes nothing to any
+   * calculation. Drives the order quantity and the cover_below_lead_time flag.
+   */
+  leadTimeDays: number | null;
+  leadTimeWeeks: number | null;
+  /** Cover runs out before a replacement can land. */
+  coverBelowLeadTime: boolean;
+  /**
    * Stock beyond the target cover, when it is material. Value tied up that
    * Allied could stop reordering — the counterpart to shortage risk.
    */
@@ -431,7 +495,6 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
   const myobCommitted = n(row.myob_committed);
   const minLevel = n(row.min_level);
   const avgCost = n(row.average_cost);
-  const incomingQty = n(row.incoming_qty) ?? 0;
   const parentCount = n(row.parent_count) ?? 0;
   const isActive = row.is_active as boolean | null;
 
@@ -443,6 +506,10 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
 
   const freeStock = onHand == null ? null : onHand - (committed ?? 0);
   const onOrder = n(row.on_order) ?? 0;
+  // Same number, same source. "On order" and "incoming" are two names Allied
+  // use for one thing, and they were once computed twice — see the note in
+  // demandCte for what that cost on historical dates.
+  const incomingQty = onOrder;
   // Our own "available": free stock plus what is on the water. Kept distinct
   // from free stock, which is what every downstream calculation uses, so
   // un-arrived stock can never be counted as if it were on the shelf.
@@ -451,8 +518,21 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
   const coverWeeks =
     weekly > 0 && freeStock != null ? Math.max(freeStock, 0) / weekly : null;
 
+  /*
+   * A position we do not have is not a position of zero.
+   *
+   * `on_hand` comes back null in two cases: an item MYOB does not inventory at
+   * all, and a date that sits before a physical count. Reading either as zero
+   * invented demand, cover and a purchase suggestion out of nothing — the
+   * non-stock placeholder codes NOTE ("Special Information") and MISC reached
+   * the purchase cart that way, NOTE at 8 units and NZ$1,920 against MILSONS.
+   * Nothing below the shelf line is decided for an item whose shelf we cannot
+   * see.
+   */
+  const positionKnown = freeStock != null;
+
   const flags: string[] = [];
-  if (minLevel != null && minLevel > 0 && (freeStock ?? 0) < minLevel)
+  if (positionKnown && minLevel != null && minLevel > 0 && freeStock < minLevel)
     flags.push("below_min");
   if ((onHand ?? 0) < 0) flags.push("negative_stock");
   if ((onHand ?? 0) > 0 && (avgCost ?? 0) === 0) flags.push("stock_no_cost");
@@ -497,9 +577,48 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
   }
   if (understatesMeasured) flags.push("understated_demand");
 
+  /*
+   * How long a replacement takes to arrive, and whether the shelf outlasts it.
+   *
+   * Allied's own figure for a supplier beats the measured one. Where nothing
+   * has ever been measured this is zero and every calculation below behaves as
+   * it did before lead time was wired in.
+   */
+  const leadDays = n(row.lead_time_days);
+  const leadWeeks = leadDays != null && leadDays > 0 ? leadDays / 7 : 0;
+  /*
+   * Cover shorter than the wait to restock — the most actionable warning the
+   * product can give about an import. Nothing ordered today can land before the
+   * shelf is empty, so the stockout is already committed and the only question
+   * left is how long it lasts.
+   *
+   * IT COUNTS GOODS ALREADY ON THE WATER, and it has to. Measured against free
+   * stock alone this fired on 117 items, most of them false: BN16500LTG sells
+   * 20 a week on a 16.7-week lead and looked critical at 2.5 weeks of cover,
+   * while 2,260 units were already shipped and due. A warning that cannot tell
+   * a real shortage from a container in transit gets ignored, and then the real
+   * ones go with it.
+   */
+  const coverIncludingIncoming =
+    weekly > 0 && available != null ? Math.max(available, 0) / weekly : null;
+  const coverBelowLead =
+    coverIncludingIncoming != null &&
+    leadWeeks > 0 &&
+    coverIncludingIncoming < leadWeeks;
+  if (coverBelowLead) flags.push("cover_below_lead_time");
+
   const factors: { label: string; points: number }[] = [];
   if (flags.includes("below_min"))
     factors.push({ label: "Below MYOB minimum level", points: 30 });
+  if (coverBelowLead && coverIncludingIncoming != null)
+    factors.push({
+      label: `${coverIncludingIncoming.toFixed(
+        1,
+      )}w of stock including incoming, against a ${leadWeeks.toFixed(
+        1,
+      )}w wait to restock`,
+      points: 30,
+    });
   if (coverWeeks != null) {
     if (coverWeeks < 2) factors.push({ label: `Cover ${coverWeeks.toFixed(1)}w (<2w)`, points: 25 });
     else if (coverWeeks < 4) factors.push({ label: `Cover ${coverWeeks.toFixed(1)}w (<4w)`, points: 15 });
@@ -547,13 +666,32 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     }
   }
 
-  // Purchasing suggestion: cover target + min level, net of free stock and
-  // incoming POs. Free stock excludes on-order so incoming is subtracted once.
+  /*
+   * Purchasing suggestion: enough to survive the wait, plus the cover target,
+   * plus the minimum level, net of free stock and goods already on the water.
+   *
+   * THE LEAD-TIME TERM IS THE POINT. Ordering to a flat 8 weeks of cover is
+   * only safe when a replacement arrives promptly. Allied import from China on
+   * measured lead times of 100-131 days, and against those the flat rule is not
+   * conservative, it is a stockout waiting to happen: MHS20EG sells 300 a week,
+   * holds 3.2 weeks of cover, takes 14.3 weeks to arrive — and the flat rule
+   * suggested ordering nothing at all, because free stock plus incoming already
+   * exceeded eight weeks. MHS20LG was down to 0.1 weeks of cover on a 100-day
+   * lead. Six more items sat below their own lead time with a suggestion of
+   * zero.
+   *
+   * `supplier_lead_time` had measured all of this carefully and the number was
+   * shown on screen; it simply never reached the arithmetic. Where it has never
+   * been measured the term is zero, so those items behave exactly as before.
+   */
   let suggestion: ItemComputed["suggestion"] = null;
-  if (weekly > 0 || flags.includes("below_min")) {
+  if (positionKnown && (weekly > 0 || flags.includes("below_min"))) {
     const target = config.insights.targetCoverWeeks;
     const raw =
-      weekly * target + Math.max(minLevel ?? 0, 0) - (freeStock ?? 0) - incomingQty;
+      weekly * (target + leadWeeks) +
+      Math.max(minLevel ?? 0, 0) -
+      freeStock -
+      incomingQty;
     if (raw > 0) {
       const multiple = n(row.reorder_qty);
       const qty =
@@ -564,6 +702,14 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
           weeklyDemand: Number(weekly.toFixed(2)),
           demandBasis: basis,
           targetCoverWeeks: target,
+          leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : 0,
+          leadTimeDays: leadDays,
+          leadTimeSource:
+            leadDays == null
+              ? "not measured"
+              : n(row.measured_lead_days) === leadDays
+                ? `measured over ${n(row.lead_time_orders) ?? 0} orders`
+                : "set by Allied",
           minLevel: minLevel ?? 0,
           freeStock: freeStock ?? 0,
           incoming: incomingQty,
@@ -669,6 +815,9 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
       understatesMeasured,
     },
     coverWeeks: coverWeeks == null ? null : Number(coverWeeks.toFixed(1)),
+    leadTimeDays: leadDays,
+    leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : null,
+    coverBelowLeadTime: coverBelowLead,
     excess,
     flags,
     risk: { score, factors },
@@ -1301,13 +1450,13 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
            FROM myob_sale_invoice_lines l JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
            WHERE l.item_uid = $1
              AND i.date <= '${win.asAt}'::date
-             AND i.date >= '${win.asAt}'::date - make_interval(months => ${chartMonths})
+             AND i.date > '${win.asAt}'::date - make_interval(months => ${chartMonths})
            UNION ALL
            SELECT date_trunc('month', b.date), 0, -bl.qty
            FROM myob_build_lines bl JOIN myob_builds b ON b.uid = bl.build_uid
            WHERE bl.item_uid = $1 AND bl.qty < 0
              AND b.date <= '${win.asAt}'::date
-             AND b.date >= '${win.asAt}'::date - make_interval(months => ${chartMonths})
+             AND b.date > '${win.asAt}'::date - make_interval(months => ${chartMonths})
          ) x GROUP BY month ORDER BY month`,
         [uid],
       ),
@@ -1379,7 +1528,7 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
            SELECT l.item_uid, SUM(l.qty)::float8 AS qty
            FROM myob_sale_invoice_lines l JOIN myob_sale_invoices i ON i.uid = l.invoice_uid
            WHERE i.date <= '${win.asAt}'::date
-             AND i.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+             AND i.date > '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
              AND l.item_uid IS NOT NULL
            GROUP BY l.item_uid
          ), built AS (
@@ -1387,14 +1536,14 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
            FROM myob_build_lines bl JOIN myob_builds b ON b.uid = bl.build_uid
            WHERE bl.qty > 0 AND bl.item_uid IS NOT NULL
              AND b.date <= '${win.asAt}'::date
-             AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+             AND b.date > '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
            GROUP BY bl.item_uid
          ), bought AS (
            SELECT l.item_uid, SUM(l.qty)::float8 AS qty
            FROM myob_purchase_bill_lines l JOIN myob_purchase_bills b ON b.uid = l.bill_uid
            WHERE l.item_uid IS NOT NULL
              AND b.date <= '${win.asAt}'::date
-             AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+             AND b.date > '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
            GROUP BY l.item_uid
          )
          SELECT eb.parent_uid AS uid, i.number, i.name, eb.qty_per::float8 AS qty_per,
@@ -1482,7 +1631,7 @@ export async function productsList(
               JOIN myob_sale_invoices si ON si.uid = l.invoice_uid
              WHERE l.item_uid = p.parent_uid
                AND si.date <= '${win.asAt}'::date
-               AND si.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+               AND si.date > '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
             ) AS sold_window
     FROM parent_build p
     JOIN myob_items i ON i.uid = p.parent_uid
@@ -1560,7 +1709,26 @@ export async function dataStatus() {
         (SELECT COUNT(*)::int FROM effective_bom) AS bom_effective,
         (SELECT COUNT(DISTINCT parent_uid)::int FROM effective_bom) AS bom_parents,
         (SELECT COUNT(*)::int FROM myob_item_bom) AS bom_myob,
-        (SELECT COUNT(DISTINCT parent_uid)::int FROM myob_item_bom) AS bom_myob_parents
+        (SELECT COUNT(DISTINCT parent_uid)::int FROM myob_item_bom) AS bom_myob_parents,
+        /*
+         * What the on-hand figures are actually standing on.
+         *
+         * Until a stocktake is confirmed, every anchor is the cutover balance
+         * and every position reads 'reconstructed' — the ledger is faithfully
+         * reproducing MYOB rather than correcting it, which is honest but is
+         * not what "stocktake-anchored" implies. Reporting the counts makes the
+         * difference visible instead of leaving it to be assumed.
+         */
+        (SELECT COUNT(*)::int FROM platform_stocktake_confirmation
+           WHERE is_stocktake) AS stocktakes_confirmed,
+        (SELECT COUNT(DISTINCT a.uid)::int FROM myob_adjustments a
+           WHERE a.memo ~* 'stock ?take|stock ?count|count qty|counted|recount'
+             AND NOT EXISTS (SELECT 1 FROM platform_stocktake_confirmation c
+                             WHERE c.adjustment_uid = a.uid)) AS stocktakes_awaiting_review,
+        (SELECT COUNT(*)::int FROM platform_stock_count
+           WHERE source <> 'opening_balance') AS physical_count_anchors,
+        (SELECT COUNT(*)::int FROM platform_stock_count
+           WHERE source = 'opening_balance') AS opening_balance_anchors
     `),
   ]);
 
@@ -1628,12 +1796,12 @@ export async function suppliersList(params: { q?: string } & Partial<DemandWindo
            (SELECT COALESCE(SUM(b.total), 0)::float8 FROM myob_purchase_bills b
              WHERE b.supplier_uid = s.uid
                AND b.date <= '${win.asAt}'::date
-               AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+               AND b.date > '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
            ) AS purchase_value_window,
            (SELECT COUNT(*)::int FROM myob_purchase_bills b
              WHERE b.supplier_uid = s.uid
                AND b.date <= '${win.asAt}'::date
-               AND b.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+               AND b.date > '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
            ) AS bills_window,
            po.open_value AS open_po_value, po.open_count AS open_po_count,
            lead.promised_days, lead.lead_po_count
@@ -2169,13 +2337,13 @@ export async function bomBlindspots(opts?: Partial<DemandWindow>) {
     WITH sold AS (
       SELECT l.item_uid,
              COALESCE(SUM(l.qty) FILTER (
-               WHERE si.date >= '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
+               WHERE si.date > '${win.asAt}'::date - make_interval(months => ${win.windowMonths})
              ), 0)::float8 AS sold_window,
              COALESCE(SUM(l.qty), 0)::float8 AS sold_long
       FROM myob_sale_invoice_lines l
       JOIN myob_sale_invoices si ON si.uid = l.invoice_uid
       WHERE si.date <= '${win.asAt}'::date
-        AND si.date >= '${win.asAt}'::date - make_interval(months => ${win.longMonths})
+        AND si.date > '${win.asAt}'::date - make_interval(months => ${win.longMonths})
         AND l.item_uid IS NOT NULL
       GROUP BY l.item_uid
     )
@@ -2681,7 +2849,11 @@ export async function suppliersCsv(): Promise<string> {
   const lines = [header.join(",")];
   for (const s of r.rows) {
     lines.push([
-      esc(s.name), esc(s.display_id), esc(s.city), esc(s.country), esc(s.region),
+      // COALESCE, not m.region alone: the screen shows an auto label derived
+      // from the address wherever nobody has overridden it, and a column that
+      // is blank in the file but filled on screen reads as missing data.
+      esc(s.name), esc(s.display_id), esc(s.city), esc(s.country),
+      esc((s.region as string | null) ?? autoRegion(s.country as string | null)),
       esc(s.email), esc(s.phone),
       esc(s.median_lead_days), esc(s.orders_measured), esc(s.same_day_excluded),
       esc(s.bills), esc(Number(s.purchase_value).toFixed(2)),

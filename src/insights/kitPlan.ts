@@ -158,7 +158,7 @@ export async function kitAvailability(opts?: Partial<DemandWindow>) {
     kitRuleSummary(win),
   ]);
 
-  const rows = items
+  const all = items
     .filter((i) => i.kit?.form)
     .map((i) => ({
       uid: i.uid,
@@ -175,17 +175,21 @@ export async function kitAvailability(opts?: Partial<DemandWindow>) {
       buildPlanQty: i.kit!.buildPlanQty,
       doubleOrder: i.kit!.doubleOrder,
       stockValue: i.currentValue,
-    }))
-    .filter((r) => r.totalAvailable > 0 || r.buildPlanQty > 0);
-
-  rows.sort((a, b) => b.totalAvailable - a.totalAvailable);
+    }));
 
   /*
-   * The kits Allied genuinely buy complete, detected from purchase history
-   * rather than any flag. This is the set the brief calls out as important, so
-   * it is reported explicitly with who supplies each one.
+   * "Most kits available" is a leaderboard, so it drops the items with nothing
+   * to show. The bought-complete list is a roster and must not, which is where
+   * these two used to part company: the figure strip said 13 items are bought
+   * complete and the table beneath it was headed 11, because two of them
+   * happen to hold no stock and have no buildable parts today. A count and the
+   * list it labels have to agree.
    */
-  const purchased = rows
+  const rows = all
+    .filter((r) => r.totalAvailable > 0 || r.buildPlanQty > 0)
+    .sort((a, b) => b.totalAvailable - a.totalAvailable);
+
+  const purchased = all
     .filter((r) => r.boughtFromSupplier)
     .sort((a, b) => (b.kitsOnHand ?? 0) - (a.kitsOnHand ?? 0));
 
@@ -200,7 +204,8 @@ export async function kitAvailability(opts?: Partial<DemandWindow>) {
     kitStockValue: round(kitStockValue),
     totalStockValue: round(items.reduce((a, i) => a + (i.currentValue ?? 0), 0)),
     purchasedCount: purchased.length,
-    purchased: purchased.slice(0, 15),
+    purchased,
     rows: rows.slice(0, 15),
+    rowsTotal: rows.length,
   };
 }
