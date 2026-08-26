@@ -23,6 +23,31 @@ export function getPool(): pg.Pool {
       ssl: config.databaseUrl.includes("localhost")
         ? undefined
         : { rejectUnauthorized: false },
+      /*
+       * Pin every connection to UTC.
+       *
+       * MYOB sends transaction dates with no time or zone, so they land at
+       * midnight UTC. Casting one back to a date — `i.date::date`, or comparing
+       * it against `'2026-08-26'::date` — resolves in the SESSION timezone, and
+       * there are around forty such comparisons across the demand, cover and
+       * purchasing queries. Under a non-UTC session they silently shift by a
+       * day: the same six-month demand window returned 1,147,828 units under
+       * UTC and 1,151,325 under Pacific/Auckland.
+       *
+       * `stock_movements` already defends itself with an explicit
+       * `AT TIME ZONE 'UTC'`, which is why the stock ledger was unaffected. This
+       * extends the same guarantee to everything else, at the connection rather
+       * than in forty places where the next new query would forget it.
+       *
+       * Business-calendar dates are unaffected: they are resolved explicitly
+       * against Allied's timezone (see BUSINESS_TODAY_SQL and businessDate.ts),
+       * never against the session.
+       *
+       * Set as a startup parameter rather than on a `connect` handler, because
+       * node-postgres does not await that handler and a query could otherwise
+       * reach the server before the SET landed.
+       */
+      options: "-c timezone=UTC",
     });
   }
   return pool;

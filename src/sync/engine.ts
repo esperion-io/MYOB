@@ -665,9 +665,24 @@ export async function runSync(
       ]);
     }
 
+    /*
+     * Rebuild the derived recipes inside a transaction.
+     *
+     * deriveBomFromBuilds clears source='derived' and re-inserts it. Run
+     * without a transaction — as this was — a failure between the two, or a
+     * process that dies in the gap, leaves the table permanently empty of
+     * derived rows and effective_bom silently falls back to MYOB's own BOM
+     * alone. That drops 111 parent-component pairs which exist only as
+     * observed builds, and nothing about the resulting numbers looks wrong.
+     */
     const client = await pool.connect();
     try {
+      await client.query("BEGIN");
       stats.derived_bom_rows = await deriveBomFromBuilds(client);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
     } finally {
       client.release();
     }
