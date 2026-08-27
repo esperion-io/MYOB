@@ -4,6 +4,7 @@ import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import {
   applyKitRules,
+  deepBuildable,
   EMPTY_KIT_SUMMARY,
   loadKitGraph,
   type KitFacts,
@@ -1378,14 +1379,21 @@ type BuildAnswer = {
  * Two buildability answers, both from free stock (on hand − committed):
  *  - asIs: sub-assemblies counted only as finished units already on the shelf.
  *  - withSubBuilds: a sub-assembly also contributes what could be made from
- *    its own components, recursively — "what could we supply if we did the
- *    work first?". Always >= asIs.
+ *    its own components — "what could we supply if we did the work first?".
+ *    Always >= asIs.
  *
- * Caveat surfaced in the UI: a base component shared by two branches is
- * counted against each branch independently, so withSubBuilds is an upper
- * bound where branches compete for the same part.
+ * `withSubBuilds` USED TO BE AN UPPER BOUND, and the caveat was printed on the
+ * screen: each branch was solved on its own, so a base component feeding two
+ * of them was spent twice. DSSSH/80P read 1,269 that way against a true 979.
+ *
+ * It is now exact. The quantity comes from `deepBuildable`, which walks the
+ * requirement down the whole tree against one shared pool — the same function
+ * the kits page and the item set use, so the two screens cannot drift apart
+ * again. `asIs` stays here because it is a one-level question about this
+ * item's own tree, and the constraint (which component runs out first) is
+ * still read off the tree for both.
  */
-function computeBuildability(rows: BomTreeRow[], rootUid: string) {
+function computeBuildability(rows: BomTreeRow[], rootUid: string, exactDeep: number) {
   const children = new Map<string, BomTreeRow[]>();
   for (const r of rows) {
     const list = children.get(r.parent_uid);
@@ -1414,9 +1422,19 @@ function computeBuildability(rows: BomTreeRow[], rootUid: string) {
     return maxUnits == null ? null : { maxUnits, constraint };
   };
 
+  const asIs = answer(rootUid, false, new Set());
+  const approxDeep = answer(rootUid, true, new Set());
   return {
-    asIs: answer(rootUid, false, new Set()),
-    withSubBuilds: answer(rootUid, true, new Set()),
+    asIs,
+    /*
+     * The exact quantity, with the tree's own constraint carried alongside so
+     * the UI can still say which component runs out first. The approximate
+     * walk is kept only for that constraint — never for the number.
+     */
+    withSubBuilds:
+      approxDeep == null
+        ? null
+        : { maxUnits: exactDeep, constraint: approxDeep.constraint },
   };
 }
 
@@ -1567,9 +1585,26 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
   // Buildability from free stock, two ways: sub-assemblies as they sit today,
   // or exploded to base components assuming sub-assemblies get built first.
   const tree = rels.components.length ? await explodeBom(uid, win.asAt) : [];
+  /*
+   * One definition of "with sub-builds", shared with the kits page and the item
+   * set, so the same kit cannot report two different numbers on two screens.
+   */
+  const kitGraph = rels.components.length ? await loadKitGraph() : null;
+  /*
+   * Free stock for everything in this item's tree. The exploded rows already
+   * carry it at the date being viewed, so the deep answer is measured at the
+   * same moment as the rest of the page rather than at today.
+   */
+  const treeStock = new Map<string, number>();
+  for (const row of tree) {
+    treeStock.set(String(row.component_uid), Math.max(Number(row.stock_free ?? 0), 0));
+  }
+  const exactDeep = kitGraph
+    ? deepBuildable(uid, (u: string) => treeStock.get(u) ?? 0, kitGraph)
+    : 0;
   const buildability = rels.components.length
     ? {
-        ...computeBuildability(tree, uid),
+        ...computeBuildability(tree, uid, exactDeep),
         maxDepth: tree.reduce((m, r) => Math.max(m, Number(r.depth)), 0),
         multiLevel: tree.some((r) => Number(r.depth) > 1),
       }

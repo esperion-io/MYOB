@@ -551,6 +551,25 @@ const ENTITIES: EntitySpec[] = [
  * confidence grows with the number of corroborating builds.
  */
 async function deriveBomFromBuilds(client: pg.PoolClient): Promise<number> {
+  /*
+   * How many derived rows we are about to replace.
+   *
+   * The transaction around this function guarantees the table is never left
+   * half-rebuilt. It cannot, on its own, catch a rebuild that "succeeds" while
+   * producing far fewer recipes than it should — a truncated builds table, a
+   * bad window, a MYOB response that came back thin. That failure is invisible,
+   * because effective_bom still answers from MYOB's own bill of materials and
+   * the recipes simply get shorter: DBK16550G8 would show 2 components instead
+   * of 7 and still compute a confident parts cost and buildable count from
+   * under a third of the real recipe.
+   *
+   * So the rebuild has to justify itself against what it is replacing.
+   */
+  const before = await client.query<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM platform_bom WHERE source = 'derived'`,
+  );
+  const previous = Number(before.rows[0]?.n ?? 0);
+
   await client.query(`DELETE FROM platform_bom WHERE source = 'derived'`);
   const result = await client.query(`
     WITH produced AS (
@@ -587,7 +606,26 @@ async function deriveBomFromBuilds(client: pg.PoolClient): Promise<number> {
     GROUP BY s.parent_uid, c.component_uid
     HAVING SUM(c.used_qty) > 0
   `);
-  return result.rowCount ?? 0;
+  const rebuilt = result.rowCount ?? 0;
+
+  /*
+   * The circuit breaker. Throwing rolls the transaction back, so the PREVIOUS
+   * recipes survive intact and the sync fails loudly instead of quietly
+   * shipping a thinner bill of materials. Stale recipes are recoverable; silent
+   * partial ones are not, because nothing downstream can tell they are partial.
+   *
+   * Only a collapse trips it. Recipes legitimately move a little as builds are
+   * observed, so the bar is deliberately low: everything gone, or more than
+   * half gone, when there was something there before.
+   */
+  if (previous > 0 && rebuilt < previous / 2) {
+    throw new Error(
+      `Derived BOM rebuild collapsed from ${previous} to ${rebuilt} rows — rolled back, ` +
+        `keeping the previous recipes. Check that Inventory/Build synced completely ` +
+        `before re-running; a partial builds table is the usual cause.`,
+    );
+  }
+  return rebuilt;
 }
 
 function myobDateLiteral(d: Date): string {

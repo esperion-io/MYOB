@@ -1656,8 +1656,9 @@ function buildabilityHtml(b) {
           ? `Doing the sub-assembly work first unlocks <strong>${qty(unlocked)} more unit(s)</strong>.`
           : "Building sub-assemblies first would not unlock any more units."
       }
-      <br /><span class="muted">Both use free stock (on hand − committed) and ignore incoming purchase orders.
-      Where two branches need the same base part, the second figure counts it for each branch, so treat it as an upper bound.</span>
+      <br /><span class="muted">Both use free stock (on hand &minus; committed) and ignore incoming purchase orders.
+      A base part needed by two branches is only spent once, so the second figure is what could
+      actually be made, not a ceiling.</span>
     </div>`;
 }
 
@@ -2034,7 +2035,25 @@ function drawItemKit(body, d) {
       </div>
     </div>
     <p class="hint">Kits on the shelf get used first — whether this is sold on its own or goes into
-    something bigger — so only what is left over pulls on parts.</p>`);
+    something bigger — so only what is left over pulls on parts.</p>
+    ${
+      k.buildableDeep > k.buildableNow
+        ? `<div class="avail-deep">
+             <strong>${qty(k.totalAvailableDeep)} if you build the sub-assemblies first.</strong>
+             ${
+               k.buildableNow === 0
+                 ? `The figure above reads ${qty(k.totalAvailable)} because ${
+                     k.subAssemblyCount === 1
+                       ? "a part it needs is out of stock — but that part is made here too"
+                       : "parts it needs are out of stock — but those parts are made here too"
+                   }, and there is enough on hand to make ${qty(k.buildableDeep)}.`
+                 : `Counting every layer down to raw components, not just the sub-assemblies
+                    sitting on the shelf.`
+             }
+             ${k.buildDepth} level${k.buildDepth === 1 ? "" : "s"} of assembly, so this is
+             work to schedule rather than stock you already hold.</div>`
+        : ""
+    }`);
 
   /*
    * The cost comparison, and only where there is something real to compare.
@@ -2616,6 +2635,19 @@ function productBuildCostCell(p) {
  * broken open, so its bolts cannot fill a loose bolt order, and counting them
  * in both places is the double-count the brief warns about.
  */
+/*
+ * The "with sub-builds" cell.
+ *
+ * Only worth showing when it differs — repeating the same number in two columns
+ * teaches the reader to ignore both. Where it does differ it is the interesting
+ * figure, so it is marked rather than left to be spotted.
+ */
+function deepCell(r) {
+  const deep = r.totalAvailableDeep;
+  if (deep == null || deep <= r.totalAvailable) return '<span class="muted">&mdash;</span>';
+  return `<strong class="deep-v">${qty(deep)}</strong>`;
+}
+
 async function loadKitAvailability() {
   const el = document.getElementById("kit-avail");
   if (!el) return;
@@ -2629,12 +2661,19 @@ async function loadKitAvailability() {
           <span class="fs-k">complete kits on the shelf, across ${qty(s.kitsWithRecipe)} kit products</span></div>
         <div class="fs-cell"><span class="fs-v">${qty(s.kitsWithBuildable)}</span>
           <span class="fs-k">of those could have more built from parts on hand</span></div>
+        <div class="fs-cell"><span class="fs-v">${qty(s.kitsBlockedBySubAssembly ?? 0)}</span>
+          <span class="fs-k">read zero, but only because a part they need must be built first</span></div>
         <div class="fs-cell"><span class="fs-v">${qty(s.boughtFromSupplier)}</span>
           <span class="fs-k">are bought complete from a supplier</span></div>
       </div>
       <p class="hint"><strong>Counted once.</strong> A kit bought from a supplier is never broken
       open — it sells as the kit it arrived as — so its contents are not added into the stock of the
       parts inside it. Kits are counted as kits and parts as parts.</p>
+      <p class="hint"><strong>Two columns, because there are two answers.</strong>
+      "Buildable from parts" is one build, using sub-assemblies exactly as they sit on the shelf.
+      "With sub-builds" follows every layer down to raw components — so a kit whose bolt packs are
+      empty still counts, provided the bolts, nuts and washers to make those packs are there. Shared
+      parts are only spent once on the way down.</p>
       <p class="hint">Open any kit to see what it could supply: <strong>on the shelf + buildable from
       parts</strong>. That total is not added up across products here, because kits share parts —
       four of Allied's M12&times;40 kits draw on the same screws and nuts, so adding their buildable
@@ -2648,7 +2687,8 @@ async function loadKitAvailability() {
       <div class="table-wrap"><table>
         <thead><tr><th>Kit</th><th>Supplier</th><th class="num">Last bought</th>
           <th class="num">Paid each</th><th class="num">Parts cost</th>
-          <th class="num">On shelf</th><th class="num">Buildable</th><th class="num">Total</th></tr></thead>
+          <th class="num">On shelf</th><th class="num">Buildable</th><th class="num">Total</th>
+          <th class="num">With sub-builds</th></tr></thead>
         <tbody>${d.purchased.map((r) => `<tr class="rowlink" data-uid="${esc(r.uid)}">
           <td>${esc(r.number ?? "")} <span class="muted">${esc((r.name ?? "").slice(0, 26))}</span></td>
           <td class="muted">${esc((r.lastSupplier ?? "").slice(0, 22))}</td>
@@ -2658,19 +2698,42 @@ async function loadKitAvailability() {
           <td class="num">${qty(r.kitsOnHand)}</td>
           <td class="num">${qty(r.buildableNow)}</td>
           <td class="num strong">${qty(r.totalAvailable)}</td>
+          <td class="num">${deepCell(r)}</td>
         </tr>`).join("")}</tbody>
       </table></div>
+
+      ${
+        (d.blockedBySubAssemblyTotal ?? 0) > 0
+          ? `<h3>Reads zero, but could be built <span class="badge idle">${qty(d.blockedBySubAssemblyTotal)}</span></h3>
+      <p class="hint">Nothing more can be built from parts as they sit, because a part these need is
+      itself out of stock. That part is made here too, and there is enough underneath it to reach the
+      figure on the right. Worth checking before any of these is quoted as unavailable or ordered in.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Kit</th><th class="num">On shelf</th><th class="num">Buildable in one step</th>
+          <th class="num">With sub-builds</th><th class="num">Layers</th></tr></thead>
+        <tbody>${d.blockedBySubAssembly.map((r) => `<tr class="rowlink" data-uid="${esc(r.uid)}">
+          <td>${esc(r.number ?? "")} <span class="muted">${esc((r.name ?? "").slice(0, 30))}</span></td>
+          <td class="num">${qty(r.kitsOnHand)}</td>
+          <td class="num">${qty(r.buildableNow)}</td>
+          <td class="num"><strong class="deep-v">${qty(r.totalAvailableDeep)}</strong></td>
+          <td class="num muted">${qty(r.buildDepth ?? 0)}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>`
+          : ""
+      }
 
       <h3>Most kits available${d.rowsTotal > d.rows.length ? ` <span class="badge idle">top ${qty(d.rows.length)} of ${qty(d.rowsTotal)}</span>` : ""}</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Kit</th><th>Sourced</th><th class="num">On shelf</th>
-          <th class="num">Buildable from parts</th>${th("kit_available", "Total available", "num")}</tr></thead>
+          <th class="num">Buildable from parts</th>${th("kit_available", "Total available", "num")}
+          <th class="num">With sub-builds</th></tr></thead>
         <tbody>${d.rows.map((r) => `<tr class="rowlink" data-uid="${esc(r.uid)}">
           <td>${esc(r.number ?? "")} <span class="muted">${esc((r.name ?? "").slice(0, 30))}</span></td>
           <td>${r.boughtFromSupplier ? '<span class="badge brand">Bought complete</span>' : '<span class="badge ok">Made here</span>'}</td>
           <td class="num">${qty(r.kitsOnHand)}</td>
           <td class="num">${qty(r.buildableNow)}</td>
           <td class="num strong">${qty(r.totalAvailable)}</td>
+          <td class="num">${deepCell(r)}</td>
         </tr>`).join("")}</tbody>
       </table></div>`;
     el.querySelectorAll("tr.rowlink").forEach((tr) =>

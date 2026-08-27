@@ -99,6 +99,140 @@ export interface KitGraph {
   childrenOf: Map<string, KitEdge[]>;
   parentsOf: Map<string, KitEdge[]>;
   form: Map<string, KitFormRow>;
+  /**
+   * Every item that appears in a recipe, ordered parents before components.
+   *
+   * Requirements have to flow downhill in one pass — a sub-assembly cannot be
+   * resolved until every recipe that calls for it has added its share, or the
+   * shared pool gets spent twice. Computed once when the graph loads.
+   */
+  topoOrder: string[];
+}
+
+/**
+ * Parents before components, over the whole recipe graph.
+ *
+ * Kahn's algorithm, and it does not assume the graph is clean: any item still
+ * carrying unresolved parents at the end (which would mean a cycle) is appended
+ * rather than dropped, so a bad recipe degrades the answer instead of silently
+ * removing an item from every calculation. The live file has no cycles and a
+ * maximum depth of 3, checked 27 Aug 2026.
+ */
+function topologicalOrder(
+  childrenOf: Map<string, KitEdge[]>,
+  parentsOf: Map<string, KitEdge[]>,
+): string[] {
+  const nodes = new Set<string>([...childrenOf.keys(), ...parentsOf.keys()]);
+  const pending = new Map<string, number>();
+  for (const node of nodes) {
+    pending.set(node, new Set((parentsOf.get(node) ?? []).map((e) => e.parentUid)).size);
+  }
+  const queue = [...nodes].filter((n) => (pending.get(n) ?? 0) === 0);
+  const order: string[] = [];
+  const seen = new Set<string>();
+  while (queue.length) {
+    const node = queue.shift()!;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    order.push(node);
+    for (const edge of childrenOf.get(node) ?? []) {
+      const left = (pending.get(edge.componentUid) ?? 0) - 1;
+      pending.set(edge.componentUid, left);
+      if (left <= 0 && !seen.has(edge.componentUid)) queue.push(edge.componentUid);
+    }
+  }
+  for (const node of nodes) if (!seen.has(node)) order.push(node);
+  return order;
+}
+
+/**
+ * Could we make `qty` of this item, using stock at every level?
+ *
+ * THE HARD PART IS THE SHARED POOL. A dressing set needs bolt packs, the bolt
+ * packs are made from loose bolts, and the same loose bolts may also be called
+ * for directly by the set. Asking each branch "can you manage on your own"
+ * spends those bolts twice and reports a quantity that cannot actually be made.
+ *
+ * So this walks the requirement down the whole tree in one pass, parents first,
+ * against a single private copy of free stock. Each item takes what it can from
+ * that pool, and whatever it still lacks becomes a requirement on its own
+ * components. A shortfall that reaches an item with no recipe is a real
+ * shortage, and the answer is no.
+ *
+ * The parent itself deliberately does not draw on its own stock: units already
+ * on the shelf are counted separately as kitsOnHand, and letting them satisfy
+ * the requirement here would count the same kit twice.
+ */
+function canBuild(
+  parentUid: string,
+  qty: number,
+  freeStockOf: (uid: string) => number,
+  graph: KitGraph,
+): boolean {
+  if (qty <= 0) return true;
+  const need = new Map<string, number>([[parentUid, qty]]);
+  const drawn = new Map<string, number>();
+
+  for (const uid of graph.topoOrder) {
+    let outstanding = need.get(uid) ?? 0;
+    if (outstanding <= 1e-9) continue;
+
+    if (uid !== parentUid) {
+      const available = Math.max(freeStockOf(uid), 0) - (drawn.get(uid) ?? 0);
+      const take = Math.min(outstanding, Math.max(available, 0));
+      drawn.set(uid, (drawn.get(uid) ?? 0) + take);
+      outstanding -= take;
+    }
+    if (outstanding <= 1e-9) continue;
+
+    const recipe = graph.childrenOf.get(uid);
+    // Nothing left to make it from: a genuine shortage.
+    if (!recipe?.length) return false;
+    for (const edge of recipe) {
+      need.set(edge.componentUid, (need.get(edge.componentUid) ?? 0) + outstanding * edge.qtyPer);
+    }
+  }
+  return true;
+}
+
+/** How many recipe layers sit under an item; 1 when every component is raw. */
+function depthOf(uid: string, graph: KitGraph, seen = new Set<string>()): number {
+  const kids = graph.childrenOf.get(uid);
+  if (!kids?.length || seen.has(uid)) return 0;
+  seen.add(uid);
+  let deepest = 0;
+  for (const edge of kids) {
+    deepest = Math.max(deepest, depthOf(edge.componentUid, graph, seen));
+  }
+  seen.delete(uid);
+  return deepest + 1;
+}
+
+/** Largest quantity `canBuild` still says yes to. */
+export function deepBuildable(
+  parentUid: string,
+  freeStockOf: (uid: string) => number,
+  graph: KitGraph,
+): number {
+  if (!graph.childrenOf.get(parentUid)?.length) return 0;
+  if (!canBuild(parentUid, 1, freeStockOf, graph)) return 0;
+
+  // Grow until it fails, then bisect. Capped so a recipe whose components are
+  // effectively unlimited cannot spin.
+  const CAP = 1_000_000;
+  let lo = 1;
+  let hi = 2;
+  while (hi <= CAP && canBuild(parentUid, hi, freeStockOf, graph)) {
+    lo = hi;
+    hi *= 2;
+  }
+  if (hi > CAP) return CAP;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (canBuild(parentUid, mid, freeStockOf, graph)) lo = mid;
+    else hi = mid;
+  }
+  return lo;
 }
 
 let graphCache: { at: number; graph: KitGraph } | null = null;
@@ -169,7 +303,12 @@ export async function loadKitGraph(): Promise<KitGraph> {
     });
   }
 
-  const graph = { childrenOf, parentsOf, form };
+  const graph: KitGraph = {
+    childrenOf,
+    parentsOf,
+    form,
+    topoOrder: topologicalOrder(childrenOf, parentsOf),
+  };
   graphCache = { at: Date.now(), graph };
   return graph;
 }
@@ -185,10 +324,28 @@ export interface KitFacts {
   overridden: boolean;
   /** Complete kits already on the shelf, bought or previously built. */
   kitsOnHand: number;
-  /** How many more could be made today, limited by the scarcest component. */
+  /**
+   * How many more could be made in ONE build, from components as they sit —
+   * a sub-assembly counts only at its own shelf quantity.
+   */
   buildableNow: number;
-  /** kitsOnHand + buildableNow — what Allied could actually field. */
+  /**
+   * How many could be made counting every layer: sub-assemblies that are
+   * themselves out of stock but could be built from their own components.
+   *
+   * Always at least buildableNow. The gap between them is work, not stock —
+   * DSSSH/80P reads 0 buildable and 1,269 deep, because its bolt packs are
+   * empty while the bolts, nuts and washers to make them are not.
+   */
+  buildableDeep: number;
+  /** Layers below this item, 1 when every component is a raw part. */
+  buildDepth: number;
+  /** Components that are themselves buildable, and so hide depth. */
+  subAssemblyCount: number;
+  /** kitsOnHand + buildableNow — what Allied could field in one operation. */
   totalAvailable: number;
+  /** kitsOnHand + buildableDeep — what Allied could field, sub-builds allowed. */
+  totalAvailableDeep: number;
   /** What one costs to make from components, at average cost. */
   buildCost: number | null;
   /** False when the roll-up has uncosted components and cannot be trusted. */
@@ -227,6 +384,10 @@ export interface KitRuleSummary {
   kitsOnHand: number;
   /** Kit products that can be built at all from parts on hand right now. */
   kitsWithBuildable: number;
+  /** Buildable only once a sub-assembly is built first — invisible one level up. */
+  kitsWithBuildableDeep: number;
+  /** Reads zero buildable but is makeable with an extra build. */
+  kitsBlockedBySubAssembly: number;
   /** Requirements reported as something to build rather than order. */
   buildPlans: number;
   buildPlanUnits: number;
@@ -240,6 +401,8 @@ export const EMPTY_KIT_SUMMARY: KitRuleSummary = {
   madeHere: 0,
   kitsOnHand: 0,
   kitsWithBuildable: 0,
+  kitsWithBuildableDeep: 0,
+  kitsBlockedBySubAssembly: 0,
   buildPlans: 0,
   buildPlanUnits: 0,
   doubleOrders: 0,
@@ -258,6 +421,12 @@ const round = (v: number, dp = 2): number => Number(v.toFixed(dp));
 export function applyKitRules(items: ItemComputed[], graph: KitGraph): KitRuleSummary {
   const byUid = new Map(items.map((i) => [i.uid, i]));
   const summary: KitRuleSummary = { ...EMPTY_KIT_SUMMARY, kitsWithRecipe: graph.form.size };
+  /*
+   * One reading of free stock for the whole pass. A position we cannot see is
+   * zero here, not "skip": an unknown shelf is not a full one, and treating it
+   * as absent would let a deep build assume components it may not have.
+   */
+  const freeStockOf = (uid: string): number => Math.max(byUid.get(uid)?.qtyFreeStock ?? 0, 0);
 
   /*
    * The build route for one parent, measured against the item set in hand — so
@@ -310,6 +479,16 @@ export function applyKitRules(items: ItemComputed[], graph: KitGraph): KitRuleSu
      */
     const kitsOnHand = Math.max(item.qtyFreeStock ?? 0, 0);
     const buildableNow = Math.max(build?.buildableNow ?? 0, 0);
+    /*
+     * The same question asked through every layer.
+     *
+     * One level is the right answer to "what can we make this afternoon".
+     * It is the wrong answer to "how many can we supply", and on the live file
+     * it was wrong 155 times, 108 of them reading a flat zero against a kit
+     * that was perfectly makeable given one extra build. Both figures are now
+     * carried so the screen can say which it means.
+     */
+    const buildableDeep = Math.max(deepBuildable(item.uid, freeStockOf, graph), buildableNow);
 
     const facts: KitFacts = {
       form: row.form,
@@ -317,7 +496,13 @@ export function applyKitRules(items: ItemComputed[], graph: KitGraph): KitRuleSu
       overridden: row.overridden,
       kitsOnHand: round(kitsOnHand, 1),
       buildableNow: round(buildableNow, 1),
+      buildableDeep: round(buildableDeep, 1),
+      buildDepth: depthOf(item.uid, graph),
+      subAssemblyCount: (graph.childrenOf.get(item.uid) ?? []).filter((e) =>
+        graph.childrenOf.has(e.componentUid),
+      ).length,
       totalAvailable: round(kitsOnHand + buildableNow, 1),
+      totalAvailableDeep: round(kitsOnHand + buildableDeep, 1),
       buildCost: build && build.componentCount > 0 ? round(build.componentCost, 4) : null,
       buildCostComplete: build ? build.costedComponents === build.componentCount : false,
       buyPrice: row.buyPrice,
@@ -331,6 +516,8 @@ export function applyKitRules(items: ItemComputed[], graph: KitGraph): KitRuleSu
     else summary.boughtFromSupplier += 1;
     summary.kitsOnHand += kitsOnHand;
     if (buildableNow > 0) summary.kitsWithBuildable += 1;
+    if (buildableDeep > 0) summary.kitsWithBuildableDeep += 1;
+    if (buildableNow === 0 && buildableDeep > 0) summary.kitsBlockedBySubAssembly += 1;
 
     /*
      * The one rule: something never bought complete is not put on a purchase

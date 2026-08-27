@@ -171,7 +171,11 @@ export async function kitAvailability(opts?: Partial<DemandWindow>) {
       buildCost: i.kit!.buildCostComplete ? i.kit!.buildCost : null,
       kitsOnHand: i.kit!.kitsOnHand,
       buildableNow: i.kit!.buildableNow,
+      buildableDeep: i.kit!.buildableDeep,
       totalAvailable: i.kit!.totalAvailable,
+      totalAvailableDeep: i.kit!.totalAvailableDeep,
+      buildDepth: i.kit!.buildDepth,
+      subAssemblyCount: i.kit!.subAssemblyCount,
       buildPlanQty: i.kit!.buildPlanQty,
       doubleOrder: i.kit!.doubleOrder,
       stockValue: i.currentValue,
@@ -185,9 +189,25 @@ export async function kitAvailability(opts?: Partial<DemandWindow>) {
    * happen to hold no stock and have no buildable parts today. A count and the
    * list it labels have to agree.
    */
+  /*
+   * A kit that reads zero on one level but is makeable with a sub-build belongs
+   * on this list — it is exactly the case the deep figure exists to surface, and
+   * filtering on totalAvailable alone kept all 108 of them off the page.
+   */
   const rows = all
-    .filter((r) => r.totalAvailable > 0 || r.buildPlanQty > 0)
-    .sort((a, b) => b.totalAvailable - a.totalAvailable);
+    .filter((r) => r.totalAvailable > 0 || r.totalAvailableDeep > 0 || r.buildPlanQty > 0)
+    .sort((a, b) => b.totalAvailableDeep - a.totalAvailableDeep || b.totalAvailable - a.totalAvailable);
+
+  /*
+   * Kits where one build step says "nothing more can be made" and the layers
+   * below say otherwise. The test is on buildableNow, NOT on totalAvailable,
+   * so it matches the count in the figure strip exactly — a kit with four on
+   * the shelf and nothing buildable in one step belongs here just as much as
+   * one with an empty shelf. A count and the list it labels have to agree.
+   */
+  const blocked = all
+    .filter((r) => r.buildableNow === 0 && r.buildableDeep > 0)
+    .sort((a, b) => b.totalAvailableDeep - a.totalAvailableDeep);
 
   const purchased = all
     .filter((r) => r.boughtFromSupplier)
@@ -207,5 +227,15 @@ export async function kitAvailability(opts?: Partial<DemandWindow>) {
     purchased,
     rows: rows.slice(0, 15),
     rowsTotal: rows.length,
+    /*
+     * The kits that read zero and are not.
+     *
+     * They cannot surface in the leaderboard above — it ranks by availability,
+     * so anything showing zero sorts beneath every kit with stock, and all 108
+     * of them fell off the visible page. They are the whole reason the deep
+     * figure exists, so they get their own list.
+     */
+    blockedBySubAssembly: blocked.slice(0, 15),
+    blockedBySubAssemblyTotal: blocked.length,
   };
 }
