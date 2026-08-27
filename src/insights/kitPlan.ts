@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { loadKitGraph } from "./kits.js";
+import { deepBuildable, loadKitGraph } from "./kits.js";
 import {
   computedItems,
   kitRuleSummary,
@@ -85,13 +85,21 @@ export async function kitDetail(uid: string, opts?: Partial<DemandWindow>) {
    * BP1675S16 showed 18 buildable against 30,000 bolts and 60,000 nuts on open
    * orders, which then landed. Buying the packs as well would have been buying
    * the same requirement a second time.
+   *
+   * It counts every layer, and against one shared pool. A one-level version read
+   * zero for DSSSH/80P because its bolt packs are empty, while the parts to make
+   * them sat on the shelf — the same blindness the kits page had, and the same
+   * fix, so the two cannot disagree about one kit.
    */
   const buildableWithIncoming = components.length
     ? Math.max(
-        Math.min(
-          ...components.map((c) =>
-            Math.floor((Math.max(c.freeStock ?? 0, 0) + c.incomingQty) / c.qtyPer),
-          ),
+        deepBuildable(
+          uid,
+          (u) => {
+            const c = byUid.get(u);
+            return Math.max(c?.qtyFreeStock ?? 0, 0) + (c?.incomingQty ?? 0);
+          },
+          graph,
         ),
         0,
       )

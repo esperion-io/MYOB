@@ -2772,8 +2772,16 @@ async function loadProductsTable() {
                     <td class="num">${qty(p.component_count)}</td>
                     <td class="num">${qty(p.stock_free)}</td>
                     <td class="num">${qty(p.sold_window)}</td>
-                    <td class="num">${p.buildable == null ? "—" : qty(p.buildable)}</td>
-                    <td class="num strong">${qty(Math.max(p.stock_free ?? 0, 0) + Math.max(p.buildable ?? 0, 0))}</td>
+                    <td class="num">${p.buildable == null ? "&mdash;" : qty(p.buildable)}${
+                      (p.buildable_deep ?? 0) > (p.buildable ?? 0)
+                        ? ` <span class="deep-v" title="With sub-assemblies built first">(${qty(p.buildable_deep)})</span>`
+                        : ""
+                    }</td>
+                    <td class="num strong">${qty(Math.max(p.stock_free ?? 0, 0) + Math.max(p.buildable ?? 0, 0))}${
+                      (p.buildable_deep ?? 0) > (p.buildable ?? 0)
+                        ? ` <span class="deep-v" title="With sub-assemblies built first">(${qty(Math.max(p.stock_free ?? 0, 0) + Math.max(p.buildable_deep ?? 0, 0))})</span>`
+                        : ""
+                    }</td>
                     <td class="num">${p.buy_price ? price(p.buy_price) : '<span class="muted" title="Never bought complete, so there is no purchase price">—</span>'}</td>
                     <td class="num">${productBuildCostCell(p)}</td>
                     <td>${

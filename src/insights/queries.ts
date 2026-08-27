@@ -1675,7 +1675,44 @@ export async function productsList(
     ORDER BY sold_window DESC NULLS LAST
   `);
 
-  let rows = result.rows;
+  /*
+   * The deep answer, attached in JS because SQL cannot walk a shared pool.
+   *
+   * The `buildable` column above is one level — MIN over direct components —
+   * so this page reported 0 for DSSSH/80P while the kits page and the item page
+   * both said 1,269. Three screens, one kit, two answers. The deep figure comes
+   * from the same `deepBuildable` they use, so all three now agree.
+   */
+  const graph = await loadKitGraph();
+  const stock = new Map<string, number>();
+  for (const r of result.rows) {
+    stock.set(String(r.parent_uid), Math.max(Number(r.stock_free ?? 0), 0));
+  }
+  /*
+   * Components are not in the parents result set, so their stock has to be read
+   * separately or every deep answer would come back zero.
+   */
+  const componentStock = await pool.query(
+    `SELECT p.item_uid, GREATEST(COALESCE(p.free_stock, 0), 0)::float8 AS free_stock
+     FROM item_position_at('${win.asAt}'::date) p
+     WHERE p.item_uid IN (SELECT DISTINCT component_uid FROM effective_bom)`,
+  );
+  for (const r of componentStock.rows) {
+    stock.set(String(r.item_uid), Number(r.free_stock ?? 0));
+  }
+  const freeStockOf = (uid: string): number => stock.get(uid) ?? 0;
+
+  let rows = result.rows.map((r) => {
+    const uid = String(r.parent_uid);
+    const deep = deepBuildable(uid, freeStockOf, graph);
+    return {
+      ...r,
+      buildable_deep: Math.max(deep, Number(r.buildable ?? 0)),
+      sub_assembly_count: (graph.childrenOf.get(uid) ?? []).filter((e) =>
+        graph.childrenOf.has(e.componentUid),
+      ).length,
+    };
+  });
   const q = params.q?.trim().toLowerCase();
   if (q) {
     rows = rows.filter((r) =>
