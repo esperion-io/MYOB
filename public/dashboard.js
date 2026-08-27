@@ -3789,6 +3789,26 @@ function cartExportUrl() {
   }`;
 }
 
+/*
+ * What the order is worth, counted once per item.
+ *
+ * This used to read "estimated $X" off the sum of every line, but an undecided
+ * item appears under each of its candidate suppliers carrying the full
+ * quantity — so that sum was NZ$826,199 against a real requirement of
+ * NZ$427,255 to NZ$592,140. Not a cautious estimate: NZ$234,000 above the
+ * worst case, and unreachable by any set of decisions.
+ *
+ * The range collapses to a single figure once every item has one supplier,
+ * which is exactly when a single figure becomes true.
+ */
+function cartRequirementLabel(d) {
+  const low = d.requirementLow;
+  const high = d.requirementHigh;
+  if (low == null || high == null) return `estimated ${money(d.estimatedCost)}`;
+  if (Math.round(high) <= Math.round(low)) return `${money(low)} to order`;
+  return `${money(low)}–${money(high)} to order`;
+}
+
 function drawCart() {
   const d = cartData;
   const undecided = d.unresolvedDuplicates;
@@ -3799,7 +3819,7 @@ function drawCart() {
       <div>
         <h1>Purchasing</h1>
         <p class="page-sub">${qty(d.totalItems)} items need an order, ${qty(d.totalLines)} lines across
-        ${qty(d.suppliers.length)} suppliers · estimated ${money(d.estimatedCost)} ·
+        ${qty(d.suppliers.length)} suppliers · ${cartRequirementLabel(d)} ·
         demand over the last ${windowLabel()}. Nothing is written to MYOB.</p>
       </div>
       <div class="head-actions">
@@ -3814,7 +3834,12 @@ function drawCart() {
              <strong>${qty(undecided)} item${undecided === 1 ? "" : "s"} sit under more than one supplier</strong>
              with no choice recorded. Each is a sourcing decision — usually a smaller local order against a
              cheaper, slower one direct from the factory. Left undecided they can be ordered twice, so the
-             export flags them.
+             export flags them.${
+               d.requirementHigh > d.requirementLow
+                 ? ` Settling them is worth ${money(d.requirementHigh - d.requirementLow)} — the width of the
+                     figure above.`
+                 : ""
+             }
              <button class="btn small" id="cart-decide" type="button">Work through them</button>
            </div>`
         : `<div class="notice ok">Every item has one supplier, or a deliberate split. Nothing can be ordered twice.</div>`

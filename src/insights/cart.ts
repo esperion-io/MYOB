@@ -373,7 +373,31 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
     suppliers,
     totalLines,
     totalItems: needing.length,
-    estimatedCost: suppliers.reduce((a, g) => a + g.estimatedCost, 0),
+    /*
+     * The requirement, as a range — because it genuinely is one until the
+     * sourcing decisions are made.
+     *
+     * An item below its minimum appears under every supplier tagged against it,
+     * which is deliberate and is how Allied compare a smaller local order
+     * against a cheaper, slower one direct from the factory. But each of those
+     * lines carries the FULL suggested quantity, so summing lines answers "what
+     * if every undecided item were ordered from all of its suppliers" while
+     * reading as "what we need to spend".
+     *
+     * On the live file that sum was NZ$826,199 against a real requirement of
+     * NZ$427,255 to NZ$592,140. It was not a cautious estimate, it was
+     * unreachable: NZ$234,000 above the worst case, because every dollar past
+     * the dearest single choice comes from ordering the same item twice — the
+     * exact mistake the page warns against.
+     *
+     * Counting each item once at its cheapest and dearest candidate gives the
+     * two ends. The gap between them is what the outstanding decisions are
+     * worth, which is a better reason to make them than a warning banner.
+     *
+     * Per-supplier subtotals are deliberately NOT de-duplicated: each is
+     * correct for that supplier's own order sheet, and the export depends on it.
+     */
+    ...requirementRange(suppliers),
     unresolvedDuplicates,
     decisions: [...decisions.values()],
     /*
@@ -394,6 +418,44 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         0,
       ),
     },
+  };
+}
+
+/**
+ * Each item counted once, at its cheapest and its dearest candidate supplier.
+ *
+ * `estimatedCost` is kept alongside as the sum of every line — what the export
+ * sheets add up to when nothing has been decided — so nothing that relied on it
+ * breaks. It is simply no longer what the page leads with.
+ */
+function requirementRange(
+  suppliers: { lines: { itemUid: string; estCost: number }[] }[],
+): { requirementLow: number; requirementHigh: number; estimatedCost: number } {
+  const perItem = new Map<string, { low: number; high: number }>();
+  let estimatedCost = 0;
+  for (const group of suppliers) {
+    for (const line of group.lines) {
+      estimatedCost += line.estCost;
+      const seen = perItem.get(line.itemUid);
+      if (!seen) {
+        perItem.set(line.itemUid, { low: line.estCost, high: line.estCost });
+        continue;
+      }
+      seen.low = Math.min(seen.low, line.estCost);
+      seen.high = Math.max(seen.high, line.estCost);
+    }
+  }
+  let requirementLow = 0;
+  let requirementHigh = 0;
+  for (const { low, high } of perItem.values()) {
+    requirementLow += low;
+    requirementHigh += high;
+  }
+  const round = (v: number): number => Number(v.toFixed(2));
+  return {
+    requirementLow: round(requirementLow),
+    requirementHigh: round(requirementHigh),
+    estimatedCost: round(estimatedCost),
   };
 }
 
