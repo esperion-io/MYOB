@@ -1298,3 +1298,5 @@ ul.plain { margin: 0.3rem 0 0.8rem; padding-left: 1rem; display: grid; gap: 0.2r
 .lead-bulk label { font-size: 0.62rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
 .lead-bulk .btn:last-child { margin-left: 0; }
 .lead-bulk .linkish { margin-left: auto; }
+.min-summary .presets-label { margin-right: 0.15rem; }
+.min-chip.on { outline: 2px solid var(--brand); outline-offset: 1px; color: var(--brand-deep); }

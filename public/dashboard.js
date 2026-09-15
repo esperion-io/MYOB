@@ -238,14 +238,21 @@ const minState = {
 };
 if (!MIN_WINDOWS.includes(minState.window)) minState.window = 12;
 
+/*
+ * The one status filter on the review, shown as clickable count chips rather
+ * than a dropdown: each chip both reports how many items are in that state
+ * and narrows the list to them. An earlier version had a dropdown as well,
+ * duplicating the chips with wordier labels, and the pairing read as two
+ * different filters. Labels here feed the view summary and the bulk button.
+ */
 const MIN_STATUS_OPTIONS = [
-  ["all", "Everything that moved"],
-  ["unset", "No minimum set yet"],
-  ["window", "Set from a window"],
-  ["manual", "Set by hand"],
-  ["drift", "Today's figure differs from the applied one"],
-  ["nolead", "No lead time — type one in to get a figure"],
-  ["stale", "Has a minimum, but nothing moved in this window"],
+  ["all", "all"],
+  ["unset", "no minimum yet"],
+  ["window", "minimum from a window"],
+  ["manual", "minimum set by hand"],
+  ["drift", "minimum out of date"],
+  ["nolead", "no lead time"],
+  ["stale", "minimum set, but not moving"],
 ];
 
 const prodState = { q: "", page: 1 };
@@ -4789,9 +4796,6 @@ async function renderMinStockReview() {
       </div>
       <div class="toolbar">
         <input type="search" id="min-q" placeholder="Search number, name, supplier…" value="${esc(minState.q)}" />
-        <select id="min-status" aria-label="Show">
-          ${MIN_STATUS_OPTIONS.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}
-        </select>
         <select id="min-region" aria-label="Supplier region">
           <option value="">All regions</option>
           <option value="NZ">Region: NZ</option>
@@ -4808,7 +4812,6 @@ async function renderMinStockReview() {
     <p class="min-status" id="min-status-msg" hidden></p>
     <div id="min-table"><p class="loading">Working out the figures…</p></div>`;
 
-  document.getElementById("min-status").value = minState.status;
   document.getElementById("min-region").value = minState.region;
 
   main.querySelectorAll("[data-window]").forEach((b) =>
@@ -4837,7 +4840,6 @@ async function renderMinStockReview() {
       minState.page = 1;
       loadMinStockTable();
     });
-  wire("min-status", "status");
   wire("min-region", "region");
 
   // Facet menus share the inventory page's values.
@@ -4872,7 +4874,7 @@ function minViewLabel() {
   if (minState.region) bits.push(minState.region === "none" ? "unlabelled region" : `from ${minState.region}`);
   if (minState.q) bits.push(`matching “${minState.q}”`);
   const status = MIN_STATUS_OPTIONS.find(([v]) => v === minState.status)?.[1];
-  if (minState.status !== "all" && status) bits.push(status.toLowerCase());
+  if (minState.status !== "all" && status) bits.push(status);
   return bits.length ? bits.join(", ") : "every item that moved";
 }
 
@@ -4893,19 +4895,22 @@ async function loadMinStockTable() {
   const filtered = minState.status !== "all" || minState.q || minState.productType ||
     minState.productFinish || minState.region || minState.tag;
 
-  const chip = (label, n, status, tone = "idle") =>
+  // One click narrows the list to that state; clicking the lit chip, or
+  // "All", widens it again. Counts describe the whole window, not the page.
+  const chip = (label, n, status, tone, title) =>
     `<button class="badge ${tone} min-chip ${minState.status === status ? "on" : ""}" type="button"
-       data-status="${status}" title="Show only these">${esc(label)} ${qty(n)}</button>`;
+       data-status="${status}" title="${esc(title)}">${esc(label)} ${qty(n)}</button>`;
 
   container.innerHTML = `
     <div class="min-summary">
-      ${chip("Not set yet", s.unset, "unset", s.unset ? "warn" : "idle")}
-      ${chip("From a window", s.window, "window", "ok")}
-      ${chip("By hand", s.manual, "manual", "brand")}
-      ${chip("Figure has moved", s.drift, "drift", s.drift ? "warn" : "idle")}
-      ${chip("No lead time", s.noLead, "nolead", s.noLead ? "warn" : "idle")}
-      ${s.stale ? chip("Set, but not moving", s.stale, "stale", "fail") : ""}
-      ${minState.status !== "all" ? '<button class="linkish" id="min-status-clear" type="button">show everything</button>' : ""}
+      <span class="presets-label">Show</span>
+      ${chip("All", s.moved, "all", "idle", `Every item that was sold or used in the last ${w} months`)}
+      ${chip("No minimum yet", s.unset, "unset", s.unset ? "warn" : "idle", "Moved in the window but has no minimum stock level applied")}
+      ${chip("Minimum from a window", s.window, "window", "ok", "Minimum was applied from the 6, 12 or 18-month figure")}
+      ${chip("Minimum set by hand", s.manual, "manual", "brand", "Minimum was typed in — bulk actions leave these alone")}
+      ${chip("Minimum out of date", s.drift, "drift", s.drift ? "warn" : "idle", "Set from a window, and that same window gives a different figure today")}
+      ${chip("No lead time", s.noLead, "nolead", s.noLead ? "warn" : "idle", "No lead time is known, so no figure can be suggested — type one in on the row")}
+      ${s.stale ? chip("Set, but not moving", s.stale, "stale", "fail", `Has a minimum, but nothing was sold or used in the last ${w} months — worth clearing`) : ""}
     </div>
 
     <div class="min-bulk">
@@ -5060,19 +5065,9 @@ function wireMinStockTable(container, data) {
     b.addEventListener("click", () => {
       minState.status = minState.status === b.dataset.status ? "all" : b.dataset.status;
       minState.page = 1;
-      const sel = document.getElementById("min-status");
-      if (sel) sel.value = minState.status;
       loadMinStockTable();
     }),
   );
-  const clearStatus = () => {
-    minState.status = "all";
-    minState.page = 1;
-    const sel = document.getElementById("min-status");
-    if (sel) sel.value = "all";
-    loadMinStockTable();
-  };
-  container.querySelector("#min-status-clear")?.addEventListener("click", clearStatus);
   container.querySelector("#min-empty-clear")?.addEventListener("click", () => {
     Object.assign(minState, { q: "", productType: "", productFinish: "", region: "", tag: "", status: "all", page: 1 });
     renderMinStockReview();
