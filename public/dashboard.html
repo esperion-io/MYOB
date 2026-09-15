@@ -66,17 +66,20 @@
             </select>
             <p class="control-note">A period — consumption, weekly rate, cover, suggestions.</p>
           </div>
-          <div class="control control-unit">
-            <label for="ctl-cover-unit">Show cover in</label>
-            <select id="ctl-cover-unit">
-              <option value="weeks">weeks</option>
-              <option value="months">months</option>
-            </select>
-            <p class="control-note">Display only — nothing is recalculated.</p>
-          </div>
           <div class="control control-reset">
             <button class="btn small" id="ctl-reset" type="button">Reset to default</button>
             <p class="control-note tz-note">Today &middot; 6 months. All dates are New&nbsp;Zealand time</p>
+          </div>
+          <!-- A reading preference, not a third control: it changes no figure,
+               so it sits small and to the side rather than beside the date and
+               window. Under a month is always shown in weeks. -->
+          <div class="cover-unit" id="ctl-cover-unit" role="group" aria-label="Show cover in"
+               title="Display only — the same figures, nothing is recalculated. Under a month is always shown in weeks.">
+            <span class="cover-unit-label">Cover in</span>
+            <span class="seg-toggle">
+              <button type="button" class="seg-btn" data-unit="weeks">weeks</button>
+              <button type="button" class="seg-btn" data-unit="months">months</button>
+            </span>
           </div>
           <!-- Says, on every page that obeys these controls, exactly what they
                are set to. Filled by renderControlState(); "default" when both

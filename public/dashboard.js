@@ -57,8 +57,8 @@ const TERMS = {
   },
   cover: {
     label: "Cover",
-    short: "How long the free stock lasts at the current demand rate — in weeks or months, chosen at the top of the page.",
-    long: "Free stock ÷ weekly demand. Shown in weeks or months as chosen at the top of the page (52 weeks to 12 months); the choice changes the label only, never the figure. Under 2 weeks (about half a month) is shown red, under 4 weeks (about a month) amber. Blank means no demand was recorded, so cover cannot be calculated.",
+    short: "How long the free stock lasts at the current demand rate — in weeks, or months once there is a month or more of it.",
+    long: "Free stock ÷ weekly demand. The toggle at the top of the page shows it in weeks or months (52 weeks to 12 months); the choice changes the label only, never the figure, and anything under a month is always shown in weeks so short cover is never rounded to zero months. Under 2 weeks is shown red, under 4 amber. Blank means no demand was recorded, so cover cannot be calculated.",
   },
   risk: {
     label: "Risk score",
@@ -375,7 +375,10 @@ function sortTh(sortKey, termKey, label, cls = "") {
  */
 function coverFmt(cover, basis) {
   if (cover == null) return '<span class="muted">no demand</span>';
-  const suffix = basis === "long" ? " (longer look-back)" : "";
+  const suffix =
+    basis === "long"
+      ? ` <span title="${esc(DEMAND_BASIS_LABEL.long)}">(longer look-back)</span>`
+      : "";
   const label = coverLabel(cover);
   if (cover < 2) return `<span class="badge fail">${label}${suffix}</span>`;
   if (cover < 4) return `<span class="badge warn">${label}${suffix}</span>`;
@@ -390,6 +393,10 @@ function coverFmt(cover, basis) {
  * to default" because it is a way of reading the figures, not a change to them.
  * Thresholds and sorting still compare the underlying weeks, so a red badge is
  * red in either unit.
+ *
+ * Under a month is always shown in weeks, even in months mode. A third of
+ * Allied's items sit under four weeks of cover, and a column of "0mo" and
+ * "0.2mo" says nothing where "1.3w" and "3.5w" do.
  */
 const COVER_UNITS = {
   weeks: { suffix: "w", word: "weeks", perWeek: 1 },
@@ -397,26 +404,24 @@ const COVER_UNITS = {
 };
 let coverUnit = localStorage.getItem("afCoverUnit") === "months" ? "months" : "weeks";
 
-/**
- * A weeks-of-cover figure as a bare number in the chosen unit: 8 → "8" or "1.8".
- * A day or two of stock is 0.3w but rounds to 0 months, which would read as
- * nothing on the shelf — so anything positive that rounds away is shown as
- * "<0.1" rather than "0".
- */
+/** The unit a given weeks figure is shown in: months only once there is a month of it. */
+function coverUnitFor(weeks) {
+  return coverUnit === "months" && weeks * COVER_UNITS.months.perWeek >= 1 ? "months" : "weeks";
+}
+/** A weeks-of-cover figure as a bare number in its display unit: 8 → "8" or "1.8". */
 function coverValue(weeks) {
-  const v = Number((weeks * COVER_UNITS[coverUnit].perWeek).toFixed(1));
-  return v === 0 && weeks > 0 ? "<0.1" : String(v);
+  return String(Number((weeks * COVER_UNITS[coverUnitFor(weeks)].perWeek).toFixed(1)));
 }
-/** Compact form for tables and badges: "8w" / "1.8mo". "—" when there is no figure. */
+/** Compact form for tables and badges: "3.5w" / "1.8mo". "—" when there is no figure. */
 function coverLabel(weeks) {
-  return weeks == null ? "—" : `${coverValue(weeks)}${COVER_UNITS[coverUnit].suffix}`;
+  return weeks == null ? "—" : `${coverValue(weeks)}${COVER_UNITS[coverUnitFor(weeks)].suffix}`;
 }
-/** Spelled-out form for prose: "8 weeks" / "1.8 months". */
+/** Spelled-out form for prose: "2 weeks" / "1.8 months". */
 function coverWords(weeks) {
-  return `${coverValue(weeks)} ${COVER_UNITS[coverUnit].word}`;
+  return `${coverValue(weeks)} ${coverUnitWord(weeks)}`;
 }
-function coverUnitWord() {
-  return COVER_UNITS[coverUnit].word;
+function coverUnitWord(weeks) {
+  return COVER_UNITS[coverUnitFor(weeks)].word;
 }
 
 /** Said in words, because "window" and "long" mean nothing to a reader. */
@@ -834,13 +839,23 @@ function initWindowControls() {
     renderControlState();
     route();
   });
-  const unit = document.getElementById("ctl-cover-unit");
-  unit.value = coverUnit;
-  unit.addEventListener("change", () => {
-    coverUnit = unit.value === "months" ? "months" : "weeks";
-    localStorage.setItem("afCoverUnit", coverUnit);
-    route();
-  });
+  const unitBtns = [...document.querySelectorAll("#ctl-cover-unit .seg-btn")];
+  const paintUnit = () =>
+    unitBtns.forEach((b) => {
+      const on = b.dataset.unit === coverUnit;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
+  paintUnit();
+  unitBtns.forEach((b) =>
+    b.addEventListener("click", () => {
+      if (b.dataset.unit === coverUnit) return;
+      coverUnit = b.dataset.unit === "months" ? "months" : "weeks";
+      localStorage.setItem("afCoverUnit", coverUnit);
+      paintUnit();
+      route();
+    }),
+  );
   document.getElementById("ctl-monthend").addEventListener("click", () => {
     asAt.value = lastMonthEnd();
     asAt.dispatchEvent(new Event("change"));
@@ -3341,8 +3356,9 @@ async function renderData() {
         <dt>Weekly demand / cover</dt>
         <dd>Weekly demand is units sold plus units used building other products, averaged per week over the
         period set at the top of the page — 6 months by default — ending on the date set beside it.
-        Cover = free stock &divide; weekly demand: how long the stock on the shelf would last, shown in weeks
-        or months as chosen at the top of the page (52 weeks to 12 months — the label changes, the figure does not).</dd>
+        Cover = free stock &divide; weekly demand: how long the stock on the shelf would last. The toggle at the
+        top of the page shows it in weeks or months (52 weeks to 12 months — the label changes, the figure does
+        not); under a month is always shown in weeks.</dd>
         <dt>How we spot a slow mover</dt>
         <dd>An item is tagged <strong>slow mover</strong> when it has not sold or been used <em>at all</em> in
         the last 6 months, but it did move earlier in the year. Rather than show it as having no demand, we
@@ -4258,7 +4274,7 @@ function cartRationale(l) {
     `<span title="Free stock today">${qty(l.freeStock)} free</span>`,
     l.minLevel ? `<span title="Minimum stock level set under Purchasing › Minimum stock review">min ${qty(l.minLevel)}</span>` : "",
     `<span title="Demand over the last ${l.rationale.demandWindowMonths} months">${l.weeklyDemand.toFixed(1)}/wk</span>`,
-    l.coverWeeks != null ? `<span title="Cover at that rate, in ${coverUnitWord()}">${coverLabel(l.coverWeeks)} cover</span>` : "",
+    l.coverWeeks != null ? `<span title="Cover at that rate">${coverLabel(l.coverWeeks)} cover</span>` : "",
     l.incomingQty ? `<span title="Already on order and not yet received">+${qty(l.incomingQty)} incoming</span>` : "",
     l.leadTimeDays != null
       ? `<span title="${l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
@@ -4366,7 +4382,7 @@ function openSupplierCompare(itemUid, number) {
         <span><strong>${qty(first.freeStock)}</strong> free stock</span>
         <span><strong>${qty(first.incomingQty)}</strong> incoming</span>
         <span><strong>${first.weeklyDemand.toFixed(1)}</strong>/week</span>
-        ${first.coverWeeks != null ? `<span><strong>${coverValue(first.coverWeeks)}</strong> ${coverUnitWord()} cover</span>` : ""}
+        ${first.coverWeeks != null ? `<span><strong>${coverValue(first.coverWeeks)}</strong> ${coverUnitWord(first.coverWeeks)} cover</span>` : ""}
       </div>
     </div>
 

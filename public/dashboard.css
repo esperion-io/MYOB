@@ -764,8 +764,25 @@ tr.ledger-anchor td { background: var(--paper); font-weight: 600; }
 .control-asat input[type="date"] { border-left: 3px solid var(--brand, #b8622a); border-radius: 3px; }
 /* A period: pill, to read as a span rather than a point. */
 .control-window select { border-radius: 999px; padding-left: 0.8rem; padding-right: 0.8rem; }
-/* A unit: same pill as the period, since months and weeks are both spans. */
-.control-unit select { border-radius: 999px; padding-left: 0.8rem; padding-right: 0.8rem; }
+/* The cover unit is a reading preference, so it is a small pill toggle tucked
+   to the right, not a third control beside the date and window. */
+.cover-unit {
+  margin-left: auto; align-self: flex-end;
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  font-size: 0.68rem; color: var(--muted); white-space: nowrap;
+}
+.cover-unit-label { letter-spacing: 0.06em; text-transform: uppercase; }
+.seg-toggle {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 999px;
+  overflow: hidden; background: var(--panel);
+}
+.seg-btn {
+  font: inherit; font-size: 0.68rem; padding: 0.2rem 0.6rem;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+}
+.seg-btn:hover { color: var(--ink-deep); }
+.seg-btn.active { background: var(--ink-deep); color: #fff; cursor: default; }
+@media (max-width: 700px) { .cover-unit { margin-left: 0; } }
 .control-reset { align-self: end; }
 @media (max-width: 700px) { .controls { padding: 0.75rem 1rem; gap: 0.8rem; } }
 .tz-note { white-space: nowrap; opacity: 0.85; }
