@@ -1204,3 +1204,89 @@ ul.plain { margin: 0.3rem 0 0.8rem; padding-left: 1rem; display: grid; gap: 0.2r
 }
 .avail-deep strong { color: var(--ink); }
 .deep-v { color: var(--brand); }
+
+/* ---------- purchasing sub-tabs ---------- */
+
+.subtabs {
+  display: flex;
+  gap: 0.2rem;
+  margin: -0.3rem 0 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.subtabs a {
+  padding: 0.5rem 0.9rem;
+  color: var(--muted);
+  text-decoration: none;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.86rem;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.subtabs a:hover { color: var(--brand-deep); }
+.subtabs a.active { color: var(--brand-deep); border-bottom-color: var(--brand); }
+
+/* ---------- minimum stock review ---------- */
+
+.min-controls { display: grid; gap: 0.6rem; margin-bottom: 0.8rem; }
+
+.min-window { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.min-window .chip-btn.win { border-radius: 999px; padding: 0.35rem 0.8rem; }
+.min-window .chip-btn.win.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fffaf5;
+}
+.hint-inline { font-size: 0.72rem; color: var(--muted); margin-left: 0.4rem; }
+
+.min-summary { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.7rem; }
+.min-chip.on { outline: 2px solid var(--brand); outline-offset: 1px; }
+
+.min-bulk {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 0.9rem;
+  margin-bottom: 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 0.74rem;
+}
+.min-bulk .btn:last-child { margin-left: auto; }
+
+.min-status { margin: 0 0 0.6rem; font-size: 0.74rem; padding: 0.45rem 0.7rem; border: 1px solid var(--line); }
+.min-status.ok { color: var(--ok); background: var(--ok-bg); border-color: rgba(47, 107, 79, 0.35); }
+.min-status.fail { color: var(--fail); background: var(--fail-bg); border-color: rgba(163, 59, 47, 0.4); }
+
+/* The three window columns sit together; the chosen one is tinted so the
+   figure the bulk button will apply is the one that reads loudest. */
+.min-table th.win-col, .min-table td.win-col { border-left: 1px solid var(--line); }
+.min-table th.win-active, .min-table td.win-active { background: var(--brand-soft); }
+
+.min-pick {
+  font: inherit;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink-deep);
+  cursor: pointer;
+}
+.min-pick:hover:not(:disabled) { border-color: var(--brand); color: var(--brand-deep); }
+.min-pick.is-applied { border-color: var(--ok); color: var(--ok); background: var(--ok-bg); cursor: default; }
+.min-pick:disabled:not(.is-applied) { opacity: 0.5; cursor: wait; }
+.min-pick.badge { border: 0; padding: 0.12rem 0.4rem; }
+
+.min-applied { white-space: nowrap; }
+.min-input { width: 6rem; }
+.min-input::placeholder { color: var(--muted); }
+.min-applied .badge { margin-top: 0.25rem; }
+
+.min-below { color: var(--fail); font-weight: 600; }
+
+.kpi .k-note { display: block; font-size: 0.62rem; color: var(--muted); margin-top: 0.15rem; }

@@ -617,10 +617,25 @@ export interface OwnedPosition {
  *
  * MYOB's figures come back on the row for comparison only, so divergence can be
  * shown and explained rather than quietly resolved.
+ *
+ * For a date that has closed, committed, on-order and average cost are read
+ * from that day's stored snapshot instead of recomputed — see the long note in
+ * item_position_at(), which this function mirrors. On hand is always the
+ * ledger's, at every date.
+ *
+ * `recomputeOnly` turns that off. snapshotPositions() passes it, because a
+ * writer that read its own table back would be recording a copy of itself
+ * rather than a fresh observation. Today's date is excluded from the snapshot
+ * branch anyway, so the flag matters only for a deliberate backfill of a past
+ * date — which is exactly the case where it would otherwise be circular.
  */
-export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
+export async function ownedPositions(
+  asAt?: string,
+  options?: { recomputeOnly?: boolean },
+): Promise<OwnedPosition[]> {
   await ensureInsightsSchema();
   const date = asAt ?? businessToday();
+  const readSnapshot = !options?.recomputeOnly;
   const result = await getPool().query(
     `WITH anchor AS (
        SELECT DISTINCT ON (item_uid) item_uid, count_date, counted_qty, source
@@ -680,14 +695,24 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
          AND l.item_uid IS NOT NULL
          AND (o.date::date <= $1::date OR $1::date >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
+     ),
+     -- What we recorded on the day, for a day that has closed. See the note on
+     -- this function and the fuller one in item_position_at().
+     snapshot AS (
+       SELECT dp.item_uid, dp.committed, dp.on_order, dp.average_cost
+       FROM platform_daily_position dp
+       WHERE $2::boolean
+         AND dp.as_at_date = $1::date
+         AND $1::date < ${BUSINESS_TODAY_SQL}
      )
-     SELECT i.uid, i.number, i.name, i.average_cost::float8,
+     SELECT i.uid, i.number, i.name,
+            COALESCE(sn.average_cost, i.average_cost)::float8 AS average_cost,
             i.qty_on_hand::float8 AS myob_on_hand,
             i.qty_committed::float8 AS myob_committed,
             a.count_date::text AS anchor_date, a.counted_qty::float8, a.source AS anchor_source,
             COALESCE(sa.qty, 0)::float8 AS since_anchor,
-            COALESCE(oc.qty, 0)::float8 AS committed,
-            COALESCE(oo.qty, 0)::float8 AS on_order,
+            COALESCE(sn.committed, oc.qty, 0)::float8 AS committed,
+            COALESCE(sn.on_order, oo.qty, 0)::float8 AS on_order,
             (a.item_uid IS NULL AND lc.item_uid IS NOT NULL) AS precedes_count,
             op.counted_qty::float8 AS opening_qty,
             op.count_date::text AS opening_date,
@@ -700,9 +725,10 @@ export async function ownedPositions(asAt?: string): Promise<OwnedPosition[]> {
      LEFT JOIN since_anchor sa ON sa.item_uid = i.uid
      LEFT JOIN our_committed oc ON oc.item_uid = i.uid
      LEFT JOIN our_on_order oo ON oo.item_uid = i.uid
+     LEFT JOIN snapshot sn ON sn.item_uid = i.uid
      WHERE i.is_inventoried
      ORDER BY i.number`,
-    [date],
+    [date, readSnapshot],
   );
 
   return result.rows.map((r) => {
@@ -769,7 +795,8 @@ export async function snapshotPositions(params?: {
 }): Promise<{ asAt: string; rows: number; rewritten: boolean }> {
   await ensureInsightsSchema();
   const asAt = params?.asAt ?? businessToday();
-  const positions = await ownedPositions(asAt);
+  // A fresh observation, never a copy of the row we are about to write.
+  const positions = await ownedPositions(asAt, { recomputeOnly: true });
   const pool = getPool();
 
   if (params?.overwrite) {
@@ -1098,14 +1125,33 @@ export async function positionExport(asAt?: string): Promise<{
             END AS supplier_source,
             i.supplier_item_number,
             p.on_hand, p.committed, p.free_stock, p.on_order,
-            i.average_cost, (p.on_hand * COALESCE(i.average_cost, 0)) AS stock_value,
-            i.min_level, p.basis, p.anchor_date::text AS anchor_date,
+            /*
+             * The cost that applied ON THE DATE, not today's.
+             *
+             * This is the month-end file, and it used to value a historical
+             * shelf at the live average cost. Cost moves with every receipt —
+             * B1675S16 went from $2.04 to $1.05 in a single day on a container
+             * arrival — so the spreadsheet Allied sit next to their own
+             * analysis was pricing July's stock in August money, and disagreed
+             * with the snapshot table that had stored the right figure all
+             * along. Before the history starts there is no cost to consult, so
+             * it falls back to the live one.
+             */
+            COALESCE(dp.average_cost, i.average_cost) AS average_cost,
+            (p.on_hand * COALESCE(dp.average_cost, i.average_cost, 0)) AS stock_value,
+            ms.min_level AS min_stock, i.min_level AS myob_min_level,
+            p.basis, p.anchor_date::text AS anchor_date,
             p.anchor_source, p.anchor_qty, p.movements_since_anchor,
             p.myob_on_hand, p.myob_committed, p.divergence
      FROM item_position_at($1::date) p
      JOIN myob_items i ON i.uid = p.item_uid
      LEFT JOIN assigned asg ON asg.item_uid = i.uid
      LEFT JOIN billed bl ON bl.item_uid = i.uid
+     LEFT JOIN platform_min_stock ms ON ms.item_uid = i.uid
+     LEFT JOIN platform_daily_position dp
+       ON dp.item_uid = p.item_uid
+      AND dp.as_at_date = $1::date
+      AND $1::date < ${BUSINESS_TODAY_SQL}
      WHERE i.is_inventoried
      ORDER BY i.number`,
     [date],
@@ -1135,7 +1181,7 @@ export async function positionExport(asAt?: string): Promise<{
     "Item number", "Item name", "Product type", "Product finish", "Active",
     "Supplier", "Supplier source", "Supplier item no",
     "On hand", "Committed", "Free stock", "On order",
-    "Average cost", "Stock value", "Min level",
+    "Average cost", "Stock value", "Min stock", "MYOB min level",
     "How it was reached", "Reference point", "Reference date", "Reference qty",
     "Movements since", "MYOB on hand", "MYOB committed", "Difference vs MYOB",
   ];
@@ -1147,7 +1193,7 @@ export async function positionExport(asAt?: string): Promise<{
       r.is_active ? "Yes" : "No",
       esc(r.supplier_name), esc(r.supplier_source), esc(r.supplier_item_number),
       esc(r.on_hand), esc(r.committed), esc(r.free_stock), esc(r.on_order),
-      esc(r.average_cost), esc(r.stock_value), esc(r.min_level),
+      esc(r.average_cost), esc(r.stock_value), esc(r.min_stock), esc(r.myob_min_level),
       esc(basisLabel[r.basis as string] ?? r.basis),
       esc(anchorLabel[r.anchor_source as string] ?? r.anchor_source),
       esc(r.anchor_date), esc(r.anchor_qty), esc(r.movements_since_anchor),

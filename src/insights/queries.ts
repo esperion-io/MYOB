@@ -289,7 +289,20 @@ const itemSelect = (w: DemandWindow): string => `
           */
          COALESCE(dp.average_cost, it.average_cost) AS average_cost,
          it.current_value, it.base_selling_price,
-         it.min_level, it.reorder_qty,
+         /*
+          * MYOB's minimum is carried for reference only. The one that drives
+          * the below-minimum flag, the risk score and the order quantity is
+          * Allied's own, set on the Minimum Stock Review page — see the note
+          * on platform_min_stock.
+          */
+         it.min_level AS myob_min_level,
+         ms.min_level AS applied_min_level,
+         ms.basis AS min_basis,
+         ms.window_months AS min_window_months,
+         ms.monthly_burn AS min_monthly_burn,
+         ms.lead_time_days AS min_lead_time_days,
+         ms.set_at AS min_set_at,
+         it.reorder_qty,
          it.primary_supplier_uid, it.primary_supplier_name, it.supplier_item_number,
          it.product_type, it.product_finish,
          COALESCE(tg.tags, ARRAY[]::text[]) AS tags,
@@ -346,6 +359,7 @@ const itemSelect = (w: DemandWindow): string => `
     ON slt.supplier_uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
   LEFT JOIN platform_daily_position dp
     ON dp.item_uid = it.uid AND dp.as_at_date = '${w.asAt}'::date
+  LEFT JOIN platform_min_stock ms ON ms.item_uid = it.uid
 `;
 
 export interface ItemComputed {
@@ -378,7 +392,23 @@ export interface ItemComputed {
   /** MYOB's stored value, carried for comparison only. */
   myobStockValue: number | null;
   baseSellingPrice: number | null;
+  /**
+   * The minimum stock level in force: Allied's applied figure, or null when
+   * none has been set. This is what below_min, the risk score and the order
+   * quantity read. MYOB's own minimum is in myobMinLevel and drives nothing.
+   */
   minLevel: number | null;
+  /** How the minimum was arrived at, for the screens that show it. */
+  minStock: {
+    level: number;
+    basis: "window" | "manual";
+    windowMonths: number | null;
+    monthlyBurn: number | null;
+    leadTimeDays: number | null;
+    setAt: string | null;
+  } | null;
+  /** MYOB's minimum level, shown for reference only. */
+  myobMinLevel: number | null;
   reorderQty: number | null;
   /** Effective supplier, in precedence order: Allied's preferred assignment,
    * else MYOB's primary supplier, else the dominant supplier inferred from
@@ -437,6 +467,9 @@ export interface ItemComputed {
    */
   leadTimeDays: number | null;
   leadTimeWeeks: number | null;
+  /** Whether Allied set the lead time or it was measured from their orders. */
+  leadTimeSource: "allied" | "measured" | null;
+  leadTimeOrders: number;
   /** Cover runs out before a replacement can land. */
   coverBelowLeadTime: boolean;
   /**
@@ -494,7 +527,14 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
   const committed = n(row.committed);
   const myobOnHand = n(row.myob_on_hand);
   const myobCommitted = n(row.myob_committed);
-  const minLevel = n(row.min_level);
+  /*
+   * The minimum in force is Allied's applied figure and nothing else. MYOB's
+   * min_level used to sit here, and because Allied had stopped maintaining it
+   * years ago it kept flagging the wrong items and inflating order quantities.
+   * An item with no applied minimum simply has none — not MYOB's, not zero.
+   */
+  const minLevel = n(row.applied_min_level);
+  const myobMinLevel = n(row.myob_min_level);
   const avgCost = n(row.average_cost);
   const parentCount = n(row.parent_count) ?? 0;
   const isActive = row.is_active as boolean | null;
@@ -610,7 +650,7 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
 
   const factors: { label: string; points: number }[] = [];
   if (flags.includes("below_min"))
-    factors.push({ label: "Below MYOB minimum level", points: 30 });
+    factors.push({ label: "Below minimum stock level", points: 30 });
   if (coverBelowLead && coverIncludingIncoming != null)
     factors.push({
       label: `${coverIncludingIncoming.toFixed(
@@ -684,15 +724,21 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
    * `supplier_lead_time` had measured all of this carefully and the number was
    * shown on screen; it simply never reached the arithmetic. Where it has never
    * been measured the term is zero, so those items behave exactly as before.
+   *
+   * THE MINIMUM STOCK LEVEL IS THAT SAME TERM, decided by Allied. Their
+   * minimum is defined as monthly consumption × lead time — the stock that
+   * carries the shelf through the wait — so where one has been applied it
+   * replaces the live lead-time term rather than being added on top of it.
+   * Adding both would count the wait twice: MHS20EG at 300 a week on a
+   * 14.3-week lead would have been told to order 10,980 instead of 6,690.
+   * Where no minimum has been applied the live term stands in, computed from
+   * the demand window on screen, and the rationale says which applied.
    */
   let suggestion: ItemComputed["suggestion"] = null;
   if (positionKnown && (weekly > 0 || flags.includes("below_min"))) {
     const target = config.insights.targetCoverWeeks;
-    const raw =
-      weekly * (target + leadWeeks) +
-      Math.max(minLevel ?? 0, 0) -
-      freeStock -
-      incomingQty;
+    const leadStock = minLevel != null ? Math.max(minLevel, 0) : weekly * leadWeeks;
+    const raw = weekly * target + leadStock - freeStock - incomingQty;
     if (raw > 0) {
       const multiple = n(row.reorder_qty);
       const qty =
@@ -712,6 +758,13 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
                 ? `measured over ${n(row.lead_time_orders) ?? 0} orders`
                 : "set by Allied",
           minLevel: minLevel ?? 0,
+          /*
+           * The lead-time stock the order is built around, and where it came
+           * from: Allied's applied minimum, or the live rate × lead time
+           * where none has been applied. One or the other, never both.
+           */
+          leadStock: Number(leadStock.toFixed(1)),
+          leadStockSource: minLevel != null ? "minimum" : "lead time",
           freeStock: freeStock ?? 0,
           incoming: incomingQty,
           rawNeed: Number(raw.toFixed(1)),
@@ -721,10 +774,12 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     }
   }
 
-  // Excess (demand-based) and a suggestion (driven by MYOB's minimum level)
-  // can both be true when the minimum is far above what demand justifies.
-  // Both numbers are right; the contradiction itself is the insight, so it is
-  // flagged rather than resolved by suppressing one of them.
+  // Excess (demand-based) and a suggestion (driven by the minimum stock level)
+  // can both be true when the minimum is far above what current demand
+  // justifies — typically one set by hand, or from a window when the item was
+  // selling faster than it is now. Both numbers are right; the contradiction
+  // itself is the insight, so it is flagged rather than resolved by
+  // suppressing one of them.
   if (excess && suggestion) flags.push("min_above_demand");
 
   return {
@@ -763,6 +818,18 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     myobStockValue: n(row.current_value),
     baseSellingPrice: n(row.base_selling_price),
     minLevel,
+    minStock:
+      minLevel == null
+        ? null
+        : {
+            level: minLevel,
+            basis: row.min_basis === "manual" ? "manual" : "window",
+            windowMonths: n(row.min_window_months),
+            monthlyBurn: n(row.min_monthly_burn),
+            leadTimeDays: n(row.min_lead_time_days),
+            setAt: row.min_set_at ? new Date(row.min_set_at as string).toISOString() : null,
+          },
+    myobMinLevel,
     reorderQty: n(row.reorder_qty),
     supplierUid,
     supplierName:
@@ -818,6 +885,9 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     coverWeeks: coverWeeks == null ? null : Number(coverWeeks.toFixed(1)),
     leadTimeDays: leadDays,
     leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : null,
+    leadTimeSource:
+      leadDays == null ? null : n(row.measured_lead_days) === leadDays ? "measured" : "allied",
+    leadTimeOrders: n(row.lead_time_orders) ?? 0,
     coverBelowLeadTime: coverBelowLead,
     excess,
     flags,
@@ -940,6 +1010,7 @@ const SORT_VALUES: Record<string, (i: ItemComputed) => number | string | null> =
   cover: (i) => i.coverWeeks,
   weekly: (i) => i.demand.weekly,
   value: (i) => i.currentValue,
+  min_level: (i) => i.minLevel,
   excess: (i) => i.excess?.value ?? null,
   potential: (i) => (i.potential.qtyWindow > 0 ? i.potential.qtyWindow : null),
   used_in: (i) => Math.max(i.parentCountDeep, i.parentCount),
@@ -1136,6 +1207,10 @@ export async function overview(opts?: Partial<DemandWindow>) {
 
   const active = items.filter((i) => i.isActive !== false);
   const belowMin = items.filter((i) => i.flags.includes("below_min"));
+  // How many items have a minimum in force at all. Zero means the below-min
+  // count above is zero for want of a decision, not for want of stock, and
+  // the Overview says so.
+  const minStockSet = items.filter((i) => i.minLevel != null).length;
   const lowCover = items.filter((i) => i.coverWeeks != null && i.coverWeeks < 2);
   const negative = items.filter((i) => i.flags.includes("negative_stock"));
   const suggested = items.filter((i) => i.suggestion != null);
@@ -1259,6 +1334,7 @@ export async function overview(opts?: Partial<DemandWindow>) {
       activeSkus: active.length,
       stockValue,
       belowMin: belowMin.length,
+      minStockSet,
       coverUnder2w: lowCover.length,
       negativeStock: negative.length,
       suggestedOrders: suggested.length,
@@ -2845,6 +2921,12 @@ export async function applySupplierRegions(): Promise<{
   };
 }
 
+/** How a minimum was set, in the words the review page uses. */
+export function minStockBasisLabel(m: ItemComputed["minStock"]): string {
+  if (!m) return "";
+  return m.basis === "manual" ? "Set by hand" : `${m.windowMonths}-month consumption x lead time`;
+}
+
 /**
  * The inventory list as a spreadsheet, honouring whatever filters are applied.
  *
@@ -2865,7 +2947,7 @@ export async function itemsCsv(params: ListParams): Promise<string> {
     "Item number", "Item name", "Product type", "Product finish", "Tags",
     "Supplier", "Supplier source", "Region",
     "On hand", "Committed", "Free stock", "On order", "Available",
-    "Average cost", "Stock value", "Min level",
+    "Average cost", "Stock value", "Min stock", "Min stock basis", "MYOB min level",
     "Weekly demand", "Demand window (months)", "Demand basis", "Cover (weeks)",
     "Suggested order qty", "Risk score", "Flags",
     "Reference point", "Reference date", "MYOB on hand", "Difference vs MYOB",
@@ -2879,6 +2961,7 @@ export async function itemsCsv(params: ListParams): Promise<string> {
       esc(i.qtyOnHand), esc(i.qtyCommitted), esc(i.qtyFreeStock),
       esc(i.qtyOnOrder), esc(i.qtyAvailable),
       esc(i.averageCost), esc(i.currentValue), esc(i.minLevel),
+      esc(minStockBasisLabel(i.minStock)), esc(i.myobMinLevel),
       esc(i.demand.weekly), esc(i.demand.windowMonths), esc(i.demand.basis),
       esc(i.coverWeeks), esc(i.suggestion?.qty ?? 0), esc(i.risk.score),
       esc(i.flags.join(" ")),

@@ -43,6 +43,17 @@ import {
   suppliersCsv,
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
+import {
+  applyWindowMinimum,
+  applyWindowToView,
+  clearMinimum,
+  isMinStockWindow,
+  minStockCsv,
+  minStockReview,
+  recalculateWindowMinimums,
+  setManualMinimum,
+  type MinStockFilters,
+} from "../insights/minStock.js";
 import { kitAvailability, kitDetail } from "../insights/kitPlan.js";
 import { clearKitForm, invalidateKitGraph, isKitForm, setKitForm } from "../insights/kits.js";
 import {
@@ -795,6 +806,118 @@ insightsRouter.post("/cart/undo", async (req, res) => {
       return;
     }
     await undoCartDecision(itemUid);
+    res.json({ ok: true });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+// ---- Minimum stock review --------------------------------------------------
+//
+// Allied's own minimum per item, replacing MYOB's. The GET lists every item
+// that moved in the chosen window with the 6, 12 and 18-month figures; the
+// writes apply one of those figures, a hand-typed number, or clear it. All of
+// it is platform data — MYOB's minimum is never written.
+
+/** The filters the page uses, read the same way for listing, bulk apply and export. */
+function minStockFilters(src: Record<string, unknown>): MinStockFilters {
+  const str = (k: string) => (typeof src[k] === "string" ? (src[k] as string) : undefined);
+  return {
+    windowMonths: src.windowMonths != null ? Number(src.windowMonths) : undefined,
+    q: str("q"),
+    productType: str("productType"),
+    productFinish: str("productFinish"),
+    region: str("region"),
+    tag: str("tag"),
+    status: str("status"),
+    sort: str("sort"),
+    dir: str("dir"),
+    page: Number(src.page) || 1,
+    pageSize: Number(src.pageSize) || 100,
+  };
+}
+
+insightsRouter.get("/min-stock", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await minStockReview(minStockFilters(req.query as Record<string, unknown>)));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Apply the chosen window to every item the filters select. Manual figures are left alone. */
+insightsRouter.post("/min-stock/apply", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const f = minStockFilters(req.body ?? {});
+    if (!isMinStockWindow(f.windowMonths)) {
+      res.status(400).json({ error: "windowMonths must be 6, 12 or 18." });
+      return;
+    }
+    res.json(await applyWindowToView(f, "dashboard"));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Refresh every window-based minimum with today's figures, each on its own window. */
+insightsRouter.post("/min-stock/recalculate", async (_req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json(await recalculateWindowMinimums("dashboard"));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.get("/min-stock.csv", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const out = await minStockCsv(minStockFilters(req.query as Record<string, unknown>));
+    res
+      .type("text/csv; charset=utf-8")
+      .setHeader("Content-Disposition", `attachment; filename="${out.filename}"`)
+      .send(out.csv);
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** One item: `windowMonths` applies that window's figure, `minLevel` sets it by hand. */
+insightsRouter.post("/min-stock/:uid", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { windowMonths, minLevel } = req.body ?? {};
+    if (windowMonths !== undefined) {
+      if (!isMinStockWindow(windowMonths)) {
+        res.status(400).json({ error: "windowMonths must be 6, 12 or 18." });
+        return;
+      }
+      const out = await applyWindowMinimum({
+        itemUid: req.params.uid,
+        windowMonths: Number(windowMonths) as 6 | 12 | 18,
+        setBy: "dashboard",
+      });
+      res.json({ ok: true, ...out });
+      return;
+    }
+    if (typeof minLevel !== "number" || !Number.isFinite(minLevel) || minLevel < 0) {
+      res.status(400).json({ error: "Send windowMonths (6, 12 or 18) or minLevel (a number of zero or more)." });
+      return;
+    }
+    await setManualMinimum({ itemUid: req.params.uid, minLevel, setBy: "dashboard" });
+    res.json({ ok: true, minLevel });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
+  }
+});
+
+insightsRouter.delete("/min-stock/:uid", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    await clearMinimum(req.params.uid);
     res.json({ ok: true });
   } catch (err) {
     send500(res, err);

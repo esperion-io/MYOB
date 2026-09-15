@@ -160,6 +160,17 @@ MYOB Business API  --(read-only GETs)-->  sync engine  -->  Postgres mirror
    address country and are overridable on the Suppliers page; region, lead
    time and notes live in `platform_supplier_meta`, never in MYOB.
 
+7. **Minimum stock levels are Allied's, not MYOB's.** MYOB's `min_level` is
+   mirrored for reference but drives nothing. The minimum in force per item
+   lives in `platform_min_stock`, set on Purchasing › Minimum stock review:
+   average monthly consumption over a chosen window (6, 12 or 18 months) ×
+   the supplier's lead time in months, or a figure typed in by hand. It is
+   frozen when applied so it can always be explained; the review page shows
+   drift and offers a recalculate. The applied minimum feeds the below-min
+   flag, the risk score and the cart, and in the order quantity it *replaces*
+   the live lead-time term rather than adding to it (`src/insights/minStock.ts`,
+   `computeItem` in `queries.ts`).
+
 ### Operating it
 
 1. Set `DATABASE_URL` (required), `DASHBOARD_ACCESS_KEY` (recommended) and

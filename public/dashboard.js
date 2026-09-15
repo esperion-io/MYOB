@@ -63,7 +63,12 @@ const TERMS = {
   risk: {
     label: "Risk score",
     short: "0–100 priority score. Click any item to see exactly which factors produced it.",
-    long: "Adds points for low cover, being below the MYOB minimum, how many finished products depend on the item, data-quality problems and weekly consumption value. Every contributing factor and its points are listed on the item page.",
+    long: "Adds points for low cover, being below its minimum stock level, how many finished products depend on the item, data-quality problems and weekly consumption value. Every contributing factor and its points are listed on the item page.",
+  },
+  min_stock: {
+    label: "Minimum stock",
+    short: "The least to keep on the shelf: average monthly consumption × lead time in months. Set under Purchasing › Minimum stock review.",
+    long: "Allied's own minimum per item, and the only one the dashboard acts on — MYOB's minimum level is shown for reference but drives nothing. The rule is average monthly consumption over a chosen window (6, 12 or 18 months) × the supplier's lead time in months: the stock needed to see out the wait for a replacement. Consumption counts direct sales and units used building other products, the same measure as weekly demand. Each item is set from one of the three windows or typed in by hand on the Minimum stock review page, and the figure stays put until it is applied again, so it can always be explained. Free stock below it raises the Below min tag, adds to the risk score, and puts the item on the order list; the order quantity then aims for the minimum plus the target cover.",
   },
   used_in: {
     label: "Used in",
@@ -109,7 +114,7 @@ const TERMS = {
  * in a tooltip.
  */
 const FLAG_HELP = {
-  below_min: "There is less free stock than the minimum level MYOB holds for this item.",
+  below_min: "There is less free stock than the minimum stock level set for this item under Purchasing › Minimum stock review.",
   negative_stock: "MYOB shows less than zero on the shelf, which cannot be true. Usually movements were entered out of order, or something was counted twice — worth checking before trusting any other figure for this item.",
   stock_no_cost: "There is stock on the shelf but MYOB has no cost for it, so this item's stock value shows as nothing. Whatever it is really worth is missing from every total.",
   inactive_with_stock: "Marked inactive in MYOB, but there is still stock on the shelf. Either it should be active again, or the stock needs using up or writing off.",
@@ -117,7 +122,7 @@ const FLAG_HELP = {
   slow_mover: "Still selling, just not lately. Nothing has gone out recently, but it did move within the period you are looking at, so its rate is spread over that longer stretch rather than reading as nothing at all.",
   dead_stock: "There is stock on the shelf and none of it has moved in 12 months — not sold, not used building anything. Money sitting still. If you look back further than a year, anything that did move in that longer period counts as a slow mover instead.",
   understated_demand: "Packs holding this item sold without being rebuilt, so the demand and cover figures shown for it are lower than the real usage. Open the item to see which packs and how many units.",
-  min_above_demand: "MYOB's minimum level for this item is far higher than its demand justifies, so it is being suggested for reorder while it already has too much on the shelf. The minimum is what needs looking at, not the stock.",
+  min_above_demand: "The minimum stock level set for this item is far higher than its current demand justifies, so it is being suggested for reorder while it already has too much on the shelf. Usually a figure set by hand, or from a window when it was selling faster. The minimum is what needs looking at, not the stock.",
   kit_double_order: "This item and something it is made of are both on the order list. That can be right when Allied genuinely buy both, but it is also how one requirement gets bought twice. Needs a decision.",
 };
 
@@ -130,7 +135,7 @@ const FLAG_LABELS = {
   slow_mover: ["Slow mover", "idle"],
   dead_stock: ["Dead stock", "fail"],
   understated_demand: ["Demand understated", "brand"],
-  min_above_demand: ["Min level too high", "warn"],
+  min_above_demand: ["Min stock too high", "warn"],
   kit_double_order: ["Kit + parts both ordered", "warn"],
 };
 
@@ -165,7 +170,7 @@ const INVENTORY_FILTERS = [
   ["all", "All items"],
   ["attention", "Needs attention"],
   ["suggested", "Suggested orders"],
-  ["below_min", "Below min level"],
+  ["below_min", "Below min stock"],
   ["low_cover", "Cover under 4 weeks"],
   ["excess", "Excess stock"],
   ["slow_mover", "Slow movers (still selling, just slowly)"],
@@ -175,7 +180,7 @@ const INVENTORY_FILTERS = [
   ["parents", "Assembled products"],
   ["understated", "Demand understated by packs"],
   ["kit_double_order", "Kit + parts both ordered"],
-  ["min_above_demand", "Min level too high"],
+  ["min_above_demand", "Min stock too high"],
   ["negative", "Negative stock"],
   ["stock_no_cost", "Stock with no cost"],
   ["no_supplier", "No supplier set"],
@@ -189,6 +194,7 @@ const INVENTORY_SORTS = [
   ["committed", "Committed"],
   ["on_hand", "On hand"],
   ["available", "Free stock"],
+  ["min_level", "Minimum stock"],
   ["incoming", "Incoming"],
   ["value", "Stock value"],
   ["excess", "Excess value"],
@@ -217,6 +223,30 @@ function withheldReason(reason) {
     never_bought: "Allied have never bought this complete, so there is no purchase price to put on it — the quantity is reported as something to build instead",
   }[reason] ?? reason;
 }
+
+/*
+ * Minimum stock review state. Declared up here with the other page state for
+ * the same reason as facetCache above: the router runs at boot, before the
+ * review code at the foot of the file has been reached.
+ */
+const MIN_WINDOWS = [6, 12, 18];
+
+const minState = {
+  window: Number(localStorage.getItem("afMinWindow")) || 12,
+  q: "", productType: "", productFinish: "", region: "", tag: "",
+  status: "all", sort: "burn", dir: "", page: 1,
+};
+if (!MIN_WINDOWS.includes(minState.window)) minState.window = 12;
+
+const MIN_STATUS_OPTIONS = [
+  ["all", "Everything that moved"],
+  ["unset", "No minimum set yet"],
+  ["window", "Set from a window"],
+  ["manual", "Set by hand"],
+  ["drift", "Today's figure differs from the applied one"],
+  ["nolead", "No lead time — nothing can be suggested"],
+  ["stale", "Has a minimum, but nothing moved in this window"],
+];
 
 const prodState = { q: "", page: 1 };
 const supState = { q: "" };
@@ -607,12 +637,15 @@ function route() {
     item: () => renderItem(arg),
     products: renderProducts,
     suppliers: renderSuppliers,
-    purchasing: renderPurchasing,
+    purchasing: () => renderPurchasing(arg),
     counts: renderCounts,
     data: renderData,
   };
   const bar = document.getElementById("controls");
-  if (bar) bar.hidden = !VIEWS_USING_WINDOW.has(view);
+  // The minimum stock review has its own 6/12/18-month choice and always
+  // reads to today, so the shared controls would only contradict it.
+  const ownsWindow = view === "purchasing" && arg === "minimums";
+  if (bar) bar.hidden = !VIEWS_USING_WINDOW.has(view) || ownsWindow;
   (views[view] || renderOverview)().catch((err) => {
     main.innerHTML = `<div class="notice fail">${esc(err.message)}</div>
       <p class="muted">If no data has been synced yet, open <a href="#/data">Data &amp; Sync</a> and run a full sync.</p>`;
@@ -818,30 +851,45 @@ function exportPositionUrl() {
 /**
  * Shown only when the numbers need a caveat.
  *
- * On hand reconstructs cleanly from the ledger at any date. Committed does not:
- * MYOB records an order's status now, never when it changed, so for a date with
- * no stored snapshot we can only count orders still open today — which
- * understates what was actually committed back then. The warning appears on
- * exactly those dates and disappears once a snapshot covers them, so it will
- * stop showing on month-ends from the first full month onward.
+ * On hand reconstructs cleanly from the ledger at any date. Committed and on
+ * order do not: MYOB records an order's status now, never when it changed, and
+ * overwrites received quantities in place, so for a date with no stored
+ * snapshot we can only count what is still open today — which understates both.
+ * The warning appears on exactly those dates and disappears once a snapshot
+ * covers them, so it will stop showing on month-ends from the first full month
+ * onward.
+ *
+ * The provenance is mixed, and saying so is the point. This notice used to
+ * claim the whole position came "from the snapshot stored that day" whenever
+ * one existed — while the figures were in fact all recomputed, and the
+ * understatement warning was suppressed on precisely the dates where the number
+ * was wrong. Now the snapshot really is read, and the notice names which parts
+ * came from where.
  */
 function historicalNotice(d) {
   if (!isHistorical()) return "";
-  const committed = d && d.hasSnapshot === false
-    ? ` <strong>Committed is understated for this date</strong> — it counts only orders still open today,
-       because MYOB does not record when an order was fulfilled. Daily snapshots
-       ${d.snapshotsFrom ? `began on ${dateFmt(d.snapshotsFrom)}` : "have not started yet"}; from then on
-       committed is exact.`
-    : "";
   // Provenance is only claimed where the caller knows it. A view that does not
   // report the snapshot flag says nothing rather than guessing.
-  const source =
-    d && typeof d.hasSnapshot === "boolean"
-      ? `, ${d.hasSnapshot ? "from the snapshot stored that day" : "reconstructed from the anchored ledger"}`
+  const known = d && typeof d.hasSnapshot === "boolean";
+  const stored = known && d.hasSnapshot;
+
+  const provenance = !known
+    ? ""
+    : stored
+      ? ` On hand is reconstructed from the anchored ledger; committed, on order and average cost come from
+         the snapshot stored that day.`
+      : ` On hand is reconstructed from the anchored ledger.`;
+
+  const gaps =
+    known && !stored
+      ? ` <strong>Committed and on order are understated for this date</strong> — they count only orders still
+         open today, because MYOB records an order's status now and never when it changed. Daily snapshots
+         ${d.snapshotsFrom ? `began on ${dateFmt(d.snapshotsFrom)}` : "have not started yet"}; from then on
+         both are exact. Average cost is today's, so the valuation is an approximation.`
       : "";
-  return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>${source}.
-    Sales and demand cover the ${windowLabel()} up to that date.
-    Average cost is today's — MYOB exposes no cost history, so historical valuations are an approximation.${committed}</div>`;
+
+  return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>.
+    Sales and demand cover the ${windowLabel()} up to that date.${provenance}${gaps}</div>`;
 }
 
 /* ---------- overview ---------- */
@@ -884,7 +932,11 @@ async function renderOverview() {
     <div class="kpis">
       <div class="kpi"><span class="k-label">SKUs</span><span class="k-value">${qty(k.totalSkus)}</span></div>
       <div class="kpi"><span class="k-label">Stock value</span><span class="k-value">${money(k.stockValue)}</span></div>
-      <div class="kpi link ${k.belowMin ? "alert" : ""}" data-filter="below_min"><span class="k-label">Below min level</span><span class="k-value">${qty(k.belowMin)}</span></div>
+      <div class="kpi link ${k.belowMin ? "alert" : ""}" data-filter="below_min"
+           title="${k.minStockSet ? `Free stock under the minimum, out of ${qty(k.minStockSet)} items with a minimum set` : "No minimum stock levels have been set yet — see Purchasing › Minimum stock review"}">
+        <span class="k-label">Below min stock</span><span class="k-value">${qty(k.belowMin)}</span>
+        ${k.minStockSet ? "" : '<span class="k-note">none set yet</span>'}
+      </div>
       <div class="kpi link ${k.coverUnder2w ? "warn" : ""}" data-filter="low_cover"><span class="k-label">Cover &lt; 2 weeks</span><span class="k-value">${qty(k.coverUnder2w)}</span></div>
       <div class="kpi link" data-filter="suggested"><span class="k-label">Suggested orders</span><span class="k-value">${qty(k.suggestedOrders)}</span></div>
       <div class="kpi link ${k.negativeStock ? "alert" : ""}" data-filter="negative"><span class="k-label">Negative stock</span><span class="k-value">${qty(k.negativeStock)}</span></div>
@@ -896,7 +948,7 @@ async function renderOverview() {
     <div class="two-col">
       <section class="panel">
         <h2>Needs attention</h2>
-        <p class="hint">Ranked by risk: cover vs demand, MYOB minimums, dependency breadth, data quality. Click for evidence.</p>
+        <p class="hint">Ranked by risk: cover vs demand, minimum stock levels, dependency breadth, data quality. Click for evidence.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Risk</th><th>Item</th><th class="num">Free stock</th><th>Cover</th><th>Why</th></tr></thead>
           <tbody>
@@ -1167,6 +1219,7 @@ async function loadInventoryTable() {
         ${sortTh("on_hand", null, "On hand", "num")}
         ${sortTh("committed", "committed", "Committed", "num")}
         ${sortTh("available", "free_stock", "Free stock", "num")}
+        ${sortTh("min_level", "min_stock", "Min stock", "num")}
         ${sortTh("incoming", "incoming", "Incoming", "num")}
         ${sortTh("weekly", "weekly_demand", "Weekly demand", "num")}
         ${sortTh("cover", "cover", "Cover")}
@@ -1186,6 +1239,7 @@ async function loadInventoryTable() {
                     <td class="num">${qty(i.qtyOnHand)}</td>
                     <td class="num">${qty(i.qtyCommitted)}</td>
                     <td class="num"><strong>${qty(i.qtyFreeStock)}</strong></td>
+                    <td class="num">${minStockCell(i)}</td>
                     <td class="num">${qty(i.incomingQty)}</td>
                     <td class="num">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "—"}</td>
                     <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
@@ -1195,7 +1249,7 @@ async function loadInventoryTable() {
                   </tr>`,
                 )
                 .join("")
-            : `<tr><td colspan="12" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
+            : `<tr><td colspan="13" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
         }
       </tbody>
     </table></div>
@@ -1239,6 +1293,35 @@ async function loadInventoryTable() {
     invState.page += 1;
     loadInventoryTable();
   });
+}
+
+/*
+ * The minimum stock level and how it was reached, in words. One helper, so the
+ * inventory column, the expanded row, the item page and the cart all describe
+ * the same figure the same way.
+ */
+function minStockBasis(m) {
+  if (!m) return "";
+  return m.basis === "manual"
+    ? `Set by hand${m.setAt ? ` on ${dateFmt(m.setAt)}` : ""}`
+    : `${m.windowMonths}-month consumption × lead time${m.setAt ? `, set ${dateFmt(m.setAt)}` : ""}`;
+}
+
+/** Read-only on the inventory list — it is changed under Purchasing. */
+function minStockCell(i) {
+  if (i.minLevel == null)
+    return '<span class="muted" title="No minimum stock level set — see Purchasing › Minimum stock review">—</span>';
+  const below = i.flags.includes("below_min");
+  return `<span class="${below ? "min-below" : ""}" title="${esc(minStockBasis(i.minStock))}${below ? " · free stock is below it" : ""}">${qty(i.minLevel)}</span>`;
+}
+
+/** The lead-time stock line of a purchase rationale: the applied minimum, or the live term. */
+function leadStockLine(r) {
+  if (r.leadStockSource === "minimum")
+    return `+ minimum stock ${qty(r.minLevel)}`;
+  return r.leadTimeWeeks
+    ? `+ ${qty(r.leadStock)} to last the ${r.leadTimeWeeks}w lead time (no minimum set)`
+    : "+ no lead-time stock (lead time not measured, no minimum set)";
 }
 
 function toggleExpandRow(tr) {
@@ -1446,7 +1529,13 @@ function expandPanelHtml(i) {
     ${kvRow("Free stock (on hand − committed)", `<strong>${qty(i.qtyFreeStock)}</strong>`)}
     ${kvRow("Incoming (open POs)", qty(i.incomingQty))}
     ${kvRow("MYOB available (incl. on order)", qty(i.qtyAvailable), "muted-row")}
-    ${kvRow("Min level", qty(i.minLevel))}
+    ${kvRow(
+      "Minimum stock",
+      i.minLevel == null
+        ? '<span class="muted">not set</span>'
+        : `${qty(i.minLevel)} <span class="muted">(${esc(minStockBasis(i.minStock))})</span>`,
+    )}
+    ${i.myobMinLevel ? kvRow("MYOB min level (reference only)", qty(i.myobMinLevel), "muted-row") : ""}
     ${kvRow("Avg cost", money(i.averageCost))}
     ${kvRow("Stock value", money(stockValue))}
     ${
@@ -1488,7 +1577,7 @@ function expandPanelHtml(i) {
         ? `<div class="explain">
             <strong>Suggest ordering ~${qty(s.qty)} units.</strong>
             <ul>
-              <li>${s.rationale.weeklyDemand}/wk × ${s.rationale.targetCoverWeeks}w target + min ${qty(s.rationale.minLevel)}</li>
+              <li>${s.rationale.weeklyDemand}/wk × ${s.rationale.targetCoverWeeks}w target ${leadStockLine(s.rationale)}</li>
               <li>less free stock ${qty(s.rationale.freeStock)} and incoming ${qty(s.rationale.incoming)}</li>
               ${s.rationale.reorderMultiple ? `<li>rounded to reorder multiple of ${qty(s.rationale.reorderMultiple)}</li>` : ""}
             </ul>
@@ -1686,7 +1775,8 @@ async function renderItem(uid) {
       onto our own ledger, and the four the build-failing boundary guard exists
       to keep away from MYOB's columns. Free stock was badged as ours while the
       on-hand figure it is derived from was badged as theirs, on the same strip.
-      Only the minimum level and the average cost are genuinely MYOB's.
+      Only the average cost is genuinely MYOB's; the minimum stock level is Allied's own, set under
+      Purchasing, and MYOB's minimum is shown beside it for reference only.
 
       "Open PO incoming" is gone with them: it was the same number as "On order"
       computed a second way, which is exactly how the two came to disagree on
@@ -1700,7 +1790,16 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
       <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${i.coverWeeks == null ? "—" : `${i.coverWeeks}w`}</span></div>
-      <div class="fact src-myob"><span class="f-label">Min level</span><span class="f-value">${qty(i.minLevel)}</span></div>
+      <div class="fact src-platform" title="${esc(i.minLevel == null ? "No minimum stock level set" : minStockBasis(i.minStock))}">
+        <span class="f-label">Min stock</span>
+        <span class="f-value">${i.minLevel == null ? '<span class="muted">—</span>' : qty(i.minLevel)}</span>
+        <span class="f-note">${
+          i.minLevel == null
+            ? '<a href="#/purchasing/minimums">set under Purchasing &rarr;</a>'
+            : esc(i.minStock?.basis === "manual" ? "set by hand" : `${i.minStock?.windowMonths}-month × lead time`)
+        }</span>
+      </div>
+      ${i.myobMinLevel ? `<div class="fact src-myob" title="MYOB's minimum level is shown for reference and no longer drives any alert or order"><span class="f-label">MYOB min level</span><span class="f-value">${qty(i.myobMinLevel)}</span><span class="f-note">reference only</span></div>` : ""}
       <div class="fact src-myob"><span class="f-label">Avg cost</span><span class="f-value">${money(i.averageCost)}</span></div>
       <div class="fact src-platform" title="${i.parentCountDeep > i.parentCount ? `${i.parentCount} directly, ${i.parentCountDeep - i.parentCount} more via sub-assemblies` : "Direct parents"}"><span class="f-label">Used in products</span><span class="f-value">${i.parentCountDeep || i.parentCount}${i.parentCountDeep > i.parentCount ? `<span class="muted" style="font-size:0.7rem"> (${i.parentCount} direct)</span>` : ""}</span></div>
       ${
@@ -1791,7 +1890,7 @@ async function renderItem(uid) {
                   <strong>Order ~${qty(s.qty)} units.</strong>
                   <ul>
                     <li>Weekly demand ${s.rationale.weeklyDemand} (${s.rationale.demandBasis} basis)</li>
-                    <li>Target cover ${s.rationale.targetCoverWeeks} weeks + min level ${qty(s.rationale.minLevel)}</li>
+                    <li>Target cover ${s.rationale.targetCoverWeeks} weeks ${leadStockLine(s.rationale)}</li>
                     <li>Less free stock ${qty(s.rationale.freeStock)} and incoming ${qty(s.rationale.incoming)}</li>
                     ${s.rationale.reorderMultiple ? `<li>Rounded to MYOB reorder multiple of ${qty(s.rationale.reorderMultiple)}</li>` : ""}
                   </ul>
@@ -1799,8 +1898,10 @@ async function renderItem(uid) {
                     i.excess
                       ? `<p style="margin:0.5rem 0 0"><strong>Note:</strong> this item also holds
                          ${money(i.excess.value)} of stock beyond target cover. The order is suggested only because
-                         MYOB's minimum level (${qty(i.minLevel)}) sits well above what demand justifies
-                         (${i.demand.weekly.toFixed(1)}/week, ${i.coverWeeks}w cover) — worth reviewing the minimum
+                         the minimum stock level (${qty(i.minLevel)}, ${esc(minStockBasis(i.minStock)).toLowerCase()})
+                         sits well above what current demand justifies
+                         (${i.demand.weekly.toFixed(1)}/week, ${i.coverWeeks}w cover) — worth
+                         <a href="#/purchasing/minimums?q=${encodeURIComponent(i.number ?? "")}">reviewing the minimum</a>
                          itself before ordering.</p>`
                       : ""
                   }
@@ -3224,19 +3325,29 @@ async function renderData() {
         which never appear as build transactions. Recipes are also derived from MYOB build transactions with a
         single finished item, with confidence growing as more builds corroborate them; anything MYOB does not
         record can still be entered by hand.</dd>
+        <dt>Minimum stock levels</dt>
+        <dd>Allied's own, set under Purchasing › Minimum stock review: average monthly consumption over a chosen
+        window (6, 12 or 18 months) × the supplier's lead time in months — the stock needed to see out the wait
+        for a replacement. Each item can be set from a different window, or typed in by hand. The figure stays as
+        applied until it is applied again, so it can always be explained; the review page shows where today's
+        figure has moved away from it. MYOB's minimum level is mirrored for reference and no longer drives any
+        alert or order.</dd>
         <dt>Purchasing suggestions</dt>
-        <dd>Weekly demand × target cover + minimum level − free stock − incoming, rounded to the MYOB reorder multiple.
+        <dd>Weekly demand × target cover + minimum stock − free stock − incoming, rounded to the MYOB reorder
+        multiple. Where no minimum has been set, weekly demand × the supplier's lead time stands in for it — the
+        minimum is that same lead-time stock decided by Allied, so the two are never added together.
         Advisory only.</dd>
         <dt>Excess stock</dt>
         <dd>Free stock beyond the excess threshold (default 26 weeks of cover), valued at average cost and only
         counted when the item has real demand and the excess is worth at least $250 — so a slow mover with a
         handful of cheap washers doesn't drown out genuine overstock. It is the counterpart to shortage risk:
         stock Allied could stop reordering.</dd>
-        <dt>"Min level above demand"</dt>
+        <dt>"Min stock too high"</dt>
         <dd>An item can be flagged as excess (demand-based) and still suggest an order, because the suggestion
-        respects MYOB's minimum level. When both happen, the minimum is far above what demand justifies. Both
-        numbers are correct and neither is suppressed — the disagreement is shown so Allied can review the
-        minimum level itself, which is usually the real cause of the overstock.</dd>
+        respects the minimum stock level. When both happen, the minimum is far above what current demand
+        justifies — usually one set by hand, or from a window when the item was selling faster. Both numbers
+        are correct and neither is suppressed — the disagreement is shown so Allied can review the minimum
+        itself, which is usually the real cause of the overstock.</dd>
         <dt>Stock adjustments</dt>
         <dd>MYOB inventory adjustments change stock without a sale, purchase or build (write-offs, stocktake
         corrections, reversals). They are never treated as demand; the Overview lists the largest of the last
@@ -3847,10 +3958,26 @@ function renderItemTags(uid, tags) {
 let cartData = null;
 const cartOpen = new Set();
 
-async function renderPurchasing() {
+/*
+ * Purchasing has two sub-tabs: the order list (the cart) and the minimum stock
+ * review that decides what "below minimum" means for it. Both are one
+ * question — what should we be buying — asked at two horizons.
+ */
+async function renderPurchasing(tab) {
+  if (tab === "minimums") {
+    await renderMinStockReview();
+    return;
+  }
   main.innerHTML = '<p class="loading">Building the order list…</p>';
   cartData = await fetchJson(withWindow("/api/insights/cart"));
   drawCart();
+}
+
+function purchasingTabs(active) {
+  return `<nav class="subtabs" aria-label="Purchasing sections">
+    <a href="#/purchasing" class="${active === "cart" ? "active" : ""}">Order list</a>
+    <a href="#/purchasing/minimums" class="${active === "minimums" ? "active" : ""}">Minimum stock review</a>
+  </nav>`;
 }
 
 function cartExportUrl() {
@@ -3898,6 +4025,7 @@ function drawCart() {
         <a class="btn primary" href="${cartExportUrl()}" download>Export order sheets</a>
       </div>
     </div>
+    ${purchasingTabs("cart")}
 
     ${
       undecided
@@ -4075,7 +4203,7 @@ function cartLineRow(g, l) {
 function cartRationale(l) {
   const bits = [
     `<span title="Free stock today">${qty(l.freeStock)} free</span>`,
-    l.minLevel ? `<span title="MYOB minimum level">min ${qty(l.minLevel)}</span>` : "",
+    l.minLevel ? `<span title="Minimum stock level set under Purchasing › Minimum stock review">min ${qty(l.minLevel)}</span>` : "",
     `<span title="Demand over the last ${l.rationale.demandWindowMonths} months">${l.weeklyDemand.toFixed(1)}/wk</span>`,
     l.coverWeeks != null ? `<span title="Weeks of cover at that rate">${l.coverWeeks.toFixed(1)}w cover</span>` : "",
     l.incomingQty ? `<span title="Already on order and not yet received">+${qty(l.incomingQty)} incoming</span>` : "",
@@ -4587,3 +4715,458 @@ document.getElementById("modal-backdrop")?.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeModal();
 });
+
+/* ================= Minimum stock review =================
+ *
+ * Purchasing › Minimum stock review. One rule, stated by Allied: minimum stock
+ * = average monthly consumption over a chosen window × the supplier's lead
+ * time in months. This page shows the 6, 12 and 18-month answers side by side
+ * for every item that moved, and is the only place a minimum is set.
+ *
+ * Applying is deliberately two-speed. A figure can be clicked onto one item,
+ * or one window applied to everything the filters select — so a stainless
+ * range goes on 18 months and galvanised on 6 without touching each row.
+ * Anything typed in by hand is never overwritten by a sweep.
+ *
+ * It ignores the shared as-at / window controls above the page: consumption
+ * is always measured up to today, and the window choice lives here.
+ */
+
+function minStockParams(extra = {}) {
+  const p = new URLSearchParams({
+    windowMonths: String(minState.window),
+    q: minState.q,
+    status: minState.status,
+    sort: minState.sort,
+    page: String(minState.page),
+  });
+  if (minState.dir) p.set("dir", minState.dir);
+  if (minState.productType) p.set("productType", minState.productType);
+  if (minState.productFinish) p.set("productFinish", minState.productFinish);
+  if (minState.region) p.set("region", minState.region);
+  if (minState.tag) p.set("tag", minState.tag);
+  for (const [k, v] of Object.entries(extra)) p.set(k, v);
+  return p;
+}
+
+function minStockCsvUrl() {
+  const p = minStockParams();
+  const key = accessKey();
+  if (key) p.set("key", key);
+  return `/api/insights/min-stock.csv?${p}`;
+}
+
+async function renderMinStockReview() {
+  // An item page can send the reader here with its number already searched.
+  const query = location.hash.split("?")[1];
+  if (query) {
+    const p = new URLSearchParams(query);
+    if (p.has("q")) Object.assign(minState, { q: p.get("q") ?? "", status: "all", page: 1 });
+  }
+
+  main.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Purchasing</h1>
+        <p class="page-sub">Minimum stock = average monthly consumption × lead time in months. The applied
+        figure is what the Below min tag, the risk score and the order list read — MYOB's minimum is shown for
+        reference only. Nothing is written to MYOB.</p>
+      </div>
+      <div class="head-actions">
+        <a class="btn" id="min-export" href="${minStockCsvUrl()}" download
+           title="Every item in this view with all three figures">Export this review</a>
+      </div>
+    </div>
+    ${purchasingTabs("minimums")}
+
+    <div class="min-controls">
+      <div class="min-window" role="group" aria-label="Consumption window">
+        <span class="presets-label">Consumption over the last</span>
+        ${MIN_WINDOWS.map(
+          (m) => `<button class="chip-btn win ${m === minState.window ? "active" : ""}" data-window="${m}" type="button">${m} months</button>`,
+        ).join("")}
+        <span class="hint-inline" id="min-window-note"></span>
+      </div>
+      <div class="toolbar">
+        <input type="search" id="min-q" placeholder="Search number, name, supplier…" value="${esc(minState.q)}" />
+        <select id="min-status" aria-label="Show">
+          ${MIN_STATUS_OPTIONS.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}
+        </select>
+        <select id="min-region" aria-label="Supplier region">
+          <option value="">All regions</option>
+          <option value="NZ">Region: NZ</option>
+          <option value="Australia">Region: Australia</option>
+          <option value="China">Region: China</option>
+          <option value="Overseas — other">Region: Overseas — other</option>
+          <option value="none">Region: unlabelled</option>
+        </select>
+        <select id="min-type" aria-label="Product type"><option value="">All product types</option></select>
+        <select id="min-finish" aria-label="Product finish"><option value="">All finishes</option></select>
+        <select id="min-tag" aria-label="Tag"><option value="">All tags</option></select>
+      </div>
+    </div>
+    <p class="min-status" id="min-status-msg" hidden></p>
+    <div id="min-table"><p class="loading">Working out the figures…</p></div>`;
+
+  document.getElementById("min-status").value = minState.status;
+  document.getElementById("min-region").value = minState.region;
+
+  main.querySelectorAll("[data-window]").forEach((b) =>
+    b.addEventListener("click", () => {
+      minState.window = Number(b.dataset.window);
+      minState.page = 1;
+      localStorage.setItem("afMinWindow", String(minState.window));
+      main.querySelectorAll("[data-window]").forEach((x) =>
+        x.classList.toggle("active", Number(x.dataset.window) === minState.window),
+      );
+      loadMinStockTable();
+    }),
+  );
+  let debounce;
+  document.getElementById("min-q").addEventListener("input", (e) => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      minState.q = e.target.value;
+      minState.page = 1;
+      loadMinStockTable();
+    }, 300);
+  });
+  const wire = (id, key) =>
+    document.getElementById(id).addEventListener("change", (e) => {
+      minState[key] = e.target.value;
+      minState.page = 1;
+      loadMinStockTable();
+    });
+  wire("min-status", "status");
+  wire("min-region", "region");
+
+  // Facet menus share the inventory page's values.
+  try {
+    facetCache = facetCache ?? (await fetchJson("/api/insights/facets"));
+    const fill = (id, values, allLabel, prefix, current) => {
+      const el = document.getElementById(id);
+      el.innerHTML =
+        `<option value="">${allLabel}</option>` +
+        values.map((v) => `<option value="${esc(v.value)}">${prefix}${esc(v.value)}</option>`).join("");
+      el.value = current;
+    };
+    fill("min-type", facetCache.productType, "All product types", "", minState.productType);
+    fill("min-finish", facetCache.productFinish, "All finishes", "", minState.productFinish);
+    fill("min-tag", facetCache.tags, facetCache.tags.length ? "All tags" : "No tags yet", "#", minState.tag);
+    wire("min-type", "productType");
+    wire("min-finish", "productFinish");
+    wire("min-tag", "tag");
+  } catch (err) {
+    console.error("Facet menus failed to load:", err);
+  }
+
+  await loadMinStockTable();
+}
+
+/** Plain-English description of the rows on screen, for the bulk button and the summary line. */
+function minViewLabel() {
+  const bits = [];
+  if (minState.productFinish) bits.push(minState.productFinish);
+  if (minState.productType) bits.push(minState.productType);
+  if (minState.tag) bits.push(`#${minState.tag}`);
+  if (minState.region) bits.push(minState.region === "none" ? "unlabelled region" : `from ${minState.region}`);
+  if (minState.q) bits.push(`matching “${minState.q}”`);
+  const status = MIN_STATUS_OPTIONS.find(([v]) => v === minState.status)?.[1];
+  if (minState.status !== "all" && status) bits.push(status.toLowerCase());
+  return bits.length ? bits.join(", ") : "every item that moved";
+}
+
+async function loadMinStockTable() {
+  const container = document.getElementById("min-table");
+  if (!container) return;
+  container.innerHTML = '<p class="loading">Working out the figures…</p>';
+  const data = await fetchJson(`/api/insights/min-stock?${minStockParams()}`);
+  const w = data.windowMonths;
+  const s = data.summary;
+  const exportLink = document.getElementById("min-export");
+  if (exportLink) exportLink.href = minStockCsvUrl();
+  const note = document.getElementById("min-window-note");
+  if (note)
+    note.textContent = `${qty(s.moved)} items moved in the last ${w} months · ${qty(s.unset)} with no minimum yet`;
+
+  const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
+  const filtered = minState.status !== "all" || minState.q || minState.productType ||
+    minState.productFinish || minState.region || minState.tag;
+
+  const chip = (label, n, status, tone = "idle") =>
+    `<button class="badge ${tone} min-chip ${minState.status === status ? "on" : ""}" type="button"
+       data-status="${status}" title="Show only these">${esc(label)} ${qty(n)}</button>`;
+
+  container.innerHTML = `
+    <div class="min-summary">
+      ${chip("Not set yet", s.unset, "unset", s.unset ? "warn" : "idle")}
+      ${chip("From a window", s.window, "window", "ok")}
+      ${chip("By hand", s.manual, "manual", "brand")}
+      ${chip("Figure has moved", s.drift, "drift", s.drift ? "warn" : "idle")}
+      ${chip("No lead time", s.noLead, "nolead", s.noLead ? "warn" : "idle")}
+      ${s.stale ? chip("Set, but not moving", s.stale, "stale", "fail") : ""}
+      ${minState.status !== "all" ? '<button class="linkish" id="min-status-clear" type="button">show everything</button>' : ""}
+    </div>
+
+    <div class="min-bulk">
+      <button class="btn primary" id="min-apply-all" type="button" ${data.applicable ? "" : "disabled"}
+              title="Applies the ${w}-month figure to every item in this view. Figures set by hand are left alone.">
+        Apply the ${w}-month minimum to ${filtered ? `these ${qty(data.applicable)}` : `all ${qty(data.applicable)}`} items
+      </button>
+      <span class="muted">${filtered ? esc(minViewLabel()) : "every item that moved"} · figures set by hand are never overwritten</span>
+      <button class="btn" id="min-recalc" type="button" ${s.windowBasedTotal ? "" : "disabled"}
+              title="Every minimum set from a window is worked out again with today's consumption, each on the window it was set from">
+        Recalculate ${qty(s.windowBasedTotal)} window-based minimums
+      </button>
+    </div>
+    <div class="table-wrap"><table class="min-table">
+      <thead><tr>
+        ${minSortTh("number", "Item")}
+        <th>Supplier · lead time</th>
+        ${minSortTh("burn", `Per month (${w}m)`, "num")}
+        ${MIN_WINDOWS.map((m) => minSortTh(m === w ? "suggested" : null, `${m}m`, `num win-col ${m === w ? "win-active" : ""}`, `Suggested minimum from ${m} months of consumption × lead time — click to apply`)).join("")}
+        ${minSortTh("applied", "Minimum stock", "num")}
+        <th class="num" title="MYOB's own minimum level — reference only, drives nothing">MYOB min</th>
+        ${minSortTh("free", "Free stock", "num")}
+      </tr></thead>
+      <tbody>
+        ${
+          data.rows.length
+            ? data.rows.map((r) => minStockRow(r, w)).join("")
+            : `<tr><td colspan="9" class="muted">${
+                minState.status === "stale"
+                  ? "Every item with a minimum moved in this window."
+                  : "Nothing matches this view."
+              } ${filtered ? '<button class="linkish" id="min-empty-clear">Clear filters</button>' : ""}</td></tr>`
+        }
+      </tbody>
+    </table></div>
+    <div class="pager">
+      <button class="btn small" id="min-prev" ${data.page <= 1 ? "disabled" : ""}>&larr; Prev</button>
+      <span>Page ${data.page} of ${pages} · ${qty(data.total)} items</span>
+      <button class="btn small" id="min-next" ${data.page >= pages ? "disabled" : ""}>Next &rarr;</button>
+    </div>`;
+
+  wireMinStockTable(container, data);
+}
+
+function minSortTh(sortKey, label, cls = "", title = "") {
+  if (!sortKey) return `<th class="${cls}" title="${esc(title)}">${label}</th>`;
+  const active = minState.sort === sortKey;
+  const dir = minState.dir || (sortKey === "number" ? "asc" : "desc");
+  return `<th class="sortable ${cls} ${active ? "active" : ""}" data-sort="${sortKey}"
+             title="${esc(title || "Click to sort")}">${label}${active ? (dir === "asc" ? " ▲" : " ▼") : ""}</th>`;
+}
+
+function minStockRow(r, w) {
+  const a = r.applied;
+  const lead =
+    r.leadTimeDays == null
+      ? `<span class="badge warn" title="No purchase order has been matched to a bill for this supplier, and Allied have not set a lead time">no lead time</span>
+         <a class="muted" href="#/suppliers">set it &rarr;</a>`
+      : `<span title="${r.leadTimeSource === "allied" ? "Set by Allied on the Suppliers page" : `Median of ${r.leadTimeOrders} matched orders`}">~${qty(r.leadTimeDays)}d
+         <span class="muted">(${(r.leadTimeDays / 30.4375).toFixed(1)} mo${r.leadTimeSource === "allied" ? ", set by Allied" : ""})</span></span>`;
+
+  const figure = (m) => {
+    const v = r.suggested[m];
+    if (v == null)
+      return `<td class="num win-col ${m === w ? "win-active" : ""}"><span class="muted">—</span></td>`;
+    const isApplied = a?.basis === "window" && a.windowMonths === m && a.level === v;
+    return `<td class="num win-col ${m === w ? "win-active" : ""}">
+      <button class="min-pick ${isApplied ? "is-applied" : ""}" type="button" data-window="${m}"
+              title="${isApplied ? "This is the applied figure" : `Apply ${qty(v)} to this item (${m}-month consumption × lead time)`}"
+              ${isApplied ? "disabled" : ""}>${qty(v)}</button>
+    </td>`;
+  };
+
+  const basis = !a
+    ? '<span class="muted">not set</span>'
+    : a.basis === "manual"
+      ? `<span class="badge brand" title="Typed in on ${dateFmt(a.setAt)} — bulk actions leave it alone">by hand</span>`
+      : `<span class="badge ok" title="${a.windowMonths}-month consumption × lead time, set ${dateFmt(a.setAt)}">${a.windowMonths}-month</span>`;
+  const drift =
+    r.nowForWindow != null
+      ? `<button class="badge warn min-pick" type="button" data-window="${a.windowMonths}"
+           title="The same ${a.windowMonths}-month rule gives ${qty(r.nowForWindow)} today. Click to apply it.">now ${qty(r.nowForWindow)}</button>`
+      : "";
+
+  return `
+    <tr data-uid="${esc(r.uid)}" data-number="${esc(r.number ?? "")}">
+      <td>
+        <a href="#/item/${esc(r.uid)}"><strong>${esc(r.number ?? "—")}</strong></a>
+        <br /><span class="muted">${esc((r.name ?? "").slice(0, 60))}${r.productFinish ? ` · ${esc(r.productFinish)}` : ""}</span>
+      </td>
+      <td>${esc(r.supplierName ?? "—")}<br />${lead}</td>
+      <td class="num">${r.burn[w] ? r.burn[w].toFixed(1) : "—"}<br />
+        <span class="muted" title="Units consumed in the last ${w} months">${qty(r.consumed[w])} in ${w}m</span></td>
+      ${MIN_WINDOWS.map(figure).join("")}
+      <td class="num min-applied">
+        <input class="cart-qty min-input" type="number" step="1" min="0" value="${a ? a.level : ""}"
+               placeholder="—" aria-label="Minimum stock for ${esc(r.number ?? "")}" />
+        ${a ? `<button class="tag-x min-clear" type="button" title="Clear the minimum for this item">×</button>` : ""}
+        <br />${basis} ${drift}
+      </td>
+      <td class="num muted">${r.myobMinLevel ? qty(r.myobMinLevel) : "—"}</td>
+      <td class="num ${r.belowMin ? "min-below" : ""}" title="${r.belowMin ? "Below the applied minimum" : ""}">${qty(r.freeStock)}</td>
+    </tr>`;
+}
+
+function wireMinStockTable(container, data) {
+  const w = data.windowMonths;
+  const msg = document.getElementById("min-status-msg");
+  const say = (text, tone = "ok") => {
+    if (!msg) return;
+    msg.hidden = false;
+    msg.className = `min-status ${tone}`;
+    msg.textContent = text;
+  };
+  const fail = (err) => say(err.message ?? String(err), "fail");
+
+  container.querySelectorAll(".min-chip").forEach((b) =>
+    b.addEventListener("click", () => {
+      minState.status = minState.status === b.dataset.status ? "all" : b.dataset.status;
+      minState.page = 1;
+      const sel = document.getElementById("min-status");
+      if (sel) sel.value = minState.status;
+      loadMinStockTable();
+    }),
+  );
+  const clearStatus = () => {
+    minState.status = "all";
+    minState.page = 1;
+    const sel = document.getElementById("min-status");
+    if (sel) sel.value = "all";
+    loadMinStockTable();
+  };
+  container.querySelector("#min-status-clear")?.addEventListener("click", clearStatus);
+  container.querySelector("#min-empty-clear")?.addEventListener("click", () => {
+    Object.assign(minState, { q: "", productType: "", productFinish: "", region: "", tag: "", status: "all", page: 1 });
+    renderMinStockReview();
+  });
+
+  container.querySelectorAll("th.sortable").forEach((h) =>
+    h.addEventListener("click", () => {
+      const key = h.dataset.sort;
+      if (minState.sort === key) minState.dir = (minState.dir || data.dir) === "desc" ? "asc" : "desc";
+      else {
+        minState.sort = key;
+        minState.dir = "";
+      }
+      minState.page = 1;
+      loadMinStockTable();
+    }),
+  );
+  container.querySelector("#min-prev")?.addEventListener("click", () => {
+    minState.page -= 1;
+    loadMinStockTable();
+  });
+  container.querySelector("#min-next")?.addEventListener("click", () => {
+    minState.page += 1;
+    loadMinStockTable();
+  });
+
+  // One item: click a window's figure, type a number, or clear it.
+  container.querySelectorAll("tr[data-uid]").forEach((tr) => {
+    const uid = tr.dataset.uid;
+    const number = tr.dataset.number;
+    tr.querySelectorAll(".min-pick").forEach((b) =>
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          const out = await fetchJson(`/api/insights/min-stock/${encodeURIComponent(uid)}`, {
+            method: "POST",
+            body: JSON.stringify({ windowMonths: Number(b.dataset.window) }),
+          });
+          say(`${number}: minimum set to ${qty(out.minLevel)} from ${b.dataset.window} months of consumption.`);
+          await loadMinStockTable();
+        } catch (err) {
+          b.disabled = false;
+          fail(err);
+        }
+      }),
+    );
+    const input = tr.querySelector(".min-input");
+    input?.addEventListener("change", async () => {
+      const v = input.value.trim();
+      try {
+        if (v === "") {
+          if (!tr.querySelector(".min-clear")) return;
+          await fetchJson(`/api/insights/min-stock/${encodeURIComponent(uid)}`, { method: "DELETE" });
+          say(`${number}: minimum cleared.`);
+        } else {
+          const n = Number(v);
+          if (!Number.isFinite(n) || n < 0) throw new Error("Enter a whole number of zero or more.");
+          await fetchJson(`/api/insights/min-stock/${encodeURIComponent(uid)}`, {
+            method: "POST",
+            body: JSON.stringify({ minLevel: Math.round(n) }),
+          });
+          say(`${number}: minimum set to ${qty(Math.round(n))} by hand. Bulk actions will leave it alone.`);
+        }
+        await loadMinStockTable();
+      } catch (err) {
+        fail(err);
+      }
+    });
+    tr.querySelector(".min-clear")?.addEventListener("click", async () => {
+      try {
+        await fetchJson(`/api/insights/min-stock/${encodeURIComponent(uid)}`, { method: "DELETE" });
+        say(`${number}: minimum cleared.`);
+        await loadMinStockTable();
+      } catch (err) {
+        fail(err);
+      }
+    });
+  });
+
+  // Everything in the view, in one action.
+  container.querySelector("#min-apply-all")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const n = data.applicable;
+    if (
+      !confirm(
+        `Apply the ${w}-month minimum (consumption × lead time) to ${qty(n)} item${n === 1 ? "" : "s"} — ${minViewLabel()}?\n\n` +
+          `Minimums already set from another window are replaced. Figures set by hand are left alone. MYOB is untouched.`,
+      )
+    )
+      return;
+    btn.disabled = true;
+    try {
+      const body = Object.fromEntries(minStockParams().entries());
+      const out = await fetchJson("/api/insights/min-stock/apply", { method: "POST", body: JSON.stringify(body) });
+      say(
+        `Applied the ${w}-month minimum to ${qty(out.applied)} item${out.applied === 1 ? "" : "s"}` +
+          (out.skippedManual ? ` · left ${qty(out.skippedManual)} set by hand alone` : "") +
+          (out.skippedNoFigure ? ` · ${qty(out.skippedNoFigure)} had no lead time` : "") +
+          ".",
+      );
+      await loadMinStockTable();
+    } catch (err) {
+      btn.disabled = false;
+      fail(err);
+    }
+  });
+
+  container.querySelector("#min-recalc")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (
+      !confirm(
+        `Recalculate every minimum that was set from a window, using today's consumption on the same window each was set from?\n\n` +
+          `Figures set by hand are left alone. Items that no longer move are left as they are and listed under "Set, but not moving".`,
+      )
+    )
+      return;
+    btn.disabled = true;
+    try {
+      const out = await fetchJson("/api/insights/min-stock/recalculate", { method: "POST" });
+      say(
+        `Recalculated: ${qty(out.updated)} changed, ${qty(out.unchanged)} already current` +
+          (out.noFigure ? `, ${qty(out.noFigure)} no longer moving and left as they were` : "") +
+          ".",
+      );
+      await loadMinStockTable();
+    } catch (err) {
+      btn.disabled = false;
+      fail(err);
+    }
+  });
+}

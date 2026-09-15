@@ -571,6 +571,46 @@ const DDL: string[] = [
          AND (o.date::date <= p_as_at OR p_as_at >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),
+     /*
+      * What we recorded on the day, for a day that has closed.
+      *
+      * The two CTEs above are the best reconstruction available from today's
+      * data, and for committed and on-order that is not good enough — both are
+      * unreconstructable in principle, for two separate reasons:
+      *
+      *   - An order that has since closed vanishes. 2,391 of 2,412 sale orders
+      *     are already ConvertedToInvoice, and MYOB records only that they are
+      *     closed now, never when they closed. On the purchase side received_qty
+      *     is overwritten in place as goods arrive, so a container that landed
+      *     yesterday retroactively empties every on-order figure before it.
+      *   - A future-dated order is excluded by the date bound above. MYOB's
+      *     order Date is the promised date, not the entry date, so the bound is
+      *     a poor proxy for "had this been raised yet" and for a future-dated
+      *     order it is guaranteed wrong. Order 00064178 (28,600 units, dated
+      *     1 Dec) has existed since before the history starts and is dropped
+      *     from every historical date.
+      *
+      * The daily snapshot recorded both figures while the day was open, which
+      * makes it the only correct source for a closed day — so it wins there.
+      *
+      * The bound is strict. TODAY's row is a snapshot as of the last sync, and
+      * the recompute above is live, so for today the recompute is the better
+      * answer and this CTE is deliberately empty. Dates before the history
+      * starts have no row and fall back to the reconstruction, which is what
+      * the hasSnapshot flag warns the reader about.
+      *
+      * on_hand is NOT taken from here. It reconstructs from the anchored ledger
+      * at any date, it should move if a document is entered late, and keeping
+      * the two paths independent is what lets a stored row be checked against a
+      * fresh calculation. Read the snapshot for what cannot be recomputed;
+      * recompute what can, and use the snapshot to audit it.
+      */
+     snapshot AS (
+       SELECT dp.item_uid, dp.committed, dp.on_order
+       FROM platform_daily_position dp
+       WHERE dp.as_at_date = p_as_at
+         AND p_as_at < ${BUSINESS_TODAY_SQL}
+     ),
      resolved AS (
        SELECT i.uid AS item_uid,
               CASE
@@ -581,8 +621,8 @@ const DDL: string[] = [
                   THEN op.counted_qty - COALESCE(bo.qty, 0)
                 ELSE NULL
               END::double precision AS on_hand,
-              COALESCE(oc.qty, 0)::double precision AS committed,
-              COALESCE(oo.qty, 0)::double precision AS on_order,
+              COALESCE(sn.committed, oc.qty, 0)::double precision AS committed,
+              COALESCE(sn.on_order, oo.qty, 0)::double precision AS on_order,
               COALESCE(a.count_date, op.count_date) AS anchor_date,
               CASE
                 WHEN a.item_uid IS NOT NULL THEN a.source
@@ -631,7 +671,11 @@ const DDL: string[] = [
        LEFT JOIN back_from_opening bo ON bo.item_uid = i.uid
        LEFT JOIN our_committed oc ON oc.item_uid = i.uid
        LEFT JOIN our_on_order oo ON oo.item_uid = i.uid
+       LEFT JOIN snapshot sn ON sn.item_uid = i.uid
      )
+     -- free_stock is never read from the snapshot: it is derived from whichever
+     -- on_hand and committed won above, so it can never contradict its own
+     -- inputs the way a stored copy of it could.
      SELECT item_uid, on_hand, committed,
             (on_hand - committed)::double precision AS free_stock,
             on_order, anchor_date, anchor_source, anchor_qty,
@@ -703,6 +747,43 @@ const DDL: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_cart_supplier ON platform_purchase_cart (supplier_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_cart_state ON platform_purchase_cart (state)`,
+
+  /*
+   * ---- Minimum stock levels -----------------------------------------------
+   *
+   * Allied's own minimum per item, replacing MYOB's. MYOB's figure was set by
+   * hand years ago and never maintained, and because it fed the below-minimum
+   * flag, the risk score and every purchase suggestion, a stale number kept
+   * putting the wrong items on the order list. It is still mirrored on
+   * myob_items for reference but no longer drives anything.
+   *
+   * The rule is the one Allied asked for: average monthly consumption over a
+   * chosen window (6, 12 or 18 months) × the supplier's lead time in months —
+   * the stock needed to survive the wait for a replacement. A row is a decision
+   * made on the Minimum Stock Review page:
+   *
+   *   basis = 'window'  computed from the window in window_months; the burn
+   *                     rate and lead time used are stored so the figure can
+   *                     be explained and re-derived later
+   *   basis = 'manual'  typed in by Allied; never touched by a bulk action
+   *
+   * The number is frozen when applied rather than recomputed nightly: a
+   * minimum that drifts silently is one nobody can explain. The review page
+   * shows where today's figure has moved away from the applied one, and a
+   * recalculate action brings window-based rows up to date on request.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_min_stock (
+    item_uid TEXT PRIMARY KEY,
+    min_level DOUBLE PRECISION NOT NULL,
+    basis TEXT NOT NULL,
+    window_months INTEGER,
+    monthly_burn DOUBLE PRECISION,
+    lead_time_days DOUBLE PRECISION,
+    set_by TEXT,
+    set_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (basis IN ('window', 'manual')),
+    CHECK (basis <> 'window' OR window_months IN (6, 12, 18))
+  )`,
 
   /*
    * Measured supplier lead time: purchase order raised to goods billed.
