@@ -57,8 +57,8 @@ const TERMS = {
   },
   cover: {
     label: "Cover",
-    short: "How many weeks the free stock lasts at the current demand rate.",
-    long: "Free stock ÷ weekly demand. Under 2 weeks is shown red, under 4 amber. Blank means no demand was recorded, so cover cannot be calculated.",
+    short: "How long the free stock lasts at the current demand rate — in weeks or months, chosen at the top of the page.",
+    long: "Free stock ÷ weekly demand. Shown in weeks or months as chosen at the top of the page (52 weeks to 12 months); the choice changes the label only, never the figure. Under 2 weeks (about half a month) is shown red, under 4 weeks (about a month) amber. Blank means no demand was recorded, so cover cannot be calculated.",
   },
   risk: {
     label: "Risk score",
@@ -78,7 +78,7 @@ const TERMS = {
   excess: {
     label: "Excess stock",
     short: "The value of stock you are holding beyond about six months of cover.",
-    long: "Anything on the shelf beyond 26 weeks of cover, valued at average cost. It only counts when the item genuinely sells and the excess is worth at least $250, so small overages are not flagged as problems. Where shortage risk asks what to order sooner, this asks what to stop ordering.",
+    long: "Anything on the shelf beyond 26 weeks (about six months) of cover, valued at average cost. It only counts when the item genuinely sells and the excess is worth at least $250, so small overages are not flagged as problems. Where shortage risk asks what to order sooner, this asks what to stop ordering.",
   },
   potential: {
     label: "Potential pack pull",
@@ -171,7 +171,7 @@ const INVENTORY_FILTERS = [
   ["attention", "Needs attention"],
   ["suggested", "Suggested orders"],
   ["below_min", "Below min stock"],
-  ["low_cover", "Cover under 4 weeks"],
+  ["low_cover", "Cover under 4 weeks (about a month)"],
   ["excess", "Excess stock"],
   ["slow_mover", "Slow movers (still selling, just slowly)"],
   ["dead_stock", "Dead stock (nothing in 12 months or more)"],
@@ -376,9 +376,47 @@ function sortTh(sortKey, termKey, label, cls = "") {
 function coverFmt(cover, basis) {
   if (cover == null) return '<span class="muted">no demand</span>';
   const suffix = basis === "long" ? " (longer look-back)" : "";
-  if (cover < 2) return `<span class="badge fail">${cover}w${suffix}</span>`;
-  if (cover < 4) return `<span class="badge warn">${cover}w${suffix}</span>`;
-  return `${cover}w${suffix}`;
+  const label = coverLabel(cover);
+  if (cover < 2) return `<span class="badge fail">${label}${suffix}</span>`;
+  if (cover < 4) return `<span class="badge warn">${label}${suffix}</span>`;
+  return `${label}${suffix}`;
+}
+
+/*
+ * Cover is computed in weeks — the demand rate is weekly, and every threshold
+ * (2w red, 4w amber, the 8w target, the 26w excess line) is set in weeks — but
+ * Allied think in months. The unit is a display preference only: nothing is
+ * recalculated, weeks are converted at 52 to 12 months, and it survives "Reset
+ * to default" because it is a way of reading the figures, not a change to them.
+ * Thresholds and sorting still compare the underlying weeks, so a red badge is
+ * red in either unit.
+ */
+const COVER_UNITS = {
+  weeks: { suffix: "w", word: "weeks", perWeek: 1 },
+  months: { suffix: "mo", word: "months", perWeek: 12 / 52 },
+};
+let coverUnit = localStorage.getItem("afCoverUnit") === "months" ? "months" : "weeks";
+
+/**
+ * A weeks-of-cover figure as a bare number in the chosen unit: 8 → "8" or "1.8".
+ * A day or two of stock is 0.3w but rounds to 0 months, which would read as
+ * nothing on the shelf — so anything positive that rounds away is shown as
+ * "<0.1" rather than "0".
+ */
+function coverValue(weeks) {
+  const v = Number((weeks * COVER_UNITS[coverUnit].perWeek).toFixed(1));
+  return v === 0 && weeks > 0 ? "<0.1" : String(v);
+}
+/** Compact form for tables and badges: "8w" / "1.8mo". "—" when there is no figure. */
+function coverLabel(weeks) {
+  return weeks == null ? "—" : `${coverValue(weeks)}${COVER_UNITS[coverUnit].suffix}`;
+}
+/** Spelled-out form for prose: "8 weeks" / "1.8 months". */
+function coverWords(weeks) {
+  return `${coverValue(weeks)} ${COVER_UNITS[coverUnit].word}`;
+}
+function coverUnitWord() {
+  return COVER_UNITS[coverUnit].word;
 }
 
 /** Said in words, because "window" and "long" mean nothing to a reader. */
@@ -796,6 +834,13 @@ function initWindowControls() {
     renderControlState();
     route();
   });
+  const unit = document.getElementById("ctl-cover-unit");
+  unit.value = coverUnit;
+  unit.addEventListener("change", () => {
+    coverUnit = unit.value === "months" ? "months" : "weeks";
+    localStorage.setItem("afCoverUnit", coverUnit);
+    route();
+  });
   document.getElementById("ctl-monthend").addEventListener("click", () => {
     asAt.value = lastMonthEnd();
     asAt.dispatchEvent(new Event("change"));
@@ -926,7 +971,7 @@ async function renderOverview() {
       <div>
         <h1>Overview</h1>
         <p class="page-sub">Stock position and analysis computed here from Allied's own documents ·
-        MYOB shown alongside for comparison · target cover ${data.targetCoverWeeks} weeks</p>
+        MYOB shown alongside for comparison · target cover ${coverWords(data.targetCoverWeeks)}</p>
       </div>
       <div class="head-actions">
         <a class="btn" id="export-position" href="${exportPositionUrl()}"
@@ -944,11 +989,11 @@ async function renderOverview() {
         <span class="k-label">Below min stock</span><span class="k-value">${qty(k.belowMin)}</span>
         ${k.minStockSet ? "" : '<span class="k-note">none set yet</span>'}
       </div>
-      <div class="kpi link ${k.coverUnder2w ? "warn" : ""}" data-filter="low_cover"><span class="k-label">Cover &lt; 2 weeks</span><span class="k-value">${qty(k.coverUnder2w)}</span></div>
+      <div class="kpi link ${k.coverUnder2w ? "warn" : ""}" data-filter="low_cover"><span class="k-label">Cover &lt; ${coverWords(2)}</span><span class="k-value">${qty(k.coverUnder2w)}</span></div>
       <div class="kpi link" data-filter="suggested"><span class="k-label">Suggested orders</span><span class="k-value">${qty(k.suggestedOrders)}</span></div>
       <div class="kpi link ${k.negativeStock ? "alert" : ""}" data-filter="negative"><span class="k-label">Negative stock</span><span class="k-value">${qty(k.negativeStock)}</span></div>
       <div class="kpi link" data-filter="parents"><span class="k-label">Assembled products</span><span class="k-value">${qty(k.trackedParents)}</span></div>
-      <div class="kpi link" data-filter="excess" title="Stock beyond ${data.excessCoverWeeks} weeks of cover, where it is worth something"><span class="k-label">Excess stock value</span><span class="k-value">${money(k.excessValue)}</span></div>
+      <div class="kpi link" data-filter="excess" title="Stock beyond ${coverWords(data.excessCoverWeeks)} of cover, where it is worth something"><span class="k-label">Excess stock value</span><span class="k-value">${money(k.excessValue)}</span></div>
       <div class="kpi"><span class="k-label">Relationships</span><span class="k-value">${qty(Object.values(rel).reduce((a, b) => a + b, 0))}</span></div>
     </div>
 
@@ -1557,7 +1602,7 @@ function expandPanelHtml(i) {
   const demand = `
     <h3>Demand &amp; cover</h3>
     ${kvRow("Weekly demand", `${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"} <span class="muted">(${i.demand.basis === "none" ? "no activity" : i.demand.basis + " basis"})</span>`)}
-    ${kvRow(`Cover${invTargetCover ? ` (target ${invTargetCover}w)` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
+    ${kvRow(`Cover${invTargetCover ? ` (target ${coverLabel(invTargetCover)})` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
     ${kvRow(`Direct sales · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.directWindow)} / ${qty(i.demand.directLong)}`)}
     ${kvRow(`Via builds · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.componentWindow)} / ${qty(i.demand.componentLong)}`)}
     ${packPullCallout(i)}
@@ -1796,7 +1841,7 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">On order</span><span class="f-value">${qty(i.qtyOnOrder)}</span></div>
       <div class="fact src-platform"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
-      <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${i.coverWeeks == null ? "—" : `${i.coverWeeks}w`}</span></div>
+      <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${coverLabel(i.coverWeeks)}</span></div>
       <div class="fact src-platform" title="${esc(i.minLevel == null ? "No minimum stock level set" : minStockBasis(i.minStock))}">
         <span class="f-label">Min stock</span>
         <span class="f-value">${i.minLevel == null ? '<span class="muted">—</span>' : qty(i.minLevel)}</span>
@@ -1907,7 +1952,7 @@ async function renderItem(uid) {
                          ${money(i.excess.value)} of stock beyond target cover. The order is suggested only because
                          the minimum stock level (${qty(i.minLevel)}, ${esc(minStockBasis(i.minStock)).toLowerCase()})
                          sits well above what current demand justifies
-                         (${i.demand.weekly.toFixed(1)}/week, ${i.coverWeeks}w cover) — worth
+                         (${i.demand.weekly.toFixed(1)}/week, ${coverLabel(i.coverWeeks)} cover) — worth
                          <a href="#/purchasing/minimums?q=${encodeURIComponent(i.number ?? "")}">reviewing the minimum</a>
                          itself before ordering.</p>`
                       : ""
@@ -3296,7 +3341,8 @@ async function renderData() {
         <dt>Weekly demand / cover</dt>
         <dd>Weekly demand is units sold plus units used building other products, averaged per week over the
         period set at the top of the page — 6 months by default — ending on the date set beside it.
-        Cover = free stock &divide; weekly demand: how many weeks the stock on the shelf would last.</dd>
+        Cover = free stock &divide; weekly demand: how long the stock on the shelf would last, shown in weeks
+        or months as chosen at the top of the page (52 weeks to 12 months — the label changes, the figure does not).</dd>
         <dt>How we spot a slow mover</dt>
         <dd>An item is tagged <strong>slow mover</strong> when it has not sold or been used <em>at all</em> in
         the last 6 months, but it did move earlier in the year. Rather than show it as having no demand, we
@@ -4212,7 +4258,7 @@ function cartRationale(l) {
     `<span title="Free stock today">${qty(l.freeStock)} free</span>`,
     l.minLevel ? `<span title="Minimum stock level set under Purchasing › Minimum stock review">min ${qty(l.minLevel)}</span>` : "",
     `<span title="Demand over the last ${l.rationale.demandWindowMonths} months">${l.weeklyDemand.toFixed(1)}/wk</span>`,
-    l.coverWeeks != null ? `<span title="Weeks of cover at that rate">${l.coverWeeks.toFixed(1)}w cover</span>` : "",
+    l.coverWeeks != null ? `<span title="Cover at that rate, in ${coverUnitWord()}">${coverLabel(l.coverWeeks)} cover</span>` : "",
     l.incomingQty ? `<span title="Already on order and not yet received">+${qty(l.incomingQty)} incoming</span>` : "",
     l.leadTimeDays != null
       ? `<span title="${l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
@@ -4320,7 +4366,7 @@ function openSupplierCompare(itemUid, number) {
         <span><strong>${qty(first.freeStock)}</strong> free stock</span>
         <span><strong>${qty(first.incomingQty)}</strong> incoming</span>
         <span><strong>${first.weeklyDemand.toFixed(1)}</strong>/week</span>
-        ${first.coverWeeks != null ? `<span><strong>${first.coverWeeks.toFixed(1)}</strong> weeks cover</span>` : ""}
+        ${first.coverWeeks != null ? `<span><strong>${coverValue(first.coverWeeks)}</strong> ${coverUnitWord()} cover</span>` : ""}
       </div>
     </div>
 
