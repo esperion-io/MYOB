@@ -68,7 +68,7 @@ const TERMS = {
   min_stock: {
     label: "Minimum stock",
     short: "The least to keep on the shelf: average monthly consumption × lead time in months. Set under Purchasing › Minimum stock review.",
-    long: "Allied's own minimum per item, and the only one the dashboard acts on — MYOB's minimum level is shown for reference but drives nothing. The rule is average monthly consumption over a chosen window (6, 12 or 18 months) × the supplier's lead time in months: the stock needed to see out the wait for a replacement. Consumption counts direct sales and units used building other products, the same measure as weekly demand. Each item is set from one of the three windows or typed in by hand on the Minimum stock review page, and the figure stays put until it is applied again, so it can always be explained. Free stock below it raises the Below min tag, adds to the risk score, and puts the item on the order list; the order quantity then aims for the minimum plus the target cover.",
+    long: "Allied's own minimum per item, and the only one the dashboard acts on — MYOB's minimum level is shown for reference but drives nothing. The rule is average monthly consumption over a chosen window (6, 12 or 18 months) × lead time in months: the stock needed to see out the wait for a replacement. Lead time is the figure Allied set on the item, else the one set on the supplier, else the median measured from their orders; it can be typed on the review page per item or for a whole filtered view, and a minimum set from a window is re-derived whenever it changes. Consumption counts direct sales and units used building other products, the same measure as weekly demand. Each item is set from one of the three windows or typed in by hand on the Minimum stock review page, and the figure stays put until it is applied again, so it can always be explained. Free stock below it raises the Below min tag, adds to the risk score, and puts the item on the order list; the order quantity then aims for the minimum plus the target cover.",
   },
   used_in: {
     label: "Used in",
@@ -244,7 +244,7 @@ const MIN_STATUS_OPTIONS = [
   ["window", "Set from a window"],
   ["manual", "Set by hand"],
   ["drift", "Today's figure differs from the applied one"],
-  ["nolead", "No lead time — nothing can be suggested"],
+  ["nolead", "No lead time — type one in to get a figure"],
   ["stale", "Has a minimum, but nothing moved in this window"],
 ];
 
@@ -4208,7 +4208,7 @@ function cartRationale(l) {
     l.coverWeeks != null ? `<span title="Weeks of cover at that rate">${l.coverWeeks.toFixed(1)}w cover</span>` : "",
     l.incomingQty ? `<span title="Already on order and not yet received">+${qty(l.incomingQty)} incoming</span>` : "",
     l.leadTimeDays != null
-      ? `<span title="Median measured across ${l.leadTimeOrders} matched orders">${l.leadTimeDays}d lead</span>`
+      ? `<span title="${l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
       : "",
   ].filter(Boolean);
   return `<span class="why-bits">${bits.join(" · ")}</span>`;
@@ -4919,6 +4919,22 @@ async function loadMinStockTable() {
         Recalculate ${qty(s.windowBasedTotal)} window-based minimums
       </button>
     </div>
+    <div class="min-bulk lead-bulk">
+      <label for="lead-bulk-days">Lead time</label>
+      <input class="cart-qty lead-input" id="lead-bulk-days" type="number" step="1" min="1" max="365" placeholder="days" />
+      <button class="btn" id="lead-apply-all" type="button" ${data.total ? "" : "disabled"}
+              title="Sets this lead time on every item in this view. It wins over the supplier's figure, and any minimum set from a window is worked out again from it.">
+        Set for ${filtered ? `these ${qty(data.total)}` : `all ${qty(data.total)}`} items
+      </button>
+      <span class="muted">set on each item · wins over the supplier's figure · window-based minimums are re-derived from it</span>
+      ${
+        data.leadOverridesInView
+          ? `<button class="linkish" id="lead-clear-all" type="button"
+               title="Removes the item-level lead time from every item in this view, so they use their supplier's figure again">
+               back to supplier lead times (${qty(data.leadOverridesInView)})</button>`
+          : ""
+      }
+    </div>
     <div class="table-wrap"><table class="min-table">
       <thead><tr>
         ${minSortTh("number", "Item")}
@@ -4960,12 +4976,30 @@ function minSortTh(sortKey, label, cls = "", title = "") {
 
 function minStockRow(r, w) {
   const a = r.applied;
-  const lead =
-    r.leadTimeDays == null
-      ? `<span class="badge warn" title="No purchase order has been matched to a bill for this supplier, and Allied have not set a lead time">no lead time</span>
-         <a class="muted" href="#/suppliers">set it &rarr;</a>`
-      : `<span title="${r.leadTimeSource === "allied" ? "Set by Allied on the Suppliers page" : `Median of ${r.leadTimeOrders} matched orders`}">~${qty(r.leadTimeDays)}d
-         <span class="muted">(${(r.leadTimeDays / 30.4375).toFixed(1)} mo${r.leadTimeSource === "allied" ? ", set by Allied" : ""})</span></span>`;
+  /*
+   * Lead time is editable here, in days. The input shows the figure in force
+   * and where it came from; typing writes an item-level figure that wins over
+   * the supplier's, and × takes it back to the supplier's. Any window-based
+   * minimum on the row is re-derived in the same action, because the minimum
+   * is this number × consumption.
+   */
+  const leadSource =
+    r.leadTimeSource === "item"
+      ? `<span class="badge brand" title="Set by Allied on this item${r.leadTimeSupplierDays != null ? ` (supplier: ${qty(r.leadTimeSupplierDays)}d)` : r.leadTimeMeasuredDays != null ? ` (measured: ${qty(r.leadTimeMeasuredDays)}d)` : ""}">on item</span>`
+      : r.leadTimeSource === "supplier"
+        ? '<span class="badge ok" title="Set by Allied on the supplier, on the Suppliers page">supplier</span>'
+        : r.leadTimeSource === "measured"
+          ? `<span class="badge idle" title="Median of ${r.leadTimeOrders} matched orders for this supplier">measured</span>`
+          : `<span class="badge warn" title="No purchase order has been matched to a bill for this supplier, and Allied have not set a lead time. Type one here, or set it for the whole supplier on the Suppliers page.">none</span>`;
+  const lead = `
+    <span class="lead-edit">
+      <input class="cart-qty lead-input" type="number" step="1" min="1" max="365"
+             value="${r.leadTimeDays != null ? qty(Math.round(r.leadTimeDays)).replace(/,/g, "") : ""}"
+             placeholder="days" aria-label="Lead time in days for ${esc(r.number ?? "")}" />
+      <span class="muted">d${r.leadTimeDays != null ? ` · ${(r.leadTimeDays / 30.4375).toFixed(1)} mo` : ""}</span>
+      ${r.leadTimeSource === "item" ? '<button class="tag-x lead-clear" type="button" title="Back to the supplier\'s lead time">×</button>' : ""}
+    </span>
+    <br />${leadSource}`;
 
   const figure = (m) => {
     const v = r.suggested[m];
@@ -5116,7 +5150,87 @@ function wireMinStockTable(container, data) {
         fail(err);
       }
     });
+
+    // Lead time on this item. A blank on an item-level figure clears it.
+    const refreshed = (n) => (n ? ` ${qty(n)} window-based minimum${n === 1 ? "" : "s"} re-derived.` : "");
+    const leadInput = tr.querySelector(".lead-input");
+    leadInput?.addEventListener("change", async () => {
+      const v = leadInput.value.trim();
+      try {
+        if (v === "") {
+          if (!tr.querySelector(".lead-clear")) return;
+          const out = await fetchJson(`/api/insights/min-stock/${encodeURIComponent(uid)}/lead-time`, { method: "DELETE" });
+          say(`${number}: back to the supplier's lead time.${refreshed(out.minimumsRefreshed)}`);
+        } else {
+          const d = Number(v);
+          if (!Number.isFinite(d) || d < 1 || d > 365) throw new Error("Lead time must be between 1 and 365 days.");
+          const out = await fetchJson(`/api/insights/min-stock/${encodeURIComponent(uid)}/lead-time`, {
+            method: "POST",
+            body: JSON.stringify({ leadTimeDays: Math.round(d) }),
+          });
+          say(`${number}: lead time set to ${qty(out.leadTimeDays)} days on this item.${refreshed(out.minimumsRefreshed)}`);
+        }
+        await loadMinStockTable();
+      } catch (err) {
+        fail(err);
+      }
+    });
+    tr.querySelector(".lead-clear")?.addEventListener("click", async () => {
+      try {
+        const out = await fetchJson(`/api/insights/min-stock/${encodeURIComponent(uid)}/lead-time`, { method: "DELETE" });
+        say(`${number}: back to the supplier's lead time.${refreshed(out.minimumsRefreshed)}`);
+        await loadMinStockTable();
+      } catch (err) {
+        fail(err);
+      }
+    });
   });
+
+  // Lead time on everything in the view.
+  container.querySelector("#lead-apply-all")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const d = Number(document.getElementById("lead-bulk-days")?.value);
+    if (!Number.isFinite(d) || d < 1 || d > 365) {
+      fail(new Error("Enter a lead time between 1 and 365 days first."));
+      return;
+    }
+    const n = data.total;
+    if (
+      !confirm(
+        `Set a lead time of ${qty(Math.round(d))} days on ${qty(n)} item${n === 1 ? "" : "s"} — ${minViewLabel()}?\n\n` +
+          `It is recorded on each item and wins over the supplier's figure. Minimums set from a window are worked out again from it. MYOB is untouched.`,
+      )
+    )
+      return;
+    btn.disabled = true;
+    try {
+      const body = { ...Object.fromEntries(minStockParams().entries()), leadTimeDays: Math.round(d) };
+      const out = await fetchJson("/api/insights/min-stock/lead-time/apply", { method: "POST", body: JSON.stringify(body) });
+      say(`Lead time set to ${qty(Math.round(d))} days on ${qty(out.items)} item${out.items === 1 ? "" : "s"}.${refreshedAll(out.minimumsRefreshed)}`);
+      await loadMinStockTable();
+    } catch (err) {
+      btn.disabled = false;
+      fail(err);
+    }
+  });
+  container.querySelector("#lead-clear-all")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const n = data.leadOverridesInView;
+    if (!confirm(`Remove the item-level lead time from ${qty(n)} item${n === 1 ? "" : "s"} in this view, so they use their supplier's figure again?`)) return;
+    btn.disabled = true;
+    try {
+      const body = { ...Object.fromEntries(minStockParams().entries()), leadTimeDays: null };
+      const out = await fetchJson("/api/insights/min-stock/lead-time/apply", { method: "POST", body: JSON.stringify(body) });
+      say(`${qty(out.items)} item${out.items === 1 ? "" : "s"} back on their supplier's lead time.${refreshedAll(out.minimumsRefreshed)}`);
+      await loadMinStockTable();
+    } catch (err) {
+      btn.disabled = false;
+      fail(err);
+    }
+  });
+  function refreshedAll(n) {
+    return n ? ` ${qty(n)} window-based minimum${n === 1 ? "" : "s"} re-derived.` : "";
+  }
 
   // Everything in the view, in one action.
   container.querySelector("#min-apply-all")?.addEventListener("click", async (e) => {

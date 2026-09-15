@@ -322,7 +322,9 @@ const itemSelect = (w: DemandWindow): string => `
           * than a wait. Null means never measured, and the arithmetic then
           * behaves exactly as it did before lead time existed.
           */
-         COALESCE(sm.lead_time_days, slt.median_lead_days)::float8 AS lead_time_days,
+         COALESCE(ilt.lead_time_days, sm.lead_time_days, slt.median_lead_days)::float8 AS lead_time_days,
+         ilt.lead_time_days::float8 AS item_lead_days,
+         sm.lead_time_days::float8 AS supplier_lead_days,
          slt.median_lead_days::float8 AS measured_lead_days,
          slt.orders_measured AS lead_time_orders,
          COALESCE(dd.direct_window, 0) AS direct_window,
@@ -360,6 +362,7 @@ const itemSelect = (w: DemandWindow): string => `
   LEFT JOIN platform_daily_position dp
     ON dp.item_uid = it.uid AND dp.as_at_date = '${w.asAt}'::date
   LEFT JOIN platform_min_stock ms ON ms.item_uid = it.uid
+  LEFT JOIN platform_item_lead_time ilt ON ilt.item_uid = it.uid
 `;
 
 export interface ItemComputed {
@@ -467,9 +470,16 @@ export interface ItemComputed {
    */
   leadTimeDays: number | null;
   leadTimeWeeks: number | null;
-  /** Whether Allied set the lead time or it was measured from their orders. */
-  leadTimeSource: "allied" | "measured" | null;
+  /**
+   * Where the lead time came from, in precedence order: set by Allied on this
+   * item, set by Allied on the supplier, or measured from their orders.
+   */
+  leadTimeSource: "item" | "supplier" | "measured" | null;
   leadTimeOrders: number;
+  /** The three candidates, so a screen can show what an override is overriding. */
+  leadTimeItemDays: number | null;
+  leadTimeSupplierDays: number | null;
+  leadTimeMeasuredDays: number | null;
   /** Cover runs out before a replacement can land. */
   coverBelowLeadTime: boolean;
   /**
@@ -754,9 +764,11 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
           leadTimeSource:
             leadDays == null
               ? "not measured"
-              : n(row.measured_lead_days) === leadDays
-                ? `measured over ${n(row.lead_time_orders) ?? 0} orders`
-                : "set by Allied",
+              : n(row.item_lead_days) != null
+                ? "set by Allied on this item"
+                : n(row.supplier_lead_days) != null
+                  ? "set by Allied on the supplier"
+                  : `measured over ${n(row.lead_time_orders) ?? 0} orders`,
           minLevel: minLevel ?? 0,
           /*
            * The lead-time stock the order is built around, and where it came
@@ -886,8 +898,17 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     leadTimeDays: leadDays,
     leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : null,
     leadTimeSource:
-      leadDays == null ? null : n(row.measured_lead_days) === leadDays ? "measured" : "allied",
+      leadDays == null
+        ? null
+        : n(row.item_lead_days) != null
+          ? "item"
+          : n(row.supplier_lead_days) != null
+            ? "supplier"
+            : "measured",
     leadTimeOrders: n(row.lead_time_orders) ?? 0,
+    leadTimeItemDays: n(row.item_lead_days),
+    leadTimeSupplierDays: n(row.supplier_lead_days),
+    leadTimeMeasuredDays: n(row.measured_lead_days),
     coverBelowLeadTime: coverBelowLead,
     excess,
     flags,

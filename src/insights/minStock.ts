@@ -55,8 +55,12 @@ export interface MinStockRow {
   supplierName: string | null;
   supplierRegion: string | null;
   leadTimeDays: number | null;
-  leadTimeSource: "allied" | "measured" | null;
+  leadTimeSource: "item" | "supplier" | "measured" | null;
   leadTimeOrders: number;
+  /** What an item-level figure would be overriding, so the page can say so. */
+  leadTimeItemDays: number | null;
+  leadTimeSupplierDays: number | null;
+  leadTimeMeasuredDays: number | null;
   /** Units consumed over each window, and the monthly rate that implies. */
   consumed: Record<MinStockWindow, number>;
   burn: Record<MinStockWindow, number>;
@@ -175,6 +179,9 @@ function buildRows(items: ItemComputed[], cons: Map<string, Record<MinStockWindo
       leadTimeDays: i.leadTimeDays,
       leadTimeSource: i.leadTimeSource,
       leadTimeOrders: i.leadTimeOrders,
+      leadTimeItemDays: i.leadTimeItemDays,
+      leadTimeSupplierDays: i.leadTimeSupplierDays,
+      leadTimeMeasuredDays: i.leadTimeMeasuredDays,
       consumed,
       burn,
       suggested,
@@ -314,6 +321,8 @@ export async function minStockReview(f: MinStockFilters) {
     dir,
     /** How many of the rows in this view a bulk apply would actually change. */
     applicable: filtered.filter((r) => r.status !== "manual" && r.suggested[w] != null).length,
+    /** Rows in this view carrying an item-level lead time, for the bulk clear. */
+    leadOverridesInView: filtered.filter((r) => r.leadTimeItemDays != null).length,
     rows: sorted.slice(start, start + pageSize),
   };
 }
@@ -479,6 +488,122 @@ export async function recalculateWindowMinimums(
   return { updated, unchanged, noFigure };
 }
 
+/*
+ * ---- Lead times, set from the review ---------------------------------------
+ *
+ * The minimum is consumption × lead time, so a lead time that is missing or
+ * wrong leaves the minimum missing or wrong. Rather than send Allied to the
+ * Suppliers page mid-review, the figure can be set here — on one item, or on
+ * everything a filtered view selects. It lands on the item, wins over the
+ * supplier's figure everywhere lead time is read, and any minimum that was
+ * set from a window is re-derived from it in the same action, so the two can
+ * never describe different waits.
+ */
+
+function validLeadDays(v: unknown): number {
+  const d = Number(v);
+  if (!Number.isFinite(d) || d <= 0 || d > 365)
+    throw new Error("leadTimeDays must be between 1 and 365.");
+  return Math.round(d);
+}
+
+/**
+ * Re-derive window-based minimums for the given items from today's figures.
+ * Manual minimums are left alone; an item whose window now gives nothing keeps
+ * what it had and shows as drift.
+ */
+async function refreshWindowMinimums(itemUids: string[], setBy: string | null): Promise<number> {
+  if (!itemUids.length) return 0;
+  invalidateItemsCache();
+  const wanted = new Set(itemUids);
+  const [items, cons] = await Promise.all([computedItems(), consumption()]);
+  const rows = buildRows(items, cons).filter((r) => wanted.has(r.uid) && r.status === "window");
+  let updated = 0;
+  const pool = getPool();
+  for (const r of rows) {
+    const w = r.applied?.windowMonths;
+    if (!isMinStockWindow(w)) continue;
+    const level = r.suggested[w];
+    if (level == null || level === r.applied?.level) continue;
+    await writeWindowMinimum(pool, r, w, level, setBy);
+    updated += 1;
+  }
+  if (updated) invalidateItemsCache();
+  return updated;
+}
+
+export async function setItemLeadTime(params: {
+  itemUid: string;
+  leadTimeDays: number;
+  setBy?: string | null;
+}): Promise<{ leadTimeDays: number; minimumsRefreshed: number }> {
+  await ensureInsightsSchema();
+  const days = validLeadDays(params.leadTimeDays);
+  await getPool().query(
+    `INSERT INTO platform_item_lead_time (item_uid, lead_time_days, set_by, set_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (item_uid) DO UPDATE SET
+       lead_time_days = EXCLUDED.lead_time_days, set_by = EXCLUDED.set_by, set_at = NOW()`,
+    [params.itemUid, days, params.setBy ?? null],
+  );
+  invalidateItemsCache();
+  const minimumsRefreshed = await refreshWindowMinimums([params.itemUid], params.setBy ?? null);
+  return { leadTimeDays: days, minimumsRefreshed };
+}
+
+/** Back to the supplier's figure. */
+export async function clearItemLeadTime(
+  itemUid: string,
+  setBy?: string | null,
+): Promise<{ minimumsRefreshed: number }> {
+  await ensureInsightsSchema();
+  await getPool().query(`DELETE FROM platform_item_lead_time WHERE item_uid = $1`, [itemUid]);
+  invalidateItemsCache();
+  return { minimumsRefreshed: await refreshWindowMinimums([itemUid], setBy ?? null) };
+}
+
+/**
+ * Set one lead time on every item the filters select, or clear the item-level
+ * figures from them (`leadTimeDays: null`) so they fall back to their suppliers.
+ */
+export async function applyLeadTimeToView(
+  f: MinStockFilters,
+  leadTimeDays: number | null,
+  setBy?: string | null,
+): Promise<{ items: number; minimumsRefreshed: number }> {
+  await ensureInsightsSchema();
+  const w = resolveWindow(f);
+  const days = leadTimeDays == null ? null : validLeadDays(leadTimeDays);
+  const [items, cons] = await Promise.all([computedItems(), consumption()]);
+  const rows = applyFilters(buildRows(items, cons), f, w);
+  const uids = days == null ? rows.filter((r) => r.leadTimeItemDays != null).map((r) => r.uid) : rows.map((r) => r.uid);
+  if (!uids.length) return { items: 0, minimumsRefreshed: 0 };
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    if (days == null) {
+      await client.query(`DELETE FROM platform_item_lead_time WHERE item_uid = ANY($1)`, [uids]);
+    } else {
+      await client.query(
+        `INSERT INTO platform_item_lead_time (item_uid, lead_time_days, set_by, set_at)
+         SELECT u, $2, $3, NOW() FROM UNNEST($1::text[]) AS u
+         ON CONFLICT (item_uid) DO UPDATE SET
+           lead_time_days = EXCLUDED.lead_time_days, set_by = EXCLUDED.set_by, set_at = NOW()`,
+        [uids, days, setBy ?? null],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  invalidateItemsCache();
+  return { items: uids.length, minimumsRefreshed: await refreshWindowMinimums(uids, setBy ?? null) };
+}
+
 /** The review as a spreadsheet, honouring the filters on screen. */
 export async function minStockCsv(f: MinStockFilters): Promise<{ filename: string; csv: string }> {
   const data = await minStockReview({ ...f, all: true });
@@ -502,7 +627,15 @@ export async function minStockCsv(f: MinStockFilters): Promise<{ filename: strin
       [
         esc(r.number), esc(r.name), esc(r.productType), esc(r.productFinish), esc(r.tags.join(" ")),
         esc(r.supplierName), esc(r.supplierRegion), esc(r.leadTimeDays),
-        esc(r.leadTimeSource === "allied" ? "Set by Allied" : r.leadTimeSource === "measured" ? `Measured over ${r.leadTimeOrders} orders` : ""),
+        esc(
+          r.leadTimeSource === "item"
+            ? "Set by Allied on the item"
+            : r.leadTimeSource === "supplier"
+              ? "Set by Allied on the supplier"
+              : r.leadTimeSource === "measured"
+                ? `Measured over ${r.leadTimeOrders} orders`
+                : "",
+        ),
         esc(r.consumed[6]), esc(r.consumed[12]), esc(r.consumed[18]),
         esc(r.burn[6]), esc(r.burn[12]), esc(r.burn[18]),
         esc(r.suggested[6]), esc(r.suggested[12]), esc(r.suggested[18]),

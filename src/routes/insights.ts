@@ -44,9 +44,12 @@ import {
 } from "../insights/queries.js";
 import { getSyncStatus, isSyncRunning, runSync } from "../sync/engine.js";
 import {
+  applyLeadTimeToView,
   applyWindowMinimum,
   applyWindowToView,
+  clearItemLeadTime,
   clearMinimum,
+  setItemLeadTime,
   isMinStockWindow,
   minStockCsv,
   minStockReview,
@@ -856,6 +859,50 @@ insightsRouter.post("/min-stock/apply", async (req, res) => {
       return;
     }
     res.json(await applyWindowToView(f, "dashboard"));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/**
+ * Lead time on every item the filters select. `leadTimeDays: null` clears the
+ * item-level figures instead, so they fall back to their suppliers. Either way
+ * any window-based minimum on those items is re-derived in the same call.
+ */
+insightsRouter.post("/min-stock/lead-time/apply", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const body = req.body ?? {};
+    const days = body.leadTimeDays === null ? null : Number(body.leadTimeDays);
+    if (days !== null && !(Number.isFinite(days) && days > 0 && days <= 365)) {
+      res.status(400).json({ error: "leadTimeDays must be between 1 and 365, or null to clear." });
+      return;
+    }
+    res.json(await applyLeadTimeToView(minStockFilters(body), days, "dashboard"));
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/** Lead time on one item. */
+insightsRouter.post("/min-stock/:uid/lead-time", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const days = Number(req.body?.leadTimeDays);
+    if (!(Number.isFinite(days) && days > 0 && days <= 365)) {
+      res.status(400).json({ error: "leadTimeDays must be between 1 and 365." });
+      return;
+    }
+    res.json({ ok: true, ...(await setItemLeadTime({ itemUid: req.params.uid, leadTimeDays: days, setBy: "dashboard" })) });
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+insightsRouter.delete("/min-stock/:uid/lead-time", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({ ok: true, ...(await clearItemLeadTime(req.params.uid, "dashboard")) });
   } catch (err) {
     send500(res, err);
   }

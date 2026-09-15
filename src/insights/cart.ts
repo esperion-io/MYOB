@@ -33,8 +33,13 @@ export interface CartLine {
   supplierRegion: string | null;
   /** Where this supplier came from: Allied's tag, MYOB's primary, or bills. */
   supplierSource: "allied" | "myob" | "inferred";
-  /** Measured order-to-delivery, not a promise. Null when never measured. */
+  /**
+   * Order-to-delivery in days: Allied's figure on the item, else on the
+   * supplier, else measured from their orders. Null when none of those exist.
+   */
   leadTimeDays: number | null;
+  /** True when the figure was set by Allied rather than measured. */
+  leadTimeSetByAllied: boolean;
   leadTimeOrders: number;
   /** Same-day order/bill pairs ignored — see supplier_lead_time for why. */
   leadTimeSameDayExcluded: number;
@@ -166,7 +171,23 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
        ORDER BY l.item_uid, SUM(COALESCE(l.total, 0)) DESC`,
       [uids],
     ),
-    pool.query(`SELECT * FROM supplier_lead_time`),
+    /*
+     * Allied's figure on the supplier wins over the measured one, the same
+     * precedence the item set uses. The cart used to show the measured median
+     * here even after Allied had overridden it on the Suppliers page, so the
+     * card could name one wait while the order quantity was built on another.
+     */
+    pool.query(
+      `SELECT s.uid AS supplier_uid,
+              COALESCE(m.lead_time_days, l.median_lead_days)::float8 AS days,
+              (m.lead_time_days IS NOT NULL) AS set_by_allied,
+              COALESCE(l.orders_measured, 0)::int AS orders_measured,
+              COALESCE(l.same_day_excluded, 0)::int AS same_day_excluded
+       FROM myob_suppliers s
+       LEFT JOIN supplier_lead_time l ON l.supplier_uid = s.uid
+       LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
+       WHERE m.lead_time_days IS NOT NULL OR l.median_lead_days IS NOT NULL`,
+    ),
     pool.query(
       `SELECT DISTINCT ON (l.item_uid, b.supplier_uid)
               l.item_uid, b.supplier_uid, l.unit_price, b.date::date::text AS last_bought
@@ -179,16 +200,26 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
     pool.query(`SELECT * FROM platform_purchase_cart WHERE item_uid = ANY($1)`, [uids]),
   ]);
 
-  const lead = new Map(
+  const supplierLead = new Map(
     leadTimes.rows.map((r) => [
       r.supplier_uid as string,
       {
-        days: r.median_lead_days as number | null,
+        days: r.days as number | null,
+        setByAllied: r.set_by_allied as boolean,
         orders: r.orders_measured as number,
         sameDayExcluded: r.same_day_excluded as number,
       },
     ]),
   );
+  /*
+   * A lead time Allied set on the item itself applies under every supplier it
+   * is offered from: it is a statement about how long this item takes, not
+   * about who it comes from. Otherwise the supplier's figure applies.
+   */
+  const leadFor = (item: ItemComputed, supplierUid: string) =>
+    item.leadTimeItemDays != null
+      ? { days: item.leadTimeItemDays, setByAllied: true, orders: 0, sameDayExcluded: 0 }
+      : supplierLead.get(supplierUid);
   const lastCost = new Map(
     lastCosts.rows.map((r) => [
       `${r.item_uid}|${r.supplier_uid}`,
@@ -275,7 +306,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
       const suggested = item.suggestion?.qty ?? 0;
       const qty = saved?.qty ?? suggested;
       const cost = lastCost.get(key) ?? item.averageCost ?? 0;
-      const lt = lead.get(o.supplierUid);
+      const lt = leadFor(item, o.supplierUid);
 
       const line: CartLine = {
         itemUid: item.uid,
@@ -287,6 +318,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         supplierRegion: o.region,
         supplierSource: o.source,
         leadTimeDays: lt?.days ?? null,
+        leadTimeSetByAllied: lt?.setByAllied ?? false,
         leadTimeOrders: lt?.orders ?? 0,
         leadTimeSameDayExcluded: lt?.sameDayExcluded ?? 0,
         lastCost: lastCost.get(key) ?? null,
@@ -323,7 +355,8 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         supplierUid: o.supplierUid,
         supplierName: line.supplierName,
         region: o.region,
-        leadTimeDays: lt?.days ?? null,
+        // The card names the supplier's wait; an item-level figure shows on its line.
+        leadTimeDays: supplierLead.get(o.supplierUid)?.days ?? null,
         itemCount: 0,
         estimatedCost: 0,
         lines: [] as CartLine[],

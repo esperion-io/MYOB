@@ -786,6 +786,24 @@ const DDL: string[] = [
   )`,
 
   /*
+   * A lead time Allied set on one item, in days.
+   *
+   * Lead time is otherwise a property of the supplier — Allied's figure on
+   * platform_supplier_meta, else the median measured from their orders — and
+   * that is still where it usually belongs. This row is for the item that does
+   * not fit its supplier's pattern, and for the item whose supplier has no
+   * measurable history at all, so it can still be given a minimum. It wins
+   * over both supplier figures wherever lead time is read: the order quantity,
+   * the cover-below-lead-time warning, the cart and the minimum stock rule.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_item_lead_time (
+    item_uid TEXT PRIMARY KEY,
+    lead_time_days DOUBLE PRECISION NOT NULL CHECK (lead_time_days > 0 AND lead_time_days <= 365),
+    set_by TEXT,
+    set_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+
+  /*
    * Measured supplier lead time: purchase order raised to goods billed.
    *
    * Promised dates exist on only 30 orders, but 1,153 of 1,265 converted orders

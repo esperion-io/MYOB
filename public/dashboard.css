@@ -1290,3 +1290,11 @@ ul.plain { margin: 0.3rem 0 0.8rem; padding-left: 1rem; display: grid; gap: 0.2r
 .min-below { color: var(--fail); font-weight: 600; }
 
 .kpi .k-note { display: block; font-size: 0.62rem; color: var(--muted); margin-top: 0.15rem; }
+
+/* Lead time, editable on the review row and in bulk. */
+.lead-edit { display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+.lead-input { width: 4.6rem; }
+.lead-bulk { margin-top: -0.2rem; }
+.lead-bulk label { font-size: 0.62rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.lead-bulk .btn:last-child { margin-left: 0; }
+.lead-bulk .linkish { margin-left: auto; }
