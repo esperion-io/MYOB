@@ -5063,11 +5063,24 @@ function minStockRow(r, w) {
       <input class="cart-qty lead-input" type="number" step="1" min="1" max="365"
              value="${r.leadTimeDays != null ? qty(Math.round(r.leadTimeDays)).replace(/,/g, "") : ""}"
              placeholder="days" aria-label="Lead time in days for ${esc(r.number ?? "")}" />
-      <span class="muted">d${r.leadTimeDays != null ? ` · ${(r.leadTimeDays / 30.4375).toFixed(1)} mo` : ""}</span>
+      <span class="muted" title="${r.leadTimeDays != null ? `${qty(r.leadTimeDays)} days ÷ 30.44 (the average month) = ${(r.leadTimeDays / 30.4375).toFixed(4)} months` : ""}">d${r.leadTimeDays != null ? ` · ${(r.leadTimeDays / 30.4375).toFixed(2)} mo` : ""}</span>
       ${r.leadTimeSource === "item" ? '<button class="tag-x lead-clear" type="button" title="Back to the supplier\'s lead time">×</button>' : ""}
     </span>
     <br />${leadSource}`;
 
+  /*
+   * The tooltip carries the exact working. The figures on screen are rounded
+   * for display — 16,801 a month, 2.73 months — and multiplying those gives a
+   * number a few dozen off the real product of 16,800.92 × 2.7269, which then
+   * rounds up. Anyone checking the arithmetic should be able to see that.
+   */
+  const working = (m) => {
+    const burn = r.burn[m];
+    if (burn == null || r.leadTimeDays == null) return "";
+    const months = r.leadTimeDays / 30.4375;
+    const two = (x) => x.toLocaleString("en-NZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${two(burn)} a month × ${months.toFixed(4)} months (${qty(r.leadTimeDays)} days ÷ 30.44) = ${two(burn * months)}, rounded up`;
+  };
   const figure = (m) => {
     const v = r.suggested[m];
     if (v == null)
@@ -5075,7 +5088,7 @@ function minStockRow(r, w) {
     const isApplied = a?.basis === "window" && a.windowMonths === m && a.level === v;
     return `<td class="num win-col ${m === w ? "win-active" : ""}">
       <button class="min-pick ${isApplied ? "is-applied" : ""}" type="button" data-window="${m}"
-              title="${isApplied ? "This is the applied figure" : `Apply ${qty(v)} to this item (${m}-month consumption × lead time)`}"
+              title="${esc(isApplied ? `This is the applied figure. ${working(m)}` : `Apply ${qty(v)} to this item — ${working(m)}`)}"
               ${isApplied ? "disabled" : ""}>${qty(v)}</button>
     </td>`;
   };
