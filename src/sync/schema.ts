@@ -339,6 +339,28 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_item_supplier_supplier
      ON platform_item_suppliers (supplier_uid)`,
 
+  /*
+   * Allied's ruling that an item has NO supplier.
+   *
+   * `platform_item_suppliers` can say who supplies an item, but it has no way
+   * to say that nobody does: deleting the preferred row just falls through to
+   * MYOB's primary field, and then to whoever last billed the item. That
+   * fall-through is right for an item nobody has ruled on, and wrong for one
+   * Allied have deliberately unassigned — the supplier would quietly come
+   * back from purchase history.
+   *
+   * A row here is that missing third state, and it suppresses both fallbacks.
+   * It is mutually exclusive with a preferred row in platform_item_suppliers:
+   * assigning a supplier clears the ruling, and making the ruling clears the
+   * preference. Platform data only — MYOB's own item master is never written.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_item_no_supplier (
+    item_uid TEXT PRIMARY KEY,
+    reason TEXT,
+    set_by TEXT,
+    set_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+
   // Allied-managed supplier attributes (region label, lead time, notes).
   // Platform data only — never written to MYOB. A row exists only once a
   // user edits something; region falls back to an auto label derived from

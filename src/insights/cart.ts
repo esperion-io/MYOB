@@ -141,13 +141,17 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   // Every supplier option per item: Allied's tags first, then MYOB's primary,
   // then whoever has actually billed it. An item with no option at all still
   // needs to be visible, so it falls through to a "no supplier" bucket below.
+  // All three skip items Allied have ruled have no supplier, or the supplier
+  // they removed would reappear here as an orderable option — from the item
+  // master, from purchase history, or as an alternate still on file.
   const [tagged, primaries, billed, leadTimes, lastCosts, cart] = await Promise.all([
     pool.query(
       `SELECT ps.item_uid, ps.supplier_uid, s.name AS supplier_name, m.region, ps.is_preferred
        FROM platform_item_suppliers ps
        JOIN myob_suppliers s ON s.uid = ps.supplier_uid
        LEFT JOIN platform_supplier_meta m ON m.supplier_uid = ps.supplier_uid
-       WHERE ps.item_uid = ANY($1)`,
+       WHERE ps.item_uid = ANY($1)
+         AND NOT EXISTS (SELECT 1 FROM platform_item_no_supplier n WHERE n.item_uid = ps.item_uid)`,
       [uids],
     ),
     pool.query(
@@ -156,7 +160,8 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
        FROM myob_items i
        JOIN myob_suppliers s ON s.uid = i.primary_supplier_uid
        LEFT JOIN platform_supplier_meta m ON m.supplier_uid = i.primary_supplier_uid
-       WHERE i.uid = ANY($1) AND i.primary_supplier_uid IS NOT NULL`,
+       WHERE i.uid = ANY($1) AND i.primary_supplier_uid IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM platform_item_no_supplier n WHERE n.item_uid = i.uid)`,
       [uids],
     ),
     pool.query(
@@ -167,6 +172,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
        JOIN myob_suppliers s ON s.uid = b.supplier_uid
        LEFT JOIN platform_supplier_meta m ON m.supplier_uid = b.supplier_uid
        WHERE l.item_uid = ANY($1) AND b.supplier_uid IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM platform_item_no_supplier n WHERE n.item_uid = l.item_uid)
        GROUP BY l.item_uid, b.supplier_uid, s.name, m.region
        ORDER BY l.item_uid, SUM(COALESCE(l.total, 0)) DESC`,
       [uids],

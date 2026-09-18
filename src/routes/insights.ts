@@ -28,6 +28,7 @@ import {
   relationships,
   removeItemSupplier,
   removeUserBom,
+  setItemNoSupplier,
   setItemSupplier,
   setSupplierMeta,
   supplierOptions,
@@ -303,6 +304,28 @@ insightsRouter.post("/items/:uid/suppliers", async (req, res) => {
             ? null
             : String(supplierItemNumber),
       notes: notes === undefined ? undefined : notes === null ? null : String(notes),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
+  }
+});
+
+/**
+ * Rule that an item has no supplier at all, or lift that ruling.
+ *
+ * Deleting the assignment is not enough on its own: the item would fall back
+ * to MYOB's primary field and then to whoever last billed it, so the supplier
+ * Allied removed would reappear. `{ ruled: false }` puts it back.
+ */
+insightsRouter.post("/items/:uid/no-supplier", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { ruled, reason, setBy } = req.body ?? {};
+    await setItemNoSupplier(req.params.uid, ruled !== false, {
+      reason: reason === undefined || reason === null ? null : String(reason),
+      setBy: setBy === undefined || setBy === null ? null : String(setBy),
     });
     res.json({ ok: true });
   } catch (err) {

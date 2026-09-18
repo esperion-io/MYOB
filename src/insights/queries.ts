@@ -262,8 +262,27 @@ const demandCte = (w: DemandWindow): string => `
     SELECT item_uid, COUNT(*)::int AS assigned_count
     FROM platform_item_suppliers
     GROUP BY item_uid
+  ),
+  -- Allied's ruling that an item has no supplier at all. Without it, an
+  -- unassigned item falls back to MYOB's primary field and then to purchase
+  -- history, so a supplier they had deliberately removed would reappear.
+  ruled_no_supplier AS (
+    SELECT item_uid FROM platform_item_no_supplier
   )
 `;
+
+/*
+ * The effective supplier, in one place because three joins hang off it.
+ *
+ * Allied's preferred assignment wins. Failing that, MYOB's primary field and
+ * then the dominant supplier from purchase history — unless Allied have ruled
+ * the item has none, which stops the fall-through dead.
+ */
+const EFFECTIVE_SUPPLIER_UID = `COALESCE(
+    asg.supplier_uid,
+    CASE WHEN nos.item_uid IS NULL
+         THEN COALESCE(it.primary_supplier_uid, ds.supplier_uid) END
+  )`;
 
 const itemSelect = (w: DemandWindow): string => `
   SELECT it.uid, it.number, it.name, it.description,
@@ -313,6 +332,7 @@ const itemSelect = (w: DemandWindow): string => `
          asg.supplier_name AS assigned_supplier_name,
          asg.supplier_item_number AS assigned_supplier_item_number,
          COALESCE(aa.assigned_count, 0) AS assigned_supplier_count,
+         (nos.item_uid IS NOT NULL) AS supplier_ruled_none,
          sup.country AS supplier_country,
          sm.region AS supplier_region_override,
          /*
@@ -353,12 +373,13 @@ const itemSelect = (w: DemandWindow): string => `
   LEFT JOIN dominant_supplier ds ON ds.item_uid = it.uid
   LEFT JOIN assigned_supplier asg ON asg.item_uid = it.uid
   LEFT JOIN assigned_any aa ON aa.item_uid = it.uid
+  LEFT JOIN ruled_no_supplier nos ON nos.item_uid = it.uid
   LEFT JOIN myob_suppliers sup
-    ON sup.uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
+    ON sup.uid = ${EFFECTIVE_SUPPLIER_UID}
   LEFT JOIN platform_supplier_meta sm
-    ON sm.supplier_uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
+    ON sm.supplier_uid = ${EFFECTIVE_SUPPLIER_UID}
   LEFT JOIN supplier_lead_time slt
-    ON slt.supplier_uid = COALESCE(asg.supplier_uid, it.primary_supplier_uid, ds.supplier_uid)
+    ON slt.supplier_uid = ${EFFECTIVE_SUPPLIER_UID}
   LEFT JOIN platform_daily_position dp
     ON dp.item_uid = it.uid AND dp.as_at_date = '${w.asAt}'::date
   LEFT JOIN platform_min_stock ms ON ms.item_uid = it.uid
@@ -419,6 +440,12 @@ export interface ItemComputed {
   supplierUid: string | null;
   supplierName: string | null;
   supplierSource: "allied" | "myob" | "inferred" | null;
+  /**
+   * Allied have ruled this item has no supplier, so the MYOB and purchase
+   * history fallbacks are suppressed. `supplierSource` is "allied" with a null
+   * name — a deliberate blank, not an unknown one.
+   */
+  supplierRuledNone: boolean;
   supplierItemNumber: string | null;
   /** MYOB CustomList1/2, kept as independent facets — never concatenated. */
   productType: string | null;
@@ -589,12 +616,14 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
   if ((onHand ?? 0) > 0 && (avgCost ?? 0) === 0) flags.push("stock_no_cost");
   if (isActive === false && (onHand ?? 0) > 0) flags.push("inactive_with_stock");
   // Effective supplier: Allied's preferred assignment, else MYOB primary,
-  // else inferred from purchase history.
+  // else inferred from purchase history — unless Allied have ruled the item
+  // has no supplier, which stops the fall-through.
+  const ruledNone = row.supplier_ruled_none === true;
   const supplierUid =
     (row.assigned_supplier_uid as string) ??
-    (row.primary_supplier_uid as string) ??
-    (row.inferred_supplier_uid as string) ??
-    null;
+    (ruledNone
+      ? null
+      : ((row.primary_supplier_uid as string) ?? (row.inferred_supplier_uid as string) ?? null));
   if (weekly > 0 && !supplierUid) flags.push("no_supplier");
 
   /*
@@ -846,16 +875,21 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
     supplierUid,
     supplierName:
       (row.assigned_supplier_name as string) ??
-      (row.primary_supplier_name as string) ??
-      (row.inferred_supplier_name as string) ??
-      null,
+      (ruledNone
+        ? null
+        : ((row.primary_supplier_name as string) ??
+          (row.inferred_supplier_name as string) ??
+          null)),
     supplierSource: row.assigned_supplier_uid
       ? "allied"
-      : row.primary_supplier_uid
-        ? "myob"
-        : row.inferred_supplier_uid
-          ? "inferred"
-          : null,
+      : ruledNone
+        ? "allied"
+        : row.primary_supplier_uid
+          ? "myob"
+          : row.inferred_supplier_uid
+            ? "inferred"
+            : null,
+    supplierRuledNone: ruledNone,
     productType: (row.product_type as string) ?? null,
     productFinish: (row.product_finish as string) ?? null,
     tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
@@ -2043,8 +2077,13 @@ export async function itemSuppliers(itemUid: string) {
   const [item, assigned, history] = await Promise.all([
     pool.query(
       `SELECT i.uid, i.number, i.name,
-              i.primary_supplier_uid, i.primary_supplier_name, i.supplier_item_number
-       FROM myob_items i WHERE i.uid = $1`,
+              i.primary_supplier_uid, i.primary_supplier_name, i.supplier_item_number,
+              (n.item_uid IS NOT NULL) AS ruled_no_supplier,
+              n.reason AS no_supplier_reason, n.set_by AS no_supplier_set_by,
+              n.set_at AS no_supplier_set_at
+       FROM myob_items i
+       LEFT JOIN platform_item_no_supplier n ON n.item_uid = i.uid
+       WHERE i.uid = $1`,
       [itemUid],
     ),
     pool.query(
@@ -2127,6 +2166,12 @@ export async function setItemSupplier(
         [itemUid, supplierUid],
       );
     }
+    // Naming a supplier contradicts "this item has no supplier", so the ruling
+    // goes. This is also the UI's undo: assign anyone and the item rejoins the
+    // normal fall-through.
+    if (patch.isPreferred) {
+      await client.query(`DELETE FROM platform_item_no_supplier WHERE item_uid = $1`, [itemUid]);
+    }
     const notes = patch.notes === undefined ? null : (patch.notes?.trim().slice(0, 500) || null);
     const ref =
       patch.supplierItemNumber === undefined
@@ -2151,6 +2196,53 @@ export async function setItemSupplier(
         patch.supplierItemNumber !== undefined,
         patch.notes !== undefined,
       ],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  invalidateItemsCache();
+}
+
+/**
+ * Record — or lift — Allied's ruling that an item has no supplier.
+ *
+ * Setting it clears any preferred assignment, since the two contradict each
+ * other, and suppresses the MYOB-primary and purchase-history fallbacks so a
+ * removed supplier cannot creep back in.
+ */
+export async function setItemNoSupplier(
+  itemUid: string,
+  ruled: boolean,
+  opts: { reason?: string | null; setBy?: string | null } = {},
+): Promise<void> {
+  await ensureInsightsSchema();
+  const pool = getPool();
+  const exists = await pool.query(`SELECT 1 FROM myob_items WHERE uid = $1`, [itemUid]);
+  if (!exists.rows.length) throw new Error("Item not found in synced data.");
+
+  if (!ruled) {
+    await pool.query(`DELETE FROM platform_item_no_supplier WHERE item_uid = $1`, [itemUid]);
+    invalidateItemsCache();
+    return;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE platform_item_suppliers SET is_preferred = FALSE, updated_at = NOW()
+       WHERE item_uid = $1 AND is_preferred`,
+      [itemUid],
+    );
+    await client.query(
+      `INSERT INTO platform_item_no_supplier (item_uid, reason, set_by, set_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (item_uid) DO UPDATE SET
+         reason = EXCLUDED.reason, set_by = EXCLUDED.set_by, set_at = NOW()`,
+      [itemUid, opts.reason?.trim().slice(0, 500) || null, opts.setBy?.trim().slice(0, 100) || null],
     );
     await client.query("COMMIT");
   } catch (err) {
