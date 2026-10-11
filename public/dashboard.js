@@ -2380,11 +2380,30 @@ async function loadItemSuppliers(uid) {
     const d = await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}/suppliers`);
     const canAdd = d.history.filter((h) => !h.already_assigned);
 
+    const ruled = Boolean(d.item.ruled_no_supplier);
+    // Read by the Undo confirm, which names what is being lifted and what returns.
+    panel.dataset.ruledAt = d.item.no_supplier_set_at ? dateFmt(d.item.no_supplier_set_at) : "";
+    panel.dataset.ruledReason = d.item.no_supplier_reason ?? "";
+    panel.dataset.priorPreferred = d.item.prior_preferred_name ?? "";
     panel.innerHTML = `
       <h2>Suppliers for this product</h2>
       <p class="hint">Allied's own supplier list for this item — stored in this platform, never written to MYOB.
-      A product can have several suppliers; the one marked <strong>preferred</strong> is used for purchasing
-      grouping, region reporting and lead times.</p>
+      A product can have several suppliers; the one marked <strong>preferred</strong> is the one the Order list
+      orders it from, and is used for region reporting and lead times.</p>
+
+      ${
+        ruled
+          ? `<div class="notice warn isup-ruled">
+               <strong>Allied have marked this item as having no supplier</strong>${
+                 d.item.no_supplier_set_at ? ` (${dateFmt(d.item.no_supplier_set_at)})` : ""
+               }${d.item.no_supplier_reason ? ` — ${esc(d.item.no_supplier_reason)}` : ""}.
+               It sits under "No known supplier" on the Order list, and MYOB's supplier and purchase history
+               are ignored for it.${d.assigned.length ? " The suppliers below are kept on file but not used." : ""}
+               ${d.item.prior_preferred_name ? ` Undo makes <strong>${esc(d.item.prior_preferred_name)}</strong> preferred again.` : ""}
+               <button class="btn small" id="isup-unrule" type="button">Undo</button>
+             </div>`
+          : ""
+      }
 
       ${
         d.assigned.length
@@ -2413,6 +2432,15 @@ async function loadItemSuppliers(uid) {
                 ? `MYOB names <strong>${esc(d.item.primary_supplier_name)}</strong> as primary.`
                 : "MYOB has no primary supplier for this item."
             }</p>`
+      }
+
+      ${
+        ruled
+          ? ""
+          : `<p class="hint isup-none-row">Nobody supplies this item?
+               <button class="btn small" id="isup-rule-none" type="button">No supplier</button>
+               Use this rather than removing suppliers: removing them brings back the supplier MYOB names,
+               or whoever billed the item last.</p>`
       }
 
       <h3 class="sub-h">Add a supplier</h3>
@@ -2486,11 +2514,49 @@ function wireItemSupplierPanel(uid, panel) {
     ),
   );
 
+  /*
+   * "add as preferred" unticked means "add as an alternate", not "this is not
+   * the preferred supplier": sending false demoted the current preferred
+   * supplier whenever someone re-picked it from the list.
+   */
   wireSupplierPicker(panel, (supplierUid) =>
-    save({ supplierUid, isPreferred: panel.querySelector("#isup-preferred").checked }).catch(
-      (e) => (msg.textContent = e.message),
-    ),
+    save({
+      supplierUid,
+      ...(panel.querySelector("#isup-preferred").checked ? { isPreferred: true } : {}),
+    }).catch((e) => (msg.textContent = e.message)),
   );
+
+  // Allied's "nobody supplies this", and its undo. Both are logged and reversible.
+  const ruling = async (ruled) => {
+    await fetchJson(`/api/insights/items/${encodeURIComponent(uid)}/no-supplier`, {
+      method: "POST",
+      body: JSON.stringify({ ruled, setBy: "dashboard" }),
+    });
+    await loadItemSuppliers(uid);
+  };
+  panel.querySelector("#isup-rule-none")?.addEventListener("click", () => {
+    if (
+      !confirm(
+        "Mark this item as having no supplier?\n\nIts preferred supplier is unmarked but kept on file, and the " +
+          "item moves to \"No known supplier\" on the Order list. Undo is on this panel.",
+      )
+    )
+      return;
+    ruling(true).catch((e) => alert(e.message));
+  });
+  panel.querySelector("#isup-unrule")?.addEventListener("click", () => {
+    const item = panel.dataset;
+    if (
+      !confirm(
+        `Lift the "no supplier" ruling${item.ruledAt ? ` made ${item.ruledAt}` : ""}${item.ruledReason ? ` (${item.ruledReason})` : ""}?\n\n` +
+          (item.priorPreferred
+            ? `${item.priorPreferred} becomes the preferred supplier again.`
+            : "With no preferred supplier, the item falls back to the supplier MYOB names, or whoever billed it last."),
+      )
+    )
+      return;
+    ruling(false).catch((e) => alert(e.message));
+  });
 }
 
 /**
@@ -4099,7 +4165,7 @@ function drawCart() {
     ${
       undecided
         ? `<div class="notice warn cart-decisions">
-             <strong>${qty(undecided)} item${undecided === 1 ? "" : "s"} sit under more than one supplier</strong>
+             <strong>${qty(undecided)} item${undecided === 1 ? " sits" : "s sit"} under more than one supplier</strong>
              with no choice recorded. Each is a sourcing decision — usually a smaller local order against a
              cheaper, slower one direct from the factory. Left undecided they can be ordered twice, so the
              export flags them.${
@@ -4125,7 +4191,9 @@ function drawCart() {
         : ""
     }
 
+    ${cartPickConflicts(d)}
     ${cartDecisionsMade(d)}
+    ${cartRemovedItems(d)}
 
     <div class="cart-suppliers">
       ${d.suppliers.map(cartSupplierCard).join("")}
@@ -4149,7 +4217,146 @@ function drawCart() {
       drawCart();
     }),
   );
+  main.querySelectorAll(".cart-put-back").forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        await fetchJson("/api/insights/cart/put-back", {
+          method: "POST",
+          body: JSON.stringify({ itemUid: b.dataset.item }),
+        });
+        cartData = await fetchJson(withWindow("/api/insights/cart"));
+        drawCart();
+      } catch (err) {
+        b.disabled = false;
+        alert(err.message);
+      }
+    }),
+  );
+  wirePickConflictButtons(main);
   wireCartCards();
+}
+
+/*
+ * Earlier picks that disagree with the preferred supplier.
+ *
+ * The Order list follows the preferred supplier set on the item page, but a
+ * choice already made here is Allied's decision and is never overridden. Where
+ * the two disagree — usually because the preferred supplier was set after the
+ * pick — the item stays where it was put, and this asks which one is right:
+ * switch to the preferred supplier, or keep the pick and stop asking.
+ */
+const PICK_REASON = {
+  pick: (p) => `It was chosen for this supplier earlier. The preferred supplier is ${p}.`,
+  split: (p) => `It was split earlier without the preferred supplier, ${p}.`,
+  removed: (p) => `${p}, the preferred supplier, was struck off this order earlier.`,
+};
+
+function pickReason(c) {
+  return (PICK_REASON[c.kind] ?? PICK_REASON.pick)(c.preferredSupplierName ?? "another supplier");
+}
+
+function cartPickConflicts(d) {
+  const open = (d.pickConflicts ?? []).filter((c) => !c.acknowledged);
+  if (!open.length) return "";
+  return `
+    <section class="panel cart-conflicts">
+      <h2>Earlier picks that differ from the preferred supplier — ${qty(open.length)}</h2>
+      <p class="hint">These items were put with a supplier here before their preferred supplier was set or
+      changed. They stay exactly as you left them until you decide: use the preferred supplier, or keep the
+      earlier pick and this warning goes away.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th>On this order from</th><th>Preferred supplier</th><th></th></tr></thead>
+        <tbody>
+          ${open
+            .map(
+              (c) => `<tr>
+                <td><strong>${esc(c.number ?? "—")}</strong><br />
+                  <span class="muted">${esc(c.name ?? "")}</span></td>
+                <td>${c.keptSuppliers
+                  .map((s) => `${esc(s.supplierName)} <span class="muted">(${qty(s.qty)})</span>`)
+                  .join(" + ")}<br /><span class="muted">${esc(pickReason(c))}</span></td>
+                <td><span class="badge ok">Preferred</span> ${esc(c.preferredSupplierName ?? "—")}</td>
+                <td class="nowrap">${pickConflictButtons(c.itemUid, c.number, c.preferredSupplierName)}</td>
+              </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table></div>
+    </section>`;
+}
+
+function pickConflictButtons(itemUid, number, preferredName) {
+  return `<button class="btn small primary cart-use-preferred" type="button" data-item="${esc(itemUid)}"
+            data-number="${esc(number ?? "")}" data-preferred="${esc(preferredName ?? "")}"
+            title="Clear the earlier pick; the item goes to its preferred supplier">Use ${esc(preferredName ?? "preferred")}</button>
+          <button class="btn small cart-keep-pick" type="button" data-item="${esc(itemUid)}"
+            title="Keep the earlier pick and stop warning about it">Keep</button>`;
+}
+
+function wirePickConflictButtons(root) {
+  root.querySelectorAll(".cart-use-preferred").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const ok = confirm(
+        `Move ${b.dataset.number || "this item"} to ${b.dataset.preferred || "its preferred supplier"}?\n\n` +
+          "The earlier pick is cleared for this item only. A quantity you typed for it comes with it " +
+          "(a split's separate quantities do not).",
+      );
+      if (!ok) return;
+      b.disabled = true;
+      try {
+        await fetchJson("/api/insights/cart/use-preferred", {
+          method: "POST",
+          body: JSON.stringify({ itemUid: b.dataset.item }),
+        });
+        cartData = await fetchJson(withWindow("/api/insights/cart"));
+        drawCart();
+      } catch (err) {
+        b.disabled = false;
+        alert(err.message);
+      }
+    }),
+  );
+  root.querySelectorAll(".cart-keep-pick").forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        await fetchJson("/api/insights/cart/keep-pick", {
+          method: "POST",
+          body: JSON.stringify({ itemUid: b.dataset.item }),
+        });
+        cartData = await fetchJson(withWindow("/api/insights/cart"));
+        drawCart();
+      } catch (err) {
+        b.disabled = false;
+        alert(err.message);
+      }
+    }),
+  );
+}
+
+/** Items taken off this order, each one click from coming back. */
+function cartRemovedItems(d) {
+  if (!d.removedItems?.length) return "";
+  return `
+    <section class="panel cart-decided">
+      <h2>Taken off this order — ${qty(d.removedItems.length)} item${d.removedItems.length === 1 ? "" : "s"}</h2>
+      <p class="hint">These need an order but were taken off this one. Put back returns an item exactly as it
+      was — the same supplier, and any quantity you typed.</p>
+      <div class="table-wrap"><table>
+        <tbody>
+          ${d.removedItems
+            .map(
+              (x) => `<tr>
+                <td><strong>${esc(x.number ?? "—")}</strong><br />
+                  <span class="muted">${esc(x.name ?? "")}</span></td>
+                <td><button class="btn small cart-put-back" data-item="${esc(x.itemUid)}" type="button">Put back</button></td>
+              </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table></div>
+    </section>`;
 }
 
 /** One supplier, one conversation. Collapsed until you are working on it. */
@@ -4163,6 +4370,7 @@ function cartSupplierCard(g) {
   // Cards are collapsed by default, so anything needing a decision has to be
   // countable from the outside or nobody opens the card to find it.
   const kitClashes = g.lines.filter((l) => l.kitDoubleOrder).length;
+  const earlierPicks = g.lines.filter((l) => l.conflict && !l.conflict.acknowledged && !l.isPreferred).length;
 
   return `
     <section class="panel cart-supplier ${open ? "is-open" : ""}" data-supplier="${esc(g.supplierUid)}">
@@ -4175,6 +4383,7 @@ function cartSupplierCard(g) {
         <span class="cart-head-stats">
           ${flagged ? `<span class="badge warn" title="${flagged} line(s) also sit under another supplier">${flagged} to decide</span>` : ""}
           ${kitClashes ? `<span class="badge warn" title="${kitClashes} line(s) order a kit and something it is made of at the same time">${kitClashes} kit + parts</span>` : ""}
+          ${earlierPicks ? `<span class="badge warn" title="${earlierPicks} item(s) here were picked earlier and are not with their preferred supplier">${earlierPicks} not preferred</span>` : ""}
           <span>${qty(g.itemCount)} line${g.itemCount === 1 ? "" : "s"}</span>
           <strong>${money(g.estimatedCost)}</strong>
           <span class="cart-caret">${open ? "▾" : "▸"}</span>
@@ -4218,23 +4427,50 @@ function cartLineRow(g, l) {
           : "";
 
   /*
-   * The badge must be obvious at a glance in every bucket, without hovering —
-   * that is what stops the same item being ordered twice. Its wording follows
-   * the state: "also under" describes a live duplicate, and saying that after
-   * the choice has been made would keep raising an alarm that has been dealt
-   * with.
+   * Why the item is under this supplier, readable without hovering. Normally
+   * it is the preferred supplier from the item page. MYOB's supplier or the
+   * past supplier appear only when no preferred supplier is set; anything else
+   * is an earlier pick, explained by the warning beside it.
    */
+  const c = l.conflict;
+  const sourceChip =
+    l.supplierUid === "none"
+      ? ""
+      : l.isPreferred
+        ? '<span class="badge ok" title="Preferred supplier, set on the item page">Preferred</span>'
+        : l.preferredSupplierUid
+          ? ""
+          : l.supplierSource === "myob"
+            ? '<span class="badge idle" title="No preferred supplier is set; MYOB names this supplier as primary">MYOB supplier</span>'
+            : l.supplierSource === "inferred"
+              ? '<span class="badge idle" title="No preferred supplier is set; this supplier has billed the item most">Past supplier</span>'
+              : l.supplierSource === "picked"
+                ? '<span class="badge idle" title="Chosen here earlier; this supplier is no longer on file for the item">Picked earlier</span>'
+                : '<span class="badge idle" title="Recorded on the item page but not marked preferred">On item page</span>';
+  const pickChip =
+    c && !l.isPreferred
+      ? c.acknowledged
+        ? `<span class="badge idle" title="${esc(pickReason(c))} Kept on purpose.">kept over ${esc(c.preferredSupplierName ?? "preferred")}</span>`
+        : `<span class="badge warn" title="${esc(pickReason(c))}">preferred is ${esc(c.preferredSupplierName ?? "another supplier")}</span>
+           ${pickConflictButtons(l.itemUid, l.number, c.preferredSupplierName)}`
+      : "";
+
+  /*
+   * "also under" is the duplicate alarm and appears only for a real duplicate.
+   * Otherwise the same button opens the comparison with every supplier on file.
+   */
+  const optionCount = (l.options ?? []).length;
   const others = l.supplierCount - 1;
   const badgeText =
     l.state === "split"
-      ? `split across ${l.supplierCount} suppliers`
-      : l.state === "selected"
-        ? `chosen over ${others} other${others === 1 ? "" : "s"}`
-        : `also under ${others} other${others === 1 ? "" : "s"}`;
-  const alsoUnder = l.supplierCount > 1
+      ? `split across ${l.supplierCount} supplier${l.supplierCount === 1 ? "" : "s"}`
+      : undecided
+        ? `also under ${others} other${others === 1 ? "" : "s"}`
+        : `compare ${optionCount} suppliers`;
+  const alsoUnder = optionCount > 1 || l.supplierCount > 1
     ? `<button class="badge ${undecided ? "warn" : "idle"} cart-compare" type="button"
          data-item="${esc(l.itemUid)}" data-number="${esc(l.number ?? "")}"
-         title="Compare all ${l.supplierCount} suppliers for this item">${badgeText}</button>`
+         title="Compare every supplier on file for this item">${badgeText}</button>`
     : "";
 
   /*
@@ -4249,22 +4485,25 @@ function cartLineRow(g, l) {
       : "";
 
   return `
-    <tr data-item="${esc(l.itemUid)}" data-supplier="${esc(g.supplierUid)}">
+    <tr data-item="${esc(l.itemUid)}" data-supplier="${esc(g.supplierUid)}" data-state="${esc(l.state)}">
       <td>
         <a href="#/item/${esc(l.itemUid)}"><strong>${esc(l.number ?? "—")}</strong></a>
-        ${stateChip} ${alsoUnder} ${kitBadge}
+        ${sourceChip} ${stateChip} ${pickChip} ${alsoUnder} ${kitBadge}
         <br /><span class="muted">${esc(l.name ?? "")}${l.productFinish ? ` · ${esc(l.productFinish)}` : ""}</span>
       </td>
       <td class="num">
         <input class="cart-qty" type="number" step="any" min="0" value="${l.qty}"
                aria-label="Order quantity for ${esc(l.number ?? "")}" />
         ${l.qty !== l.suggestedQty ? `<br /><span class="muted" title="The platform suggested ${qty(l.suggestedQty)}">was ${qty(l.suggestedQty)}</span>` : ""}
+        ${l.qtyCarriedFrom ? `<br /><span class="muted" title="Typed while this item was under ${esc(l.qtyCarriedFrom)}; it follows the item">typed under ${esc(l.qtyCarriedFrom)}</span>` : ""}
       </td>
       <td class="num">${cost ? price(cost) : "—"}<br />
         <span class="muted">${l.lastCost != null ? "last paid" : "average"}</span></td>
       <td class="num">${money(l.qty * cost)}</td>
       <td class="cart-why">${cartRationale(l)}</td>
-      <td class="num"><button class="tag-x cart-remove" type="button" title="Remove this line from ${esc(g.supplierName)}">×</button></td>
+      <td class="num"><button class="tag-x cart-remove" type="button" title="${
+        l.state === "split" && l.supplierCount > 1 ? `Remove ${esc(g.supplierName)} from this split` : "Take this item off this order"
+      }">×</button></td>
     </tr>`;
 }
 
@@ -4302,10 +4541,22 @@ function wireCartCards() {
     if (qtyInput) {
       // Save on blur rather than per keystroke: Allied are typing a considered
       // number, not searching, and a request per digit would fight them.
+      //
+      // Only a changed number is saved, and a Chosen or Split line keeps its
+      // state. Clicking in and out of the box used to save it as a plain edit,
+      // which quietly undid the choice it belonged to.
       qtyInput.addEventListener("blur", async () => {
+        // An emptied or unreadable box puts the saved number back rather than
+        // saving 0, which would quietly order none. Typing 0 still saves.
+        if (qtyInput.value.trim() === "" || qtyInput.validity.badInput) {
+          qtyInput.value = qtyInput.defaultValue;
+          return;
+        }
         const value = Number(qtyInput.value);
         if (!Number.isFinite(value) || value < 0) return;
-        await saveCartLine({ itemUid, supplierUid, qty: value, state: "edited" });
+        if (value === Number(qtyInput.defaultValue)) return;
+        const decided = tr.dataset.state === "selected" || tr.dataset.state === "split";
+        await saveCartLine({ itemUid, supplierUid, qty: value, ...(decided ? {} : { state: "edited" }) });
       });
       qtyInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") qtyInput.blur();
@@ -4315,20 +4566,48 @@ function wireCartCards() {
     const remove = tr.querySelector(".cart-remove");
     if (remove)
       remove.addEventListener("click", async () => {
-        await saveCartLine({ itemUid, supplierUid, state: "removed" });
+        // A split loses just this part. Anything else leaves the order whole:
+        // striking only the line in view would move the item to its next
+        // supplier rather than take it off.
+        const line = cartLine(itemUid, supplierUid);
+        if (tr.dataset.state === "split" && (line?.supplierCount ?? 1) > 1) {
+          await saveCartLine({ itemUid, supplierUid, state: "removed" });
+          return;
+        }
+        try {
+          await fetchJson("/api/insights/cart/take-off", {
+            method: "POST",
+            body: JSON.stringify({ itemUid }),
+          });
+          cartData = await fetchJson(withWindow("/api/insights/cart"));
+          drawCart();
+        } catch (err) {
+          alert(err.message);
+        }
       });
 
     const compare = tr.querySelector(".cart-compare");
     if (compare)
       compare.addEventListener("click", () => {
-        // Entering from a bucket queues the rest too, so a decision made here
-        // can roll straight into the next one.
-        if (!decisionQueue.includes(itemUid)) {
+        // Entering from a duplicate queues the other duplicates too, so a
+        // decision made here can roll straight into the next one. An item
+        // that is already settled just opens its comparison.
+        const line = cartLine(itemUid, supplierUid);
+        const undecidedHere =
+          line && line.supplierCount > 1 && line.state !== "selected" && line.state !== "split";
+        if (!undecidedHere) decisionQueue = [];
+        else if (!decisionQueue.includes(itemUid)) {
           decisionQueue = [itemUid, ...buildDecisionQueue().filter((u) => u !== itemUid)];
         }
         openSupplierCompare(itemUid, compare.dataset.number);
       });
   });
+}
+
+function cartLine(itemUid, supplierUid) {
+  for (const g of cartData.suppliers)
+    for (const l of g.lines) if (l.itemUid === itemUid && (!supplierUid || l.supplierUid === supplierUid)) return l;
+  return null;
 }
 
 async function saveCartLine(body) {
@@ -4352,12 +4631,19 @@ async function saveCartLine(body) {
 let decisionQueue = [];
 
 function openSupplierCompare(itemUid, number) {
-  const rows = [];
-  for (const g of cartData.suppliers)
-    for (const l of g.lines) if (l.itemUid === itemUid) rows.push({ g, l });
-  if (!rows.length) return;
+  /*
+   * Every supplier on file for the item travels with its line, so the
+   * comparison no longer depends on the item sitting in several buckets at
+   * once — it is listed under one supplier, and the others are offered here.
+   */
+  const first = cartLine(itemUid);
+  const rows = first?.options ?? [];
+  if (!first || !rows.length) {
+    // Never leave the drawer showing an item that is no longer on the order.
+    closeDrawer();
+    return;
+  }
 
-  const first = rows[0].l;
   /*
    * Badge a winner only when there is exactly one. Three suppliers all marked
    * "fastest" at one day tells the reader nothing and makes the badge look
@@ -4369,8 +4655,19 @@ function openSupplierCompare(itemUid, number) {
     const best = Math.min(...clean);
     return clean.filter((v) => v === best).length === 1 ? best : null;
   };
-  const cheapest = uniqueBest(rows.map((r) => r.l.lastCost ?? r.l.averageCost ?? null));
-  const fastest = uniqueBest(rows.map((r) => r.l.leadTimeDays));
+  const costOf = (o) => o.lastCost ?? first.averageCost ?? null;
+  const cheapest = uniqueBest(rows.map(costOf));
+  const fastest = uniqueBest(rows.map((o) => o.leadTimeDays));
+  const sourceLabel = (o) =>
+    o.isPreferred
+      ? "Preferred on the item page"
+      : o.source === "allied"
+        ? "Also recorded on the item page"
+        : o.source === "myob"
+          ? "MYOB primary supplier"
+          : o.source === "picked"
+            ? "Chosen here earlier; no longer on file for this item"
+            : "Has billed this item most";
 
   const body = `
     <div class="compare-head">
@@ -4385,40 +4682,42 @@ function openSupplierCompare(itemUid, number) {
         ${first.coverWeeks != null ? `<span><strong>${coverValue(first.coverWeeks)}</strong> ${coverUnitWord(first.coverWeeks)} cover</span>` : ""}
       </div>
     </div>
+    ${
+      first.conflict && !first.conflict.acknowledged
+        ? `<div class="notice warn">${esc(pickReason(first.conflict))}</div>`
+        : ""
+    }
 
     <div class="table-wrap">
       <table>
         <thead><tr><th>Supplier</th><th class="num">Unit cost</th><th class="num">Lead time</th>
-          <th class="num">Suggested qty</th><th class="num">Est cost</th><th></th></tr></thead>
+          <th class="num">Qty</th><th class="num" title="At the suggested quantity, so suppliers compare like for like">Est cost</th><th></th></tr></thead>
         <tbody>
           ${rows
-            .map(({ g, l }) => {
-              const cost = l.lastCost ?? l.averageCost ?? 0;
+            .map((o) => {
+              const cost = costOf(o) ?? 0;
               const isCheapest = cheapest != null && cost === cheapest;
-              const isFastest = fastest != null && l.leadTimeDays === fastest;
+              const isFastest = fastest != null && o.leadTimeDays === fastest;
               return `<tr>
-                <td><strong>${esc(g.supplierName)}</strong>
-                  ${g.region ? `<span class="chip">${esc(g.region)}</span>` : ""}
-                  ${l.state === "split" ? '<span class="badge ok">In the split</span>' : ""}
-                  <br /><span class="muted">${
-                    l.supplierSource === "allied" ? "Tagged by Allied"
-                    : l.supplierSource === "myob" ? "MYOB primary supplier"
-                    : "Inferred from purchase history"
-                  }</span></td>
+                <td><strong>${esc(o.supplierName ?? "—")}</strong>
+                  ${o.region ? `<span class="chip">${esc(o.region)}</span>` : ""}
+                  ${o.isPreferred ? '<span class="badge ok">Preferred</span>' : ""}
+                  ${o.inCart ? (o.state === "split" ? '<span class="badge ok">In the split</span>' : '<span class="badge brand">On this order</span>') : ""}
+                  <br /><span class="muted">${sourceLabel(o)}</span></td>
                 <td class="num">${cost ? price(cost) : "—"} ${isCheapest ? '<span class="badge ok">cheapest</span>' : ""}</td>
                 <td class="num">${
-                  l.leadTimeDays == null
+                  o.leadTimeDays == null
                     ? '<span class="muted">unknown</span>'
-                    : `${l.leadTimeDays} ${l.leadTimeDays === 1 ? "day" : "days"} ${isFastest ? '<span class="badge ok">fastest</span>' : ""}
-                       <br /><span class="muted" title="Same-day order/bill pairs are ignored — they record paperwork, not a wait">from ${l.leadTimeOrders} order${l.leadTimeOrders === 1 ? "" : "s"}${
-                         l.leadTimeSameDayExcluded ? `, ${l.leadTimeSameDayExcluded} same-day ignored` : ""
-                       }</span>`
+                    : `${o.leadTimeDays} ${o.leadTimeDays === 1 ? "day" : "days"} ${isFastest ? '<span class="badge ok">fastest</span>' : ""}
+                       <br /><span class="muted" title="Same-day order/bill pairs are ignored — they record paperwork, not a wait">${
+                         o.leadTimeSetByAllied ? "set by Allied" : `from ${o.leadTimeOrders} order${o.leadTimeOrders === 1 ? "" : "s"}`
+                       }${o.leadTimeSameDayExcluded ? `, ${o.leadTimeSameDayExcluded} same-day ignored` : ""}</span>`
                 }</td>
-                <td class="num"><input class="cmp-qty" type="number" step="any" min="0" value="${l.qty}"
-                     data-supplier="${esc(g.supplierUid)}" aria-label="Quantity from ${esc(g.supplierName)}" /></td>
-                <td class="num">${money(l.qty * cost)}</td>
-                <td><button class="btn small cmp-choose" data-supplier="${esc(g.supplierUid)}" type="button"
-                      title="Order the whole quantity from ${esc(g.supplierName)} and drop the others">Choose</button></td>
+                <td class="num"><input class="cmp-qty" type="number" step="any" min="0" value="${o.inCart ? o.qty : 0}"
+                     data-supplier="${esc(o.supplierUid)}" aria-label="Quantity from ${esc(o.supplierName ?? "")}" /></td>
+                <td class="num">${money(first.suggestedQty * cost)}</td>
+                <td><button class="btn small cmp-choose" data-supplier="${esc(o.supplierUid)}" type="button"
+                      title="Order the whole quantity from ${esc(o.supplierName ?? "")}">Choose</button></td>
               </tr>`;
             })
             .join("")}
@@ -4427,12 +4726,14 @@ function openSupplierCompare(itemUid, number) {
     </div>
 
     <div class="compare-actions">
-      <p class="hint">Choosing one supplier removes this item from the others in a single action.
-      To buy from more than one on purpose, set the quantities above and record it as a split — the
-      order sheets will show it as intentional rather than a duplicate.</p>
+      <p class="hint">The item is ordered from its preferred supplier unless you choose another here. A choice
+      made here is kept even if the preferred supplier changes later — the Order list will point out the
+      difference. To buy from more than one on purpose, set the quantities above and record it as a split.</p>
       <!-- Splitting by hand across several boxes is exactly where a quantity
            goes missing or gets counted twice, so the arithmetic is done here
-           and shown live rather than left to the person typing. -->
+           and shown live rather than left to the person typing. Only the
+           supplier the item is on the order from starts with a quantity, so
+           a split begins from the real order rather than a double one. -->
       <div class="split-tally" id="split-tally"></div>
       <button class="btn" id="cmp-split" type="button">Record as a deliberate split</button>
     </div>`;
@@ -4488,7 +4789,10 @@ function openSupplierCompare(itemUid, number) {
   const skip = document.getElementById("cmp-skip");
   if (skip)
     skip.addEventListener("click", () => {
-      const next = decisionQueue[pos + 1];
+      // From the live queue, not the one captured when the drawer opened.
+      const live = new Set(buildDecisionQueue());
+      decisionQueue = decisionQueue.filter((u) => live.has(u) || u === itemUid);
+      const next = decisionQueue[decisionQueue.indexOf(itemUid) + 1];
       if (next) openSupplierCompare(next, null);
     });
 
@@ -4664,7 +4968,7 @@ function cartDecisionsMade(d) {
     <section class="panel cart-decided">
       <h2>Decided — ${qty(d.decisions.length)} item${d.decisions.length === 1 ? "" : "s"}</h2>
       <p class="hint">These are settled and will export cleanly. Undo puts an item back
-      under every supplier it is available from.</p>
+      under its preferred supplier, or the supplier MYOB names if none is set.</p>
       <div class="table-wrap"><table>
         <thead><tr><th>Item</th><th>Decision</th><th class="num">Qty</th><th></th></tr></thead>
         <tbody>
@@ -4702,6 +5006,15 @@ async function afterCartDecision(itemUid) {
   const at = decisionQueue.indexOf(itemUid);
   decisionQueue = decisionQueue.filter((u) => u !== itemUid);
   drawCart();
+  // Not part of a run of decisions (a settled item opened to compare): done.
+  if (at < 0) {
+    closeDrawer();
+    return;
+  }
+  // Keep only items still waiting for a decision: one may have been settled or
+  // taken off while the queue was open.
+  const live = new Set(buildDecisionQueue());
+  decisionQueue = decisionQueue.filter((u) => live.has(u));
 
   const next = decisionQueue[at] ?? decisionQueue[0];
   if (next) {

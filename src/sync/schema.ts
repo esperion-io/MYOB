@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { getPool } from "../db.js";
 import { BUSINESS_TODAY_SQL } from "../insights/businessDate.js";
 
@@ -1026,6 +1027,73 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_adjustments_date ON myob_adjustments (date)`,
   `CREATE INDEX IF NOT EXISTS idx_bom_component ON platform_bom (component_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_items_number ON myob_items (number)`,
+
+  /*
+   * ---- Rollback safety for the preferred-supplier Order list fix ----------
+   *
+   * Allied's preferred suppliers and the choices they have made in the cart are
+   * decisions nothing can rebuild, so they are backed up before the release
+   * that changes how the Order list reads them. A backup is a set of plain
+   * copies — platform_backup_<name>_<table> — registered here with the row
+   * count of each copy, so a copy that was later altered or re-taken is
+   * detected rather than trusted.
+   *
+   * The pre-fix backup is taken once, on the first boot of that release on the
+   * production server (see takeBootBackup below), never by a local run.
+   * scripts/supplier-rollback.mjs takes further snapshots on demand and
+   * restores from any of them. Additive only — no existing table is altered,
+   * so the previous release still runs against the same database.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_backups (
+    name TEXT PRIMARY KEY,
+    taken_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    note TEXT,
+    detail JSONB
+  )`,
+  `ALTER TABLE platform_backups ADD COLUMN IF NOT EXISTS detail JSONB`,
+
+  /*
+   * Allied took an item off this order with ×. One row per item rather than a
+   * strike against each supplier: the item stays off whatever suppliers are on
+   * file later, and putting it back restores its saved decisions untouched.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_cart_item_off (
+    item_uid TEXT PRIMARY KEY,
+    taken_off_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by TEXT
+  )`,
+
+  /*
+   * Every change to an item's suppliers or its cart decisions, with the state
+   * before and after. The backup above covers "put it back as it was before
+   * the fix"; this covers "undo that one change", for every change made since.
+   * There is no user identity behind the shared dashboard key, so changed_by
+   * records the route rather than a person.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_change_log (
+    id BIGSERIAL PRIMARY KEY,
+    entity TEXT NOT NULL,
+    item_uid TEXT,
+    action TEXT NOT NULL,
+    before JSONB,
+    after JSONB,
+    detail JSONB,
+    changed_by TEXT,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_change_log_item ON platform_change_log (item_uid, changed_at DESC)`,
+
+  /*
+   * Allied's "keep my earlier pick" on an item whose cart choice disagrees with
+   * its preferred supplier. Keyed by the preferred supplier at the time, so the
+   * warning returns by itself if the preferred supplier changes again. Cleared
+   * whenever the item's cart decision changes.
+   */
+  `CREATE TABLE IF NOT EXISTS platform_cart_pick_ack (
+    item_uid TEXT PRIMARY KEY,
+    preferred_supplier_uid TEXT NOT NULL,
+    acked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
 ];
 
 let ready: Promise<void> | null = null;
@@ -1038,10 +1106,96 @@ export async function ensureInsightsSchema(): Promise<void> {
         for (const statement of DDL) {
           await client.query(statement);
         }
+        await takeBootBackup(client);
       } finally {
         client.release();
       }
     })();
   }
   await ready;
+}
+
+/** The decision tables a backup copies, by the suffix their copies carry. */
+export const BACKUP_TABLES: Record<string, string> = {
+  item_suppliers: "platform_item_suppliers",
+  item_no_supplier: "platform_item_no_supplier",
+  purchase_cart: "platform_purchase_cart",
+  cart_pick_ack: "platform_cart_pick_ack",
+  cart_item_off: "platform_cart_item_off",
+};
+
+/**
+ * Freeze Allied's decisions before the preferred-supplier release first runs.
+ *
+ * Production only: Render sets RENDER=true, so a local run — even one pointed
+ * at the live database — never takes it and cannot make it stale. Taken once:
+ * the registry row is the guard, so if a copy is later dropped it is reported,
+ * not silently re-taken from data that has moved on. All copies come from one
+ * REPEATABLE READ snapshot, so they agree with each other even while the old
+ * release is still serving during the deploy. Each copy is registered with its
+ * row count and a checksum of its rows.
+ *
+ * No backup, no release: if it cannot be taken, boot fails, so the deploy
+ * fails and the previous release keeps serving. The usual cause is copies
+ * left behind without a registry row; resolve those deliberately first.
+ */
+async function takeBootBackup(client: PoolClient): Promise<void> {
+  if (process.env.RENDER !== "true" && process.env.TAKE_BOOT_BACKUP !== "1") return;
+  const name = "pre_preferred_fix";
+  const exists = await client.query(`SELECT 1 FROM platform_backups WHERE name = $1`, [name]);
+  if (exists.rows.length) {
+    const missing: string[] = [];
+    for (const suffix of Object.keys(BACKUP_TABLES)) {
+      const t = await client.query(`SELECT to_regclass($1) IS NOT NULL AS ok`, [`platform_backup_${name}_${suffix}`]);
+      if (!t.rows[0].ok) missing.push(suffix);
+    }
+    if (missing.length)
+      console.warn(`Backup ${name} is registered but its copies of ${missing.join(", ")} are missing; not re-taking it.`);
+    return;
+  }
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+    const again = await client.query(`SELECT 1 FROM platform_backups WHERE name = $1 FOR UPDATE`, [name]);
+    if (again.rows.length) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    const counts: Record<string, number> = {};
+    const checksums: Record<string, string | null> = {};
+    for (const [suffix, table] of Object.entries(BACKUP_TABLES)) {
+      const copy = `platform_backup_${name}_${suffix}`;
+      await client.query(`CREATE TABLE ${copy} AS SELECT * FROM ${table}`);
+      const c = await client.query(
+        `SELECT COUNT(*)::int AS n, md5(string_agg(t::text, '|' ORDER BY t::text)) AS sum FROM ${copy} t`,
+      );
+      counts[suffix] = c.rows[0].n;
+      checksums[suffix] = c.rows[0].sum;
+    }
+    await client.query(
+      `INSERT INTO platform_backups (name, note, detail) VALUES ($1, $2, $3)`,
+      [
+        name,
+        "Supplier assignments, no-supplier rulings and cart decisions as they stood before the Order list followed the preferred supplier",
+        JSON.stringify({
+          counts,
+          checksums,
+          takenBy: "boot",
+          commit: process.env.RENDER_GIT_COMMIT ?? null,
+          instance: process.env.RENDER_INSTANCE_ID ?? null,
+        }),
+      ],
+    );
+    await client.query("COMMIT");
+    console.log(`Backup ${name} taken: ${JSON.stringify(counts)}`);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    // A second instance booting at the same moment loses the race harmlessly:
+    // the other one registered the backup. Anything else stops the release.
+    const taken = await client.query(`SELECT 1 FROM platform_backups WHERE name = $1`, [name]);
+    if (!taken.rows.length)
+      throw new Error(
+        `Refusing to start: the ${name} backup could not be taken (${err instanceof Error ? err.message : String(err)}). ` +
+          `Check for platform_backup_${name}_* tables left without a platform_backups row.`,
+      );
+  }
 }

@@ -2,6 +2,8 @@ import { businessToday } from "./businessDate.js";
 import { config } from "../config.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
+import type { PoolClient } from "pg";
+import { inTransaction, logChange, supplierStateOf } from "./changeLog.js";
 import {
   applyKitRules,
   deepBuildable,
@@ -2116,6 +2118,13 @@ export async function itemSuppliers(itemUid: string) {
     ),
   ]);
   if (!item.rows.length) return null;
+  // While ruled "no supplier", say which supplier Undo would make preferred again.
+  if (item.rows[0].ruled_no_supplier) {
+    const prior = await preferredUnmarkedByRuling(pool, itemUid);
+    item.rows[0].prior_preferred_uid = prior;
+    item.rows[0].prior_preferred_name =
+      (prior && assigned.rows.find((a) => a.supplier_uid === prior)?.supplier_name) ?? null;
+  }
 
   const withRegion = (r: Record<string, unknown>) => ({
     ...r,
@@ -2155,9 +2164,8 @@ export async function setItemSupplier(
   if (!Number(exists.rows[0].item)) throw new Error("Item not found in synced data.");
   if (!Number(exists.rows[0].supplier)) throw new Error("Supplier not found in synced data.");
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  await inTransaction(pool, async (client) => {
+    const before = await supplierStateOf(client, itemUid);
     // Only one preferred supplier per item (a partial unique index enforces it).
     if (patch.isPreferred) {
       await client.query(
@@ -2197,13 +2205,15 @@ export async function setItemSupplier(
         patch.notes !== undefined,
       ],
     );
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+    await logChange(client, {
+      entity: "item_supplier",
+      itemUid,
+      action: patch.isPreferred ? "make_preferred" : "set_supplier",
+      before,
+      after: await supplierStateOf(client, itemUid),
+      detail: { supplierUid, patch },
+    });
+  });
   invalidateItemsCache();
 }
 
@@ -2224,34 +2234,80 @@ export async function setItemNoSupplier(
   const exists = await pool.query(`SELECT 1 FROM myob_items WHERE uid = $1`, [itemUid]);
   if (!exists.rows.length) throw new Error("Item not found in synced data.");
 
-  if (!ruled) {
-    await pool.query(`DELETE FROM platform_item_no_supplier WHERE item_uid = $1`, [itemUid]);
-    invalidateItemsCache();
-    return;
-  }
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(
-      `UPDATE platform_item_suppliers SET is_preferred = FALSE, updated_at = NOW()
-       WHERE item_uid = $1 AND is_preferred`,
-      [itemUid],
-    );
-    await client.query(
-      `INSERT INTO platform_item_no_supplier (item_uid, reason, set_by, set_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (item_uid) DO UPDATE SET
-         reason = EXCLUDED.reason, set_by = EXCLUDED.set_by, set_at = NOW()`,
-      [itemUid, opts.reason?.trim().slice(0, 500) || null, opts.setBy?.trim().slice(0, 100) || null],
-    );
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+  await inTransaction(pool, async (client) => {
+    const before = await supplierStateOf(client, itemUid);
+    let restoredPreferred: string | null = null;
+    if (!ruled) {
+      /*
+       * Lifting the ruling puts back the preferred supplier it unmarked, so
+       * "No supplier" followed by Undo leaves the item exactly as it was rather
+       * than quietly falling back to MYOB's supplier. Only if that supplier is
+       * still on file and nothing has been made preferred since. Looked up
+       * before the ruling goes, because the ruling is what identifies it.
+       */
+      restoredPreferred = await preferredUnmarkedByRuling(client, itemUid);
+      await client.query(`DELETE FROM platform_item_no_supplier WHERE item_uid = $1`, [itemUid]);
+      if (restoredPreferred && !before.suppliers.some((s) => s.is_preferred)) {
+        const r = await client.query(
+          `UPDATE platform_item_suppliers SET is_preferred = TRUE, updated_at = NOW()
+           WHERE item_uid = $1 AND supplier_uid = $2`,
+          [itemUid, restoredPreferred],
+        );
+        if (!r.rowCount) restoredPreferred = null;
+      } else {
+        restoredPreferred = null;
+      }
+    } else {
+      await client.query(
+        `UPDATE platform_item_suppliers SET is_preferred = FALSE, updated_at = NOW()
+         WHERE item_uid = $1 AND is_preferred`,
+        [itemUid],
+      );
+      // Ruling an item that is already ruled keeps the original reason and
+      // date: they are Allied's record of when and why, not this click's.
+      await client.query(
+        `INSERT INTO platform_item_no_supplier (item_uid, reason, set_by, set_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (item_uid) DO NOTHING`,
+        [itemUid, opts.reason?.trim().slice(0, 500) || null, opts.setBy?.trim().slice(0, 100) || null],
+      );
+    }
+    await logChange(client, {
+      entity: "item_supplier",
+      itemUid,
+      action: ruled ? "rule_no_supplier" : "lift_no_supplier",
+      before,
+      after: await supplierStateOf(client, itemUid),
+      detail: { reason: opts.reason ?? null, restoredPreferred },
+    });
+  });
   invalidateItemsCache();
+}
+
+/**
+ * The supplier that was preferred when the item's current no-supplier ruling
+ * was made, from the change log. Null for rulings made before the log existed
+ * (the September sheet), or where nothing was preferred at the time.
+ */
+async function preferredUnmarkedByRuling(
+  db: Pick<PoolClient, "query">,
+  itemUid: string,
+): Promise<string | null> {
+  // Only the entry that made THIS ruling counts: same set_at. After a restore
+  // or a lift-and-rule-again, an older entry describes a different ruling.
+  const ruling = await db.query(`SELECT set_at FROM platform_item_no_supplier WHERE item_uid = $1`, [itemUid]);
+  const setAt = ruling.rows[0]?.set_at ? new Date(ruling.rows[0].set_at as string).toISOString() : null;
+  if (!setAt) return null;
+  const r = await db.query(
+    `SELECT before FROM platform_change_log
+     WHERE entity = 'item_supplier' AND item_uid = $1 AND action = 'rule_no_supplier'
+       AND (before->'ruledNone') = 'null'::jsonb
+       AND after->'ruledNone'->>'set_at' = $2
+     ORDER BY id DESC LIMIT 1`,
+    [itemUid, setAt],
+  );
+  const suppliers = (r.rows[0]?.before?.suppliers ?? []) as { supplier_uid: string; is_preferred: boolean }[];
+  return suppliers.find((s) => s.is_preferred)?.supplier_uid ?? null;
 }
 
 export async function removeItemSupplier(
@@ -2259,10 +2315,21 @@ export async function removeItemSupplier(
   supplierUid: string,
 ): Promise<void> {
   await ensureInsightsSchema();
-  await getPool().query(
-    `DELETE FROM platform_item_suppliers WHERE item_uid = $1 AND supplier_uid = $2`,
-    [itemUid, supplierUid],
-  );
+  await inTransaction(getPool(), async (client) => {
+    const before = await supplierStateOf(client, itemUid);
+    await client.query(
+      `DELETE FROM platform_item_suppliers WHERE item_uid = $1 AND supplier_uid = $2`,
+      [itemUid, supplierUid],
+    );
+    await logChange(client, {
+      entity: "item_supplier",
+      itemUid,
+      action: "remove_supplier",
+      before,
+      after: await supplierStateOf(client, itemUid),
+      detail: { supplierUid },
+    });
+  });
   invalidateItemsCache();
 }
 
@@ -2856,13 +2923,27 @@ export async function applySupplierSuggestions(opts?: {
       return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},NOW())`;
     })
     .join(",");
-  const res = await pool.query(
-    `INSERT INTO platform_item_suppliers
-       (item_uid, supplier_uid, is_preferred, notes, updated_at)
-     VALUES ${tuples}
-     ON CONFLICT (item_uid, supplier_uid) DO NOTHING`,
-    values,
-  );
+  // The rows actually inserted are logged, so a bulk seed can be taken back out
+  // exactly — existing rows are never touched by it, so only these can differ.
+  const res = await inTransaction(pool, async (client) => {
+    const inserted = await client.query(
+      `INSERT INTO platform_item_suppliers
+         (item_uid, supplier_uid, is_preferred, notes, updated_at)
+       VALUES ${tuples}
+       ON CONFLICT (item_uid, supplier_uid) DO NOTHING
+       RETURNING item_uid, supplier_uid, is_preferred`,
+      values,
+    );
+    await logChange(client, {
+      entity: "item_supplier",
+      itemUid: null,
+      action: "apply_suggestions",
+      before: null,
+      after: null,
+      detail: { inserted: inserted.rows },
+    });
+    return inserted;
+  });
   const links = res.rowCount ?? 0;
   invalidateItemsCache();
   return { items: suggestions.length, links, skippedExisting: rows.length - links };

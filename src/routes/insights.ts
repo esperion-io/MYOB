@@ -9,6 +9,10 @@ import {
   cartExport,
   purchaseCart,
   undoCartDecision,
+  keepCartPick,
+  putCartItemBack,
+  takeCartItemOff,
+  usePreferredSupplier,
   resetCart,
   selectCartSupplier,
   setCartLine,
@@ -733,7 +737,7 @@ insightsRouter.post("/supplier-regions/apply", async (_req, res) => {
 
 // ---- P5 + P6: the purchasing cart ----------------------------------------
 
-/** Items needing an order, under every supplier tagged against them. */
+/** Items needing an order, each under its preferred supplier (else the fallback). */
 insightsRouter.get("/cart", async (req, res) => {
   if (!requireDb(res)) return;
   try {
@@ -750,6 +754,10 @@ insightsRouter.post("/cart/line", async (req, res) => {
     const { itemUid, supplierUid, qty, state, note } = req.body ?? {};
     if (typeof itemUid !== "string" || typeof supplierUid !== "string") {
       res.status(400).json({ error: "itemUid and supplierUid are required." });
+      return;
+    }
+    if (qty != null && (typeof qty !== "number" || !Number.isFinite(qty) || qty < 0)) {
+      res.status(400).json({ error: "qty must be a number of zero or more." });
       return;
     }
     await setCartLine({
@@ -822,7 +830,7 @@ insightsRouter.get("/cart.csv", async (req, res) => {
   }
 });
 
-/** Reverse a supplier choice or split; the item returns to all its suppliers. */
+/** Reverse a supplier choice or split; the item returns to its preferred supplier. */
 insightsRouter.post("/cart/undo", async (req, res) => {
   if (!requireDb(res)) return;
   try {
@@ -835,6 +843,51 @@ insightsRouter.post("/cart/undo", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     send500(res, err);
+  }
+});
+
+/** One-item cart actions that take only the item uid. */
+const itemAction = (path: string, fn: (itemUid: string) => Promise<void>) =>
+  insightsRouter.post(path, async (req, res) => {
+    if (!requireDb(res)) return;
+    try {
+      const itemUid = req.body?.itemUid;
+      if (typeof itemUid !== "string" || !itemUid) {
+        res.status(400).json({ error: "itemUid is required." });
+        return;
+      }
+      await fn(itemUid);
+      res.json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json({ error: message });
+    }
+  });
+
+/** Take an item off this order, leaving its saved decisions for when it returns. */
+itemAction("/cart/take-off", takeCartItemOff);
+/** Put an item back on this order exactly as it was. */
+itemAction("/cart/put-back", putCartItemBack);
+/** Move an earlier pick to the preferred supplier, keeping any typed quantity. */
+itemAction("/cart/use-preferred", usePreferredSupplier);
+
+/**
+ * Keep an earlier pick that disagrees with the preferred supplier, and stop the
+ * warning for it. The warning returns if the preferred supplier changes again.
+ */
+insightsRouter.post("/cart/keep-pick", async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const itemUid = req.body?.itemUid;
+    if (typeof itemUid !== "string" || !itemUid) {
+      res.status(400).json({ error: "itemUid is required." });
+      return;
+    }
+    await keepCartPick(itemUid);
+    res.json({ ok: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
   }
 });
 
