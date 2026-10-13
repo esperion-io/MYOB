@@ -159,6 +159,23 @@ test("every name dashboard.js imports from a public/ module is exported by it", 
   }
 });
 
+/*
+ * The other half (1.5): a public/ module is only importable by dashboard.js
+ * and by a test if it never touches the DOM at load. Every module but the two
+ * page scripts must load under node, so order-list.js (1.5, drawn from 1.6)
+ * and release-banner.js stay testable, and a module dashboard.js starts
+ * importing later is already known to load.
+ */
+test("every public/ module except the two page scripts loads without a DOM", async () => {
+  const pub = new URL("../public/", import.meta.url);
+  const modules = readdirSync(pub).filter((f) => f.endsWith(".js") && f !== "dashboard.js" && f !== "app.js");
+  assert.ok(modules.includes("release-banner.js") && modules.includes("order-list.js"));
+  for (const f of modules) {
+    const mod = await import(new URL(f, pub).href);
+    assert.ok(Object.keys(mod).length > 0, `public/${f} exports nothing`);
+  }
+});
+
 /* ---------- the build's version check ---------- */
 
 const entry = (version: string, over: Record<string, unknown> = {}) => ({

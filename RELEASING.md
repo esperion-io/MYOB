@@ -41,6 +41,17 @@ How a change gets from a branch to Allied's screen, how to prove it moved only w
 - **`stage-check splits <after> [--before <before>]`** reads `cart.json`. On one capture it counts split items and flagged kit items and lines, and says how far each header end will move. With `--before` (1.3) on the same data it checks Δlow = Σ(sum − smallest part) and Δhigh = Σ(sum − largest part), `kit.doubleOrders` = flagged items, and that every line (walked from both captures, with `totalLines`, so a vanished $0 line fails), supplier subtotal and `estimatedCost` is unchanged.
 - **Stage 4 deploy:** before shipping, run `splits ../captures/1.4.0-before` on the prod capture. If it finds no split items, the 1.4 What's new "no figure changes" wording stands. If it finds any, write the count and the header's before/after (the 1.3 range, and the single figure it will become: `estimatedCost`) into the entry, and send Allied that before/after table as a heads-up before the deploy evening (§4.5). Then deploy as usual: `diff --allow scripts/expected/1.4.0.json` (0 not allowed), then `splits ../captures/1.4.0-after --before ../captures/1.4.0-before` (all ok).
 
+## What 1.5 changed
+
+Groundwork for the by-item Order list (1.6), shipped on its own so a defect in it can't hide inside the new view. Nothing visible changes apart from Purchasing's past-date notice.
+
+- **`/cart` gains seven additive fields.** Every line gains `qtyCommitted`, `coverWeeksInclOnOrder`, `coverBelowLeadTime` and `riskScore`, copied from the `ItemComputed` the line already reads (so on hand − committed = the line's free stock, and each equals `/items` for that item). The payload gains `window`, `hasSnapshot` and `snapshotsFrom` from the same `snapshotState` call `/items` uses (now exported from `queries.ts`), on the normal return and on the empty-cart early return. Grouping, lines, quantities, states, subtotals, the header range and `cart.csv` are untouched.
+- **Purchasing's past-date notice** now gets the snapshot flag, so `historicalNotice` says what it says on Inventory: on a day with a stored snapshot, committed and on order come from it; before 21 Aug, they are understated and the notice names the start date.
+- **One reload for the Order list.** `reloadOrderList()` in `dashboard.js` is the only place that fetches `/cart`: the first load and every write (qty edit, ×, Put back, Use preferred, Keep, Choose/Split via `afterCartDecision`, Undo; Start again goes through the first load). It redraws the active view through `drawOrderList()`, which is By supplier until 1.6. The requests each write sends are unchanged.
+- **The expand panel no longer reads Inventory's globals.** `toggleExpandRow(tr, lookup, colspan, ctx)` and `expandPanelHtml(item, ctx)` take the rows, the column count and the target cover from the caller. Inventory passes `invItems`, its header count (14) and its target cover, which is what they read before.
+- **`public/order-list.js`** exports `groupLinesByItem(cart)`: one row per item, qty and est. cost summed over its lines (a split's parts add up), options taken once, the item's stock fields carried, the 1.5 fields read with `?? null`. Not used on screen until 1.6. It is DOM-free, so `test/order-list.test.ts` imports it directly; `test/release.test.ts` now also checks that every `public/` module but the two page scripts loads without a DOM.
+- **Stage 5 deploy:** see "Stage 5 deploy" below. The snapshot is mandatory, because every Order list write now goes through the new reload.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -224,6 +235,28 @@ On the evening (pre-flight, window and steps as for any deploy):
 - [ ] After the next sync, the chip is green. **Roll back immediately (R1) if any item other than AFLSA390/490 reads below MYOB.**
 - [ ] Allied confirm in MYOB: WSBT450G = 0 and BP1675G = 11,000. Record it in Part 5.
 - [ ] Rollback note for Allied, if ever needed: days that closed while 1.2 was live keep the corrected figure, so history becomes mixed.
+
+## Stage 5 deploy: Purchasing groundwork
+
+A UI release with no visible change apart from the past-date notice. It touches the path every Order list write takes, so the snapshot comes first (§4.10). Done by Anthony: production Postgres is reached only from the Render shell.
+
+Before the evening:
+- [ ] On the refreshed local copy (`npm run dev:local`), work through every By supplier action once on 1.4 and once on 1.5, same items, and compare `platform_purchase_cart`, `platform_cart_item_off`, `platform_cart_pick_ack` and the `platform_change_log` actions: edit a qty, ×, Put back, Use preferred, Keep, Compare → Choose, Split, Undo, Start again. They must match apart from `detail.release`. Put the copy back afterwards (`Start again`, then delete the test `cart` log rows).
+
+On the evening (pre-flight and window as for any deploy):
+1. [ ] **Snapshot**, from the Render shell, before pushing:
+   ```sh
+   DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status        # note the database name it prints
+   DATABASE_URL=<prod> node scripts/supplier-rollback.mjs snapshot pre_s5_<yyyymmdd> --apply --confirm <that database name>
+   DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status        # pre_s5_<yyyymmdd> listed, no PROBLEM lines
+   ```
+   Record the snapshot name and its row counts in the 1.5.0 row of `FIX-PLAN.md` Part 5. No snapshot, no deploy.
+2. [ ] Capture before, push, wait for `release.version` = `1.5.0`, capture after, then `diff --allow scripts/expected/1.5.0.json`: 0 not allowed. Every expected entry should appear, apart from line fields when the cart is empty.
+3. [ ] `positionParity` is 0.
+4. [ ] In the browser: Purchasing looks as it did on 1.4 (same header, cards and totals). Pick a date between 21 Aug and yesterday: the notice says committed and on order come from the snapshot stored that day. Pick a date before 21 Aug: it says they are understated and that daily snapshots began on 21 Aug. On Inventory, expand a row on All items and on Below lead time (even with on order): the panel spans the whole table and quotes the target cover.
+5. [ ] Send the release note: nothing changes on screen except the past-date note.
+
+If rolled back (R1–R5): R5 is `status`, then `diff --from pre_s5_<yyyymmdd>`. Nothing needs restoring, because 1.5 writes only through the existing endpoints and states; `undo <id>` handles any single bad write.
 
 ## Snapshots and data changes
 

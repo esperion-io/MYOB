@@ -1114,9 +1114,10 @@ const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
  * cannot: MYOB records an order's status now, never when it changed, so for a
  * date with no snapshot we can only count orders still open today and the
  * figure is understated. Every view that reports an as-at position returns
- * this so the UI can say so on exactly the dates where it is true.
+ * this so the UI can say so on exactly the dates where it is true. Exported
+ * for the Order list (1.5), which reports the same provenance as Inventory.
  */
-async function snapshotState(asAt: string) {
+export async function snapshotState(asAt: string) {
   const snap = await getPool().query(
     `SELECT EXISTS (SELECT 1 FROM platform_daily_position WHERE as_at_date = $1::date) AS has_snapshot,
             MIN(as_at_date)::text AS snapshots_from

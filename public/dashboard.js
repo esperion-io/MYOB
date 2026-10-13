@@ -18,9 +18,23 @@ import { displayVersion, releaseBanner } from "./release-banner.js";
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.4.0";
+const UI_VERSION = "1.5.0";
 
 const RELEASES = [
+  {
+    version: "1.5.0",
+    // Set to the ship date. Nothing visible changes apart from the past-date
+    // note, so there is no live example to re-derive; only check that the
+    // snapshot start date the note names still reads 21 Aug.
+    date: "2026-10-14",
+    stage: "Stage 5: Purchasing groundwork",
+    changes: [
+      "Behind-the-scenes groundwork for the Order list by item, which comes in a later version. The Order list looks and works exactly as before: every quantity, supplier, button and total is unchanged, and so is the exported order sheet.",
+      "One small visible change: when you pick a past date at the top of the page, the note on Purchasing now says where its figures come from, as the one on Inventory does. On a day with a stored daily snapshot, committed and on order are the figures recorded that day. On an earlier day they are understated, and the note says when the daily snapshots began.",
+    ],
+    numbers: "None. No figure on any page changes in this version.",
+    check: "Open Purchasing: it is the same as before. Pick a past date, for example 24 Aug: the note at the top says committed and on order come from the snapshot stored that day. Pick 10 Aug: it says they are understated for that date and that daily snapshots began on 21 Aug.",
+  },
   {
     version: "1.4.0",
     // Set to the ship date. Before shipping, run stage-check splits on that
@@ -1213,9 +1227,10 @@ function historicalNotice(d) {
 
   // 1.2 corrected On order from its ship day on; closed days keep what was
   // recorded then. Said only where this view reports reading a stored
-  // snapshot: without one (or without the flag — Products, Suppliers, the
-  // Order list) On order is recomputed under the corrected rule (on the 26 Aug
-  // copy the 10 Aug Order list shows SPW12G with 0 incoming, 560 under 1.1).
+  // snapshot: without one (or without the flag — Products, Suppliers) On
+  // order is recomputed under the corrected rule (on the 26 Aug copy the
+  // 10 Aug Order list shows SPW12G with 0 incoming, 560 under 1.1). The Order
+  // list reports the flag from 1.5, so on a snapshot day it says this too.
   const onOrderFix = RELEASES.find((r) => r.version === "1.2.0")?.date ?? null;
   const beforeFix =
     onOrderFix && windowState.asAt < onOrderFix && stored
@@ -1643,7 +1658,7 @@ async function loadInventoryTable() {
   container.querySelectorAll("tr.inv-row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       if (e.target.closest("a")) return; // item-number link still navigates
-      toggleExpandRow(tr);
+      toggleExpandRow(tr, invItems, headers.length, { targetCoverWeeks: invTargetCover });
     }),
   );
   container.querySelector("#prev")?.addEventListener("click", () => {
@@ -1685,7 +1700,18 @@ function leadStockLine(r) {
     : "+ no lead-time stock (lead time not measured, no minimum set)";
 }
 
-function toggleExpandRow(tr) {
+/*
+ * Open or close the inline panel under a list row.
+ *
+ * The caller says where the row's item comes from (anything with get(uid): a
+ * Map of the rows on screen), how many columns the panel spans (its header
+ * count, so the panel is always full width) and the context the panel quotes
+ * (the target cover). It used to read Inventory's own globals for all three,
+ * so no other list could use it; the Order list's by-item view (1.6) will
+ * pass its own. Inventory passes invItems, its header count (14) and its
+ * target cover, which is what this read before, so it opens exactly as it did.
+ */
+function toggleExpandRow(tr, lookup, colspan, ctx = {}) {
   const next = tr.nextElementSibling;
   if (next?.classList.contains("expand-row")) {
     next.remove();
@@ -1693,12 +1719,12 @@ function toggleExpandRow(tr) {
     tr.querySelector(".caret").textContent = "▸";
     return;
   }
-  const item = invItems.get(tr.dataset.uid);
+  const item = lookup?.get(tr.dataset.uid);
   if (!item) return;
-  const cols = tr.closest("table")?.tHead?.rows[0]?.cells.length || tr.cells.length;
+  const cols = colspan || tr.closest("table")?.tHead?.rows[0]?.cells.length || tr.cells.length;
   tr.insertAdjacentHTML(
     "afterend",
-    `<tr class="expand-row"><td colspan="${cols}">${expandPanelHtml(item)}</td></tr>`,
+    `<tr class="expand-row"><td colspan="${cols}">${expandPanelHtml(item, ctx)}</td></tr>`,
   );
   tr.classList.add("expanded");
   tr.querySelector(".caret").textContent = "▾";
@@ -1874,8 +1900,13 @@ function kvRow(label, value, cls = "") {
   return `<div class="kv ${cls}"><span>${label}</span><span>${value}</span></div>`;
 }
 
-/** Inline detail panel, rendered instantly from the items-list payload. */
-function expandPanelHtml(i) {
+/**
+ * Inline detail panel, rendered instantly from the items-list payload.
+ * `ctx.targetCoverWeeks` is the target the cover row quotes; the caller
+ * passes it (1.5) rather than this reading Inventory's.
+ */
+function expandPanelHtml(i, ctx = {}) {
+  const targetCover = ctx.targetCoverWeeks ?? null;
   const s = i.suggestion;
   const stockValue =
     i.currentValue != null
@@ -1912,7 +1943,7 @@ function expandPanelHtml(i) {
   const demand = `
     <h3>Demand &amp; cover</h3>
     ${kvRow("Weekly demand", `${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"} <span class="muted">(${i.demand.basis === "none" ? "no activity" : i.demand.basis + " basis"})</span>`)}
-    ${kvRow(`Cover excl. on order${invTargetCover ? ` (target ${coverLabel(invTargetCover)})` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
+    ${kvRow(`Cover excl. on order${targetCover ? ` (target ${coverLabel(targetCover)})` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
     ${kvRow(`Cover incl. on order${i.leadTimeWeeks ? ` (lead ${coverLabel(i.leadTimeWeeks)})` : ""}`, coverInclFmt(i))}
     ${kvRow(`Direct sales · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.directWindow)} / ${qty(i.demand.directLong)}`)}
     ${kvRow(`Via builds · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.componentWindow)} / ${qty(i.demand.componentLong)}`)}
@@ -4622,7 +4653,25 @@ async function renderPurchasing(tab) {
     return;
   }
   main.innerHTML = '<p class="loading">Building the order list…</p>';
+  await reloadOrderList();
+}
+
+/*
+ * Fetch the Order list again and redraw the view on screen (1.5).
+ *
+ * Every write on the Order list (a typed qty, ×, Put back, Use preferred,
+ * Keep, Choose, Split, Undo) used to re-fetch /cart and call drawCart itself,
+ * in eight places. The by-item view (1.6) must redraw itself after the same
+ * writes, so they all come here and this decides which view to draw. Only
+ * By supplier exists today, so it draws that, exactly as each site did.
+ */
+async function reloadOrderList() {
   cartData = await fetchJson(withWindow("/api/insights/cart"));
+  drawOrderList();
+}
+
+/** Draw whichever Order list view is active. Only By supplier until 1.6. */
+function drawOrderList() {
   drawCart();
 }
 
@@ -4733,8 +4782,7 @@ function drawCart() {
         method: "POST",
         body: JSON.stringify({ itemUid: b.dataset.item }),
       });
-      cartData = await fetchJson(withWindow("/api/insights/cart"));
-      drawCart();
+      await reloadOrderList();
     }),
   );
   main.querySelectorAll(".cart-put-back").forEach((b) =>
@@ -4745,8 +4793,7 @@ function drawCart() {
           method: "POST",
           body: JSON.stringify({ itemUid: b.dataset.item }),
         });
-        cartData = await fetchJson(withWindow("/api/insights/cart"));
-        drawCart();
+        await reloadOrderList();
       } catch (err) {
         b.disabled = false;
         alert(err.message);
@@ -4829,8 +4876,7 @@ function wirePickConflictButtons(root) {
           method: "POST",
           body: JSON.stringify({ itemUid: b.dataset.item }),
         });
-        cartData = await fetchJson(withWindow("/api/insights/cart"));
-        drawCart();
+        await reloadOrderList();
       } catch (err) {
         b.disabled = false;
         alert(err.message);
@@ -4845,8 +4891,7 @@ function wirePickConflictButtons(root) {
           method: "POST",
           body: JSON.stringify({ itemUid: b.dataset.item }),
         });
-        cartData = await fetchJson(withWindow("/api/insights/cart"));
-        drawCart();
+        await reloadOrderList();
       } catch (err) {
         b.disabled = false;
         alert(err.message);
@@ -5099,8 +5144,7 @@ function wireCartCards() {
             method: "POST",
             body: JSON.stringify({ itemUid }),
           });
-          cartData = await fetchJson(withWindow("/api/insights/cart"));
-          drawCart();
+          await reloadOrderList();
         } catch (err) {
           alert(err.message);
         }
@@ -5133,8 +5177,7 @@ function cartLine(itemUid, supplierUid) {
 async function saveCartLine(body) {
   try {
     await fetchJson("/api/insights/cart/line", { method: "POST", body: JSON.stringify(body) });
-    cartData = await fetchJson(withWindow("/api/insights/cart"));
-    drawCart();
+    await reloadOrderList();
   } catch (err) {
     alert(err.message);
   }
@@ -5522,10 +5565,10 @@ function cartDecisionsMade(d) {
  * closes when the queue runs out.
  */
 async function afterCartDecision(itemUid) {
-  cartData = await fetchJson(withWindow("/api/insights/cart"));
+  // Redrawn before the queue is trimmed: drawing never reads the queue.
+  await reloadOrderList();
   const at = decisionQueue.indexOf(itemUid);
   decisionQueue = decisionQueue.filter((u) => u !== itemUid);
-  drawCart();
   // Not part of a run of decisions (a settled item opened to compare): done.
   if (at < 0) {
     closeDrawer();

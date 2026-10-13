@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { cartStateAll, cartStateOf, inTransaction, logChange } from "./changeLog.js";
-import { computedItems, type DemandWindow, type ItemComputed } from "./queries.js";
+import { computedItems, resolveWindow, snapshotState, type DemandWindow, type ItemComputed } from "./queries.js";
 
 /**
  * The purchasing cart (P5 + P6).
@@ -399,6 +399,19 @@ export interface CartLine {
   minLevel: number | null;
   weeklyDemand: number;
   coverWeeks: number | null;
+  /*
+   * The rest of the item's position, as Inventory shows it (1.5), so the
+   * by-item view (1.6) can show on hand, committed, free stock, on order and
+   * both covers from the cart alone. Each is copied from the computed item
+   * the line already reads, never recomputed here: committed is the item's
+   * own, so on hand − committed is the line's free stock; cover incl. on
+   * order is the 1 dp figure with its below-lead-time flag; the risk score is
+   * Inventory's, which the by-item view sorts on first.
+   */
+  qtyCommitted: number | null;
+  coverWeeksInclOnOrder: number | null;
+  coverBelowLeadTime: boolean;
+  riskScore: number;
   suggestedQty: number;
   /** Allied's number when they have set one, otherwise the suggestion. */
   qty: number;
@@ -487,10 +500,24 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
     preferredSupplierUid: string;
     preferredSupplierName: string | null;
   }[];
+  /*
+   * Which as-at date and window this cart was built for, and whether that
+   * date has a stored daily snapshot (1.5): the same three fields /items
+   * returns, from the same snapshotState call, so Purchasing's past-date
+   * notice can say where committed and on order came from, as Inventory's
+   * does. They used to be missing, so at a past date the notice said nothing
+   * about provenance and never named the date snapshots began (21 Aug, on
+   * prod and on the 26 Aug local copy). Present on the empty cart too.
+   */
+  window: DemandWindow;
+  hasSnapshot: boolean;
+  snapshotsFrom: string | null;
 }> {
   await ensureInsightsSchema();
   const pool = getPool();
-  const items = await computedItems(opts);
+  const win = resolveWindow(opts);
+  // The resolved window keys the item cache exactly as `opts` would.
+  const [items, snap] = await Promise.all([computedItems(win), snapshotState(win.asAt)]);
 
   /*
    * Items still needing a purchase order.
@@ -519,6 +546,8 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
       decisions: [],
       removedItems: [],
       pickConflicts: [],
+      window: win,
+      ...snap,
     };
   }
   const uids = needing.map((i) => i.uid);
@@ -656,6 +685,10 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         minLevel: item.minLevel,
         weeklyDemand: item.demand.weekly,
         coverWeeks: item.coverWeeks,
+        qtyCommitted: item.qtyCommitted,
+        coverWeeksInclOnOrder: item.coverWeeksInclOnOrder,
+        coverBelowLeadTime: item.coverBelowLeadTime,
+        riskScore: item.risk.score,
         suggestedQty: suggested,
         qty,
         state: s?.state ?? (carried ? "edited" : "suggested"),
@@ -784,6 +817,8 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
     decisions: [...decisions.values()],
     removedItems,
     pickConflicts,
+    window: win,
+    ...snap,
     /*
      * What the kit rules kept out of this cart, reported rather than assumed.
      * A cart that quietly holds items back is worse than one that over-orders,
