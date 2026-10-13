@@ -113,7 +113,7 @@ export const BY_ITEM_COLUMNS = [
   { key: "cover", label: "Cover excl. on order", term: "cover", sort: "cover" },
   { key: "cover_incl", label: "Cover incl. on order", term: "cover_incl", sort: "cover_incl" },
   { key: "gap", label: "Gap before delivery", term: "gap", sort: "gap" },
-  { key: "lead_time", label: "Lead time", cls: "num", sort: "lead_time", tip: "Order to delivery for the supplier this item is ordered from: Allied's figure on the item, else on the supplier, else measured from their orders." },
+  { key: "lead_time", label: "Lead time", cls: "num", sort: "lead_time", tip: "Order to delivery for the supplier this item is ordered from: Allied's figure on the item (under its usual supplier), else on the supplier, else measured from their orders." },
   { key: "est_cost", label: "Est. cost", cls: "num", sort: "est_cost", tip: "Order qty × what this supplier last charged (average cost where they have never billed it). Split parts are added together." },
   { key: "remove", label: "" },
 ];
@@ -268,7 +268,8 @@ export function qtyCell(row) {
 
 /*
  * The Lead time cell: each line's lead (the item's own figure if Allied set
- * one, else that line's supplier's), once per distinct figure, in line order.
+ * one and the line is with its usual supplier, from 1.12; else that line's
+ * supplier's, cart.ts leadForSupplier), once per distinct figure, in line order.
  * A split between a 120-day and a 30-day supplier shows both; a line with no
  * figure at all shows as null ("unknown").
  */
@@ -484,6 +485,21 @@ export function supplierSelect(row) {
 }
 
 /*
+ * The note under a supplier's lead time in Compare and the drill-down: who
+ * set it, or how many orders it is measured from. From 1.12 a lead set on
+ * the item shows only on its usual supplier's row (cart.ts leadForSupplier),
+ * and reads "set on the item" so it isn't taken for that supplier's own
+ * figure from the Suppliers page, which "set by Allied" means. A server
+ * before 1.12 sends no leadTimeSource: "set by Allied", as it always read.
+ */
+export function leadTimeNote(o) {
+  if (o?.leadTimeSource === "item") return "set on the item";
+  if (o?.leadTimeSetByAllied) return "set by Allied";
+  const n = o?.leadTimeOrders ?? 0;
+  return `from ${n} order${n === 1 ? "" : "s"}`;
+}
+
+/*
  * What an option reads: "Hanova — preferred · 120 d · $0.42 last". A part
  * that is missing (no lead time known, never billed) is left out rather than
  * shown as "—", so the closed dropdown stays short. `price` formats the last
@@ -555,8 +571,8 @@ const minFromWindow = (r) => r.leadStockBasis !== "manual" && r.leadStockBasis !
  * said (1.8 review). Where Allied set a lead on the item itself
  * (leadTimeUsedSource "item": N24S16M carries 107 days on prod while
  * Shandong Tengda's own is 131) the suggestion is built on that, whichever
- * supplier the line is on, so crediting it to the usual supplier would be
- * false. A window minimum quotes the lead it was set from; platform_min_stock
+ * supplier the line is on (from 1.12 only the usual supplier's line shows
+ * it), so crediting it to the usual supplier would be false. A window minimum quotes the lead it was set from; platform_min_stock
  * keeps no supplier, so on an item lead it is "this item's own" only where
  * it is still the item's figure, and unattributed otherwise. A server before
  * the review sends no leadTimeUsedSource: the usual supplier, as before.
@@ -566,6 +582,16 @@ export function leadOwner(r, days = r?.leadTimeDaysUsed) {
     return days != null && Number(days) === Number(r.leadTimeDaysUsed) ? "this item's own" : null;
   return r?.leadTimeUsedFor ? `${r.leadTimeUsedFor}'s` : null;
 }
+
+/*
+ * Whether this line's own lead is its supplier's (1.12). From 1.12 a lead
+ * set on the item is shown only on its usual supplier's line, and every line
+ * says where its lead came from (leadTimeSource); a pick of Tong Ming for
+ * N24S16M reads Tong Ming's 45 days (prod), not the item's 107. A server before 1.12
+ * sends no leadTimeSource and put the item's lead on every line, so there
+ * the line's lead is the item's and there is nothing to compare it with.
+ */
+const leadIsPerSupplier = (line) => line != null && "leadTimeSource" in line;
 
 /*
  * Whether the row's quantity is one Allied typed rather than the suggestion
@@ -605,7 +631,9 @@ export function quantityStaysMessage(row, qty = (v) => Number(v).toLocaleString(
   if (r.leadTimeDaysUsed == null)
     return `${head} No lead time is known for ${who}, the item's usual supplier, so ${typed ? "the suggestion" : "it"} is built on cover alone.`;
   if (r.leadTimeUsedSource === "item")
-    return `${head} ${it} is built on this item's own ${qty(r.leadTimeDaysUsed)}-day lead time, set on the item page, whichever supplier it is ordered from.`;
+    return leadIsPerSupplier(l)
+      ? `${head} ${it} is built on this item's own ${qty(r.leadTimeDaysUsed)}-day lead time, set on the item page.${typed ? "" : " Changing the supplier here doesn't change it."}`
+      : `${head} ${it} is built on this item's own ${qty(r.leadTimeDaysUsed)}-day lead time, set on the item page, whichever supplier it is ordered from.`;
   return `${head} ${it} is built on ${who}'s ${qty(r.leadTimeDaysUsed)}-day lead time, the item's usual supplier.`;
 }
 
@@ -617,11 +645,13 @@ export function quantityStaysMessage(row, qty = (v) => Number(v).toLocaleString(
  * the quantity were built on 42 days when it was built on Shandong Tengda's
  * 131. Null for a server before 1.8, which sends no basis. `compare` false
  * leaves the line's own lead out, for a split, whose parts each show theirs.
- * An item lead is every line's lead, so there is nothing to compare.
+ * A lead set on the item is compared too from 1.12, where it is no longer
+ * every line's (leadIsPerSupplier); from an older server it still was, so
+ * there it is not, and the sentence says "whichever supplier".
  *
  *   "Built on Hanova's 120-day lead time (preferred). Jiaxing's is 120 days."
  *   "Your minimum (2,771, from Hanova's 120 days) sets the lead-time stock."
- *   "Built on this item's own 107-day lead time (set on the item page), whichever supplier it is ordered from."
+ *   "Built on this item's own 107-day lead time (set on the item page). TONG MING's is 45 days."
  */
 export function leadBasisSentence(line, options = [], qty = (v) => Number(v).toLocaleString(), compare = true) {
   const r = line?.rationale ?? {};
@@ -642,13 +672,15 @@ export function leadBasisSentence(line, options = [], qty = (v) => Number(v).toL
   } else if (used == null) {
     s = who ? `No lead time is known for ${who}, so no lead-time stock is added.` : "No supplier is known, so no lead-time stock is added.";
   } else if (itemLead) {
-    s = `Built on this item's own ${qty(used)}-day lead time (set on the item page), whichever supplier it is ordered from.`;
+    s = leadIsPerSupplier(line)
+      ? `Built on this item's own ${qty(used)}-day lead time (set on the item page).`
+      : `Built on this item's own ${qty(used)}-day lead time (set on the item page), whichever supplier it is ordered from.`;
   } else {
     const role = supplierRole((options ?? []).find((o) => o.supplierName === who));
     s = `Built on ${who ? `${who}'s` : "the usual supplier's"} ${qty(used)}-day lead time${role ? ` (${role})` : ""}.`;
   }
   const mine = line.supplierName;
-  if (compare && !itemLead && who && mine && line.supplierUid !== "none" && mine !== who) {
+  if (compare && (!itemLead || leadIsPerSupplier(line)) && who && mine && line.supplierUid !== "none" && mine !== who) {
     const d = line.leadTimeDays;
     const lead = r.leadStockBasis === "lead" ? "" : " lead time";
     s += d != null ? ` ${mine}'s${lead} is ${daysText(d)}.` : ` ${mine}'s${lead} is not known.`;

@@ -18,6 +18,7 @@
  *   node scripts/stage-check.mjs schedule <after> [--base …]   (1.9: incoming POs add up to On order)
  *   npx tsx scripts/stage-check.mjs gap <after> [--base …]    (1.10: stock gaps, recomputed with the server's projection)
  *   node scripts/stage-check.mjs screen <after> [--before <before>] [--base …]   (1.11: gaps on screen: CSV, cart, Purchasing sort)
+ *   node scripts/stage-check.mjs leads <capture> [--base …] | leads <before> <after> [--base …]   (1.12: lead time per supplier, old -> new)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -1204,6 +1205,278 @@ export async function screenCheck(dir, { get = null, beforeDir = null, orderList
   });
 }
 
+/* ---------- 1.12: lead time per supplier ---------- */
+
+/*
+ * `stage-check leads`: every (item, supplier) whose displayed lead time moves
+ * under 1.12's rule, old -> new. From 1.12 a lead set on an item shows only
+ * under its usual (effective) supplier; any other supplier shows its own,
+ * Allied's from the Suppliers page, else the measured median (cart.ts
+ * leadForSupplier). Nothing else in the cart may move.
+ *
+ *   leads <capture> [--base …] the PREDICTED list from one 1.11 capture: run
+ *                              on prod's capture before deploy, it is the
+ *                              list Allied get. Each supplier's own lead is
+ *                              read off the capture itself (an option of an
+ *                              item with no item lead, else Allied's figure in
+ *                              suppliers.json, else the measured median of an
+ *                              item it is the usual supplier of); one the
+ *                              capture can't name reads "not in capture";
+ *                              --base fetches /suppliers.csv (GET only),
+ *                              which names every supplier's measured lead.
+ *   leads <before> <after> [--base …]
+ *                              the ACTUAL list between two captures, and the
+ *                              acceptance: it equals the list predicted from
+ *                              <before>, and quantities, costs, states,
+ *                              totals, rationale.leadTimeDaysUsed, supplier
+ *                              cards and cart.csv are identical.
+ *
+ * A row is one item under one supplier, as its line (the Order list's Lead
+ * time column, By supplier, Why this quantity) and as an option (Compare,
+ * the supplier dropdown, the drill-down's suppliers on file); every line of
+ * an item carries the same options, so they are read once per item.
+ */
+const LEAD_KEYS = ["leadTimeDays", "leadTimeSetByAllied", "leadTimeOrders", "leadTimeSameDayExcluded"];
+
+const leadOf = (o) =>
+  o ? { days: o.leadTimeDays ?? null, setByAllied: !!o.leadTimeSetByAllied, orders: o.leadTimeOrders ?? 0, sameDayExcluded: o.leadTimeSameDayExcluded ?? 0 } : null;
+
+/*
+ * Whether two leads read differently on screen: the days, or the note under
+ * them ("set by Allied" / "from N orders"; the count shows only on a measured
+ * one). A supplier whose own figure equals the item's still changes
+ * leadTimeOrders in the JSON, which the allow-list covers; it is not a row.
+ */
+const leadReadsDifferently = (a, b) =>
+  (a?.days ?? null) !== (b?.days ?? null) ||
+  (a?.days != null && (!!a.setByAllied !== !!b.setByAllied || (!a.setByAllied && a.orders != null && b.orders != null && a.orders !== b.orders)));
+
+/*
+ * A moved lead against its prediction: as it reads, and for a measured one
+ * the order and same-day counts too, where the prediction knows them (an
+ * Allied figure's counts aren't in suppliers.json; the measured median taken
+ * from an item has no same-day count).
+ */
+const leadDiffersFromPrediction = (got, want) =>
+  leadReadsDifferently(got, want) ||
+  (got?.days != null && !got.setByAllied && want != null &&
+    ((want.orders != null && got.orders !== want.orders) || (want.sameDayExcluded != null && got.sameDayExcluded !== want.sameDayExcluded)));
+
+/** itemUid|supplierUid → { itemUid, number, supplierUid, supplierName, line, option } from one /cart. */
+export function cartLeadRows(cart) {
+  const rows = new Map();
+  const row = (l, uid, name) => {
+    const k = `${l.itemUid}|${uid}`;
+    if (!rows.has(k)) rows.set(k, { itemUid: l.itemUid, number: l.number, supplierUid: uid, supplierName: name, line: null, option: null });
+    return rows.get(k);
+  };
+  const seen = new Set();
+  for (const g of cart?.suppliers ?? [])
+    for (const l of g.lines ?? []) {
+      row(l, l.supplierUid, l.supplierName).line = l;
+      if (seen.has(l.itemUid)) continue;
+      seen.add(l.itemUid);
+      for (const o of l.options ?? []) row(l, o.supplierUid, o.supplierName).option = o;
+    }
+  return rows;
+}
+
+/**
+ * Each supplier's own lead (no item lead in it), as far as one capture can
+ * name it; null = none. `suppliersCsv` (GET /suppliers.csv, fetched with
+ * --base) carries every supplier's measured median, so with it every
+ * supplier is named.
+ */
+export function supplierLeadsFromCapture({ items, cart, suppliers = null, suppliersCsv = null }) {
+  const byUid = new Map(items.map((i) => [i.uid, i]));
+  const out = new Map();
+  // Exact: what an item with no lead of its own shows under that supplier.
+  for (const r of cartLeadRows(cart).values()) {
+    const it = byUid.get(r.itemUid);
+    if (!it || it.leadTimeItemDays != null || out.has(r.supplierUid)) continue;
+    const o = r.option ?? r.line;
+    if (o) out.set(r.supplierUid, o.leadTimeDays == null ? null : leadOf(o));
+  }
+  // Allied's figure on the Suppliers page (its order count is not in suppliers.json).
+  for (const s of suppliers?.suppliers ?? [])
+    if (!out.has(s.uid) && s.lead_time_days != null)
+      out.set(s.uid, { days: Number(s.lead_time_days), setByAllied: true, orders: null, sameDayExcluded: null });
+  // The measured median from /suppliers.csv ("Lead time (days)" there is the
+  // measured one), by name through suppliers.json; blank means none.
+  if (suppliersCsv && suppliers) {
+    const [head = [], ...rows] = parseCsv(suppliersCsv);
+    const col = (h) => head.indexOf(h);
+    const byName = new Map(rows.filter((r) => r.length === head.length).map((r) => [r[col("Supplier")], r]));
+    for (const s of suppliers.suppliers ?? []) {
+      const r = byName.get(s.name);
+      if (out.has(s.uid) || !r) continue;
+      const days = r[col("Lead time (days)")];
+      out.set(s.uid, days === "" ? null : { days: Number(days), setByAllied: false, orders: Number(r[col("Orders measured")] || 0), sameDayExcluded: Number(r[col("Same-day ignored")] || 0) });
+    }
+  }
+  // The measured median, from an item it is the usual supplier of.
+  for (const i of items)
+    if (i.supplierUid && !out.has(i.supplierUid) && i.leadTimeSupplierDays == null && i.leadTimeMeasuredDays != null)
+      out.set(i.supplierUid, { days: i.leadTimeMeasuredDays, setByAllied: false, orders: i.leadTimeOrders ?? null, sameDayExcluded: null });
+  return out;
+}
+
+const byNumberThenSupplier = (a, b) =>
+  String(a.number).localeCompare(String(b.number)) || String(a.supplierName).localeCompare(String(b.supplierName));
+
+/** The rows 1.12 moves, predicted from a 1.11 capture: [{ …row, old, new, known }]. */
+export function predictLeadChanges({ items, cart, suppliers = null, suppliersCsv = null }) {
+  const byUid = new Map(items.map((i) => [i.uid, i]));
+  const own = supplierLeadsFromCapture({ items, cart, suppliers, suppliersCsv });
+  const out = [];
+  for (const r of cartLeadRows(cart).values()) {
+    const it = byUid.get(r.itemUid);
+    // An item with no usual supplier keeps its own lead on every line (leadForSupplier).
+    if (!it || it.leadTimeItemDays == null || it.supplierUid == null || r.supplierUid === it.supplierUid) continue;
+    const old = leadOf(r.option ?? r.line);
+    const known = own.has(r.supplierUid);
+    const next = own.get(r.supplierUid) ?? null;
+    if (known && !leadReadsDifferently(old, next)) continue;
+    out.push({ ...r, old, new: next, known });
+  }
+  return out.sort(byNumberThenSupplier);
+}
+
+/** The rows whose shown lead differs between two /cart captures, with where it moved. */
+export function actualLeadChanges(before, after) {
+  const b = cartLeadRows(after);
+  const out = [];
+  for (const [k, ra] of cartLeadRows(before)) {
+    const rb = b.get(k);
+    if (!rb) continue;
+    const where = [];
+    if (ra.line && rb.line && leadReadsDifferently(leadOf(ra.line), leadOf(rb.line))) where.push("line");
+    if (ra.option && rb.option && leadReadsDifferently(leadOf(ra.option), leadOf(rb.option))) where.push("option");
+    if (ra.line && rb.line && (ra.line.rationale?.leadTimeDays ?? null) !== (rb.line.rationale?.leadTimeDays ?? null)) where.push("why");
+    if (where.length) out.push({ ...ra, old: leadOf(ra.option ?? ra.line), new: leadOf(rb.option ?? rb.line), where, after: rb });
+  }
+  return out.sort(byNumberThenSupplier);
+}
+
+/*
+ * /cart without the lead fields 1.12's rule may move, for "nothing else
+ * moved": those of an item with an item lead under a supplier other than its
+ * usual one (`inScope`), and the new leadTimeSource everywhere. Every other
+ * line and option keeps all four, so a drift in, say, the same-day count of a
+ * measured lead (Compare's "N same-day ignored") on an item 1.12 doesn't
+ * touch still fails here.
+ */
+function cartWithoutLeads(cart, inScope = () => true) {
+  const strip = (o, itemUid) => {
+    const c = { ...o };
+    delete c.leadTimeSource;
+    if (inScope(itemUid, o.supplierUid)) for (const f of LEAD_KEYS) delete c[f];
+    return c;
+  };
+  return {
+    ...cart,
+    generatedAt: null,
+    suppliers: (cart?.suppliers ?? []).map((g) => ({
+      ...g,
+      lines: (g.lines ?? []).map((l) => {
+        const { leadTimeDays: _shown, ...rest } = l.rationale ?? {};
+        const rationale = inScope(l.itemUid, l.supplierUid) ? rest : l.rationale;
+        return { ...strip(l, l.itemUid), rationale, options: (l.options ?? []).map((o) => strip(o, l.itemUid)) };
+      }),
+    })),
+  };
+}
+
+/** Every 1.12 check as { check, ok, detail }, and the rows to print. */
+export function leadChecks({ before, after = null, items, suppliers = null, suppliersCsv = null, cartCsv = null, beforeCartCsv = null }) {
+  const predicted = predictLeadChanges({ items, cart: before, suppliers, suppliersCsv });
+  const out = [];
+  const add = (check, bad, detail) =>
+    out.push({ check, ok: bad.length === 0, detail: bad.length ? `${bad.length}: ${bad.slice(0, 5).join("; ")}` : detail });
+  const label = (r) => `${r.number} under ${r.supplierName ?? r.supplierUid}`;
+  const key = (r) => `${r.itemUid}|${r.supplierUid}`;
+  if (!after) {
+    add(
+      `every row's new lead named by the capture${suppliersCsv ? " and /suppliers.csv" : " (pass --base for /suppliers.csv)"}`,
+      predicted.filter((r) => !r.known).map(label),
+      `${predicted.length} rows`,
+    );
+    return { checks: out, rows: predicted, mode: "predicted" };
+  }
+  const actual = actualLeadChanges(before, after);
+  const want = new Map(predicted.map((r) => [key(r), r]));
+  const got = new Map(actual.map((r) => [key(r), r]));
+  // A row the capture can't name has no predicted figure to hold it to.
+  add(
+    `every predicted row's new lead named${suppliersCsv ? " (with /suppliers.csv)" : " (pass --base for /suppliers.csv)"}`,
+    predicted.filter((r) => !r.known).map(label),
+    `${predicted.length} predicted`,
+  );
+  add("every predicted row moved", predicted.filter((r) => !got.has(key(r))).map(label), `${predicted.length} predicted`);
+  add("every row that moved was predicted", actual.filter((r) => !want.has(key(r))).map(label), `${actual.length} moved`);
+  add(
+    "each moved to the predicted lead",
+    actual.filter((r) => want.get(key(r))?.known && leadDiffersFromPrediction(r.new, want.get(key(r)).new)).map((r) => `${label(r)}: ${r.new.days} vs ${want.get(key(r)).new?.days ?? "none"}`),
+    "days, note, and a measured one's order and same-day counts",
+  );
+  // A line moves with its own option, and Why this quantity's line lead with it.
+  add(
+    "a line, its option and its Why this quantity lead move together",
+    actual
+      .filter((r) => r.line && r.after.line && r.option)
+      .filter((r) => r.where.join("+") !== (r.old.days !== r.new.days ? "line+option+why" : "line+option"))
+      .map((r) => `${label(r)}: ${r.where.join("+")}`),
+    `${actual.filter((r) => r.line).length} of the rows are lines`,
+  );
+  const byUid = new Map(items.map((i) => [i.uid, i]));
+  const sourceWrong = [];
+  for (const r of cartLeadRows(after).values()) {
+    const it = byUid.get(r.itemUid);
+    for (const o of [r.line, r.option].filter(Boolean)) {
+      const onItem = it?.leadTimeItemDays != null && (it.supplierUid == null || it.supplierUid === r.supplierUid);
+      const want = o.leadTimeDays == null ? null : onItem ? "item" : o.leadTimeSetByAllied ? "supplier" : "measured";
+      if (!("leadTimeSource" in o) || o.leadTimeSource !== want) sourceWrong.push(label(r));
+    }
+  }
+  add("leadTimeSource says where each shown lead came from", sourceWrong, "every line and option");
+  const inScope = (itemUid, supplierUid) => {
+    const it = byUid.get(itemUid);
+    return !!it && it.leadTimeItemDays != null && it.supplierUid != null && supplierUid !== it.supplierUid;
+  };
+  const diffs = [];
+  diffValue("cart.json", cartWithoutLeads(before, inScope), cartWithoutLeads(after, inScope), "", "", diffs);
+  add("quantities, costs, states, totals and cards identical", diffs.map((d) => d.path), "every /cart field but the lead ones");
+  if (cartCsv != null && beforeCartCsv != null)
+    add("cart.csv byte-identical", cartCsv === beforeCartCsv ? [] : ["cart.csv differs"], `${cartCsv.length} bytes`);
+  return { checks: out, rows: actual, mode: "actual" };
+}
+
+/** `leads <capture>` or `leads <before> <after>`. */
+export function leadCheck(beforeDir, afterDir = null, { suppliersCsv = null } = {}) {
+  const read = (d, f) => (d && existsSync(join(d, f)) ? readFileSync(join(d, f), "utf8") : null);
+  const json = (d, f) => (read(d, f) ? JSON.parse(read(d, f)) : null);
+  return leadChecks({
+    before: json(beforeDir, "cart.json"),
+    after: afterDir ? json(afterDir, "cart.json") : null,
+    // The before capture's items: the rule is decided on what was usual then.
+    items: json(beforeDir, "items.json").items,
+    suppliers: json(beforeDir, "suppliers.json"),
+    suppliersCsv,
+    cartCsv: afterDir ? read(afterDir, "cart.csv") : null,
+    beforeCartCsv: read(beforeDir, "cart.csv"),
+  });
+}
+
+/** One printed row: "N24S16M  HOBSON …  107 d (on item) -> 30 d (set by Allied)". */
+export function leadRowText(r) {
+  const d = (l) => (l?.days == null ? "none" : `${l.days} d`);
+  const how = (l, old) => (l?.days == null ? "" : old ? " (on item)" : l.setByAllied ? " (set by Allied)" : l.orders != null ? ` (measured, ${l.orders} orders)` : " (measured)");
+  const next = r.known === false ? "not in capture" : `${d(r.new)}${how(r.new, false)}`;
+  // Where it shows: on the item's line (Order list, By supplier, Why this quantity) and/or as an option (Compare, dropdown).
+  const where = (r.where ?? [r.line && "line", r.option && "option"].filter(Boolean)).join("+");
+  return `${String(r.number).padEnd(16)} ${String(r.supplierName ?? r.supplierUid).slice(0, 40).padEnd(41)} ${where.padEnd(20)} ${d(r.old)}${how(r.old, true)} -> ${next}`;
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -1300,6 +1573,21 @@ async function main() {
     process.exit(checks.every((c) => c.ok) ? 0 : 1);
   }
 
+  if (command === "leads" && (args.length === 1 || args.length === 2) && !options.allow && !options.before) {
+    // One capture predicts the list, two prove it; with --base, GET
+    // /suppliers.csv names every supplier's measured lead in both (the
+    // measured medians are the same either side of the deploy).
+    const get = options.base
+      ? makeGetter({ base: resolveBase(options.base), key: process.env.DASHBOARD_KEY?.trim() ?? "" })
+      : null;
+    const suppliersCsv = get ? await get("/suppliers.csv", { as: "csv" }) : null;
+    const { checks, rows, mode } = leadCheck(args[0], args[1] ?? null, { suppliersCsv });
+    console.log(`${rows.length} (item, supplier) row(s) whose shown lead time ${mode === "predicted" ? "1.12 will move" : "moved"}:`);
+    for (const r of rows) console.log(`  ${leadRowText(r)}`);
+    for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
+    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  }
+
   if (command === "splits" && args.length === 1 && !options.allow && !options.base) {
     const checks = splitCheck(args[0], { beforeDir: options.before ?? null });
     for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
@@ -1350,7 +1638,8 @@ async function main() {
       "  node scripts/stage-check.mjs splits <after> [--before <before>]\n" +
       "  node scripts/stage-check.mjs schedule <after> [--base local|prod|URL]\n" +
       "  npx tsx scripts/stage-check.mjs gap <after> [--base local|prod|URL]\n" +
-      "  node scripts/stage-check.mjs screen <after> [--before <before>] [--base local|prod|URL]",
+      "  node scripts/stage-check.mjs screen <after> [--before <before>] [--base local|prod|URL]\n" +
+      "  node scripts/stage-check.mjs leads <capture> [--base local|prod|URL]   |   leads <before> <after> [--base local|prod|URL]",
   );
 }
 

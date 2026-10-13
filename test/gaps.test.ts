@@ -184,9 +184,12 @@ test("sentence: BN1665G, worded as the plan's example", () => {
   // A short gap is said in days: SPW12G with the measured 83 days, 27 Oct → 3 Nov.
   const spw = itemOf(project(323, 166.4, [line(2000, 21)]));
   assert.match(gaps.gapSentence(spw, null, { today: TODAY }), /is estimated for 3 Nov, about 7 days and ~177 units short\./);
-  // An item's own lead time is said to be the item's, not the supplier's.
+  // An item's own lead time is said to be the item's, not the supplier's,
+  // and (1.12) for its usual supplier, named where known.
   const own = itemOf(project(323, 166.4, [po]), { leadTimeSource: "item", leadTimeDays: 107 });
-  assert.match(gaps.gapSentence(own, detail), /An order placed today would land about 28 Jan 2027 \(this item's own lead time, 107 days\)\.$/);
+  assert.match(gaps.gapSentence(own, detail), /An order placed with HANOVA INTERNATIONAL LTD today would land about 28 Jan 2027 \(this item's own lead time, 107 days\)\.$/);
+  const ownNoSupplier = itemOf(project(323, 166.4, [po]), { leadTimeSource: "item", leadTimeDays: 107, supplierName: null });
+  assert.match(gaps.gapSentence(ownNoSupplier, detail), /An order placed today would land about 28 Jan 2027 \(this item's own lead time, 107 days\)\.$/);
 });
 
 test("sentence: KITST1230S, short now, its only PO overdue", () => {

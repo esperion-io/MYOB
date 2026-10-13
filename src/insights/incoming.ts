@@ -35,7 +35,8 @@ import { supplierLeadTimes, type SupplierLead } from "./leadTimes.js";
  * On prod WR16503G and WR16301.5S16 carry 107 days against Hanova's 120, so a
  * per-line rule would give 00023070 two arrival dates, 27 Nov and 10 Dec.
  * The item lead stays what it was, a planning input for the suggestion, the
- * minimum and the cart, which applies it under every supplier on purpose.
+ * minimum and the cart (which, from 1.12, shows it only under the item's
+ * usual supplier: cart.ts leadForSupplier).
  *
  * NOTHING HERE FEEDS A CALCULATION. On order, cover, suggestions, flags, the
  * cart and the daily rows are exactly what they were; this only says when.

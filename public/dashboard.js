@@ -14,6 +14,7 @@ import {
   sortDirection,
   leadBasisSentence,
   leadOwner,
+  leadTimeNote,
   quantityStaysMessage,
   sortRows,
   sortWord,
@@ -52,9 +53,37 @@ import { gapCell, gapSentence, gapTile, hasGapFields, outlookModel } from "./gap
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.11.0";
+const UI_VERSION = "1.12.0";
 
 const RELEASES = [
+  {
+    version: "1.12.0",
+    // Set to the ship date, and re-derive every item and figure named here
+    // from that evening's prod capture with `stage-check leads` (RELEASING.md
+    // "Stage 13 deploy"): it lists every line and option whose lead time
+    // moves, old -> new. N24S16M under Tong Ming (107 -> 45, Allied's) is
+    // from the 13 Oct prod capture, where Tong Ming, Anzor and Shandong
+    // Tengda are on file for it (the plan's Hobson example is not); the
+    // item leads and Tong Ming's figure may have changed by then. N24S16M has
+    // a window minimum (2,349, 6 months, 107 d) on prod, as every item with an
+    // item lead in the cart has, so the Why quoted is the minimum's form; read
+    // it off N24S16M's drill-down on ship day. The check stays read-only:
+    // N24S16M's Shandong line is Allied's saved choice, which a dropdown
+    // round trip would delete (selectCartSupplier, usePreferredSupplier).
+    // (Stage 10 has not shipped; versions follow ship order, so Stage 13 is
+    // 1.12.)
+    date: "2026-10-14",
+    stage: "Stage 13: Lead time per supplier in Purchasing",
+    changes: [
+      "You told us that when you pick a different supplier, the suggested quantity should match whichever supplier you pick. That means a lead time you set on an item belongs to its usual supplier, not to every supplier. This version does the first part: Purchasing now shows each supplier's own lead time.",
+      "Where you have set a lead time on an item (on the item page), that figure now shows only under the item's usual supplier. Under any other supplier, Purchasing shows that supplier's own lead time: your figure from the Suppliers page, or else the time their orders have actually taken. For example, N24S16M carries 107 days on the item, for its usual supplier SHANDONG TENGDA; under TONG MING it now reads Tong Ming's 45 days, where before it read 107 under every supplier.",
+      "This shows in the Lead time column on By item, in each line's working on By supplier, in the supplier dropdown on the row, in Compare (including which supplier is marked fastest) and under an item's detail. A lead time set on the item now reads \"set on the item\" there, so it isn't mistaken for the supplier's own.",
+      "Why this quantity, on a different supplier, now gives both: what the quantity is built on and that supplier's own lead time. For N24S16M with TONG MING, for example: \"Your minimum (2,349, from this item's own 107 days) sets the lead-time stock. TONG MING ENTERPRISES CO LTD's lead time is 45 days.\"",
+      "The suggested quantity does not change in this version: it is still built on the item's usual supplier's lead time, or the one you set on the item, whichever supplier the line is with. Making the quantity follow the supplier you pick is the next version.",
+    ],
+    numbers: "None. Only the lead times shown against suppliers other than an item's usual one move, and only for items with a lead time set on the item. Suggested and order quantities, costs, totals, minimums, expected dates and the order sheets are exactly as before.",
+    check: "Open Purchasing (By item) and find N24S16M. Open Compare on it: SHANDONG TENGDA reads 107 days, set on the item; TONG MING 45 days, set by Allied; ANZOR 1 day, from its orders, marked fastest. Before, all three read 107. Open its Supplier dropdown without choosing: TONG MING reads 45 d. Nothing to choose or put back: your choice of SHANDONG TENGDA on N24S16M stays as it is.",
+  },
   {
     version: "1.11.0",
     // Set to the ship date, and re-derive every item and figure named here
@@ -5959,7 +5988,7 @@ function orderItemPanelHtml(r) {
                       <td class="num">${
                         o.leadTimeDays == null
                           ? '<span class="muted">unknown</span>'
-                          : `${qty(o.leadTimeDays)} d <span class="muted">${o.leadTimeSetByAllied ? "set by Allied" : `from ${o.leadTimeOrders} order${o.leadTimeOrders === 1 ? "" : "s"}`}</span>`
+                          : `${qty(o.leadTimeDays)} d <span class="muted">${esc(leadTimeNote(o))}</span>`
                       }</td>
                       <td class="num">${o.lastCost != null ? price(o.lastCost) : '<span class="muted" title="This supplier has never billed the item">—</span>'}</td>
                     </tr>`,
@@ -6282,8 +6311,10 @@ function cartMinTitle(l) {
  *           leadTimeUsedFor), not this line's. On a pick the two differ, and
  *           quoting only the line's read as if the quantity were built on it:
  *           N24S16M picked to Tong Ming said "42d lead" while built on
- *           Shandong Tengda's 131. An item lead is every line's, so the
- *           line's own bit already says it.
+ *           Shandong Tengda's 131. A lead set on the item reads "built on
+ *           this item's own 107d lead" beside the pick's own from 1.12,
+ *           where only the usual supplier's line shows it; before 1.12 it
+ *           was every line's, so the line's own bit already said it.
  *   window  Allied's minimum replaces the live lead term (queries.ts), so no
  *           live lead is in the arithmetic: "min from X's 120d lead", beside
  *           this line's own where they differ.
@@ -6297,7 +6328,7 @@ function cartLeadBit(l) {
   const r = l.rationale ?? {};
   const own =
     l.leadTimeDays != null
-      ? `<span title="${l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
+      ? `<span title="${l.leadTimeSource === "item" ? "Lead time set by Allied on this item" : l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
       : "";
   if (!("leadTimeDaysUsed" in r)) return own;
   const picked = !!r.leadTimeUsedFor && l.supplierUid !== "none" && r.leadTimeUsedFor !== l.supplierName;
@@ -6310,7 +6341,12 @@ function cartLeadBit(l) {
     const from = `<span title="Your minimum sets the lead-time stock; it was set from ${esc(owner ? `${owner} ` : "a ")}${days}-day lead time">min from ${esc(owner ? `${owner} ` : "")}${days}d lead</span>`;
     return `${from} · ${picked ? mine() : own || '<span class="muted">lead unknown</span>'}`;
   }
-  if (!picked || r.leadTimeUsedSource === "item") return own;
+  if (!picked) return own;
+  if (r.leadTimeUsedSource === "item") {
+    // Before 1.12 the item's lead was every line's, so the line's own bit said it.
+    if (!("leadTimeSource" in l)) return own;
+    return `<span title="The suggested quantity is built on the lead time set on this item, whichever supplier it is ordered from">built on this item's own ${r.leadTimeDaysUsed}d lead</span> · ${mine()}`;
+  }
   const who = esc(r.leadTimeUsedFor);
   const used =
     r.leadTimeDaysUsed != null
@@ -6514,9 +6550,9 @@ function openSupplierCompare(itemUid, number) {
                   o.leadTimeDays == null
                     ? '<span class="muted">unknown</span>'
                     : `${o.leadTimeDays} ${o.leadTimeDays === 1 ? "day" : "days"} ${isFastest ? '<span class="badge ok">fastest</span>' : ""}
-                       <br /><span class="muted" title="Same-day order/bill pairs are ignored — they record paperwork, not a wait">${
-                         o.leadTimeSetByAllied ? "set by Allied" : `from ${o.leadTimeOrders} order${o.leadTimeOrders === 1 ? "" : "s"}`
-                       }${o.leadTimeSameDayExcluded ? `, ${o.leadTimeSameDayExcluded} same-day ignored` : ""}</span>`
+                       <br /><span class="muted" title="Same-day order/bill pairs are ignored — they record paperwork, not a wait">${esc(
+                         leadTimeNote(o),
+                       )}${o.leadTimeSameDayExcluded ? `, ${o.leadTimeSameDayExcluded} same-day ignored` : ""}</span>`
                 }</td>
                 <td class="num"><input class="cmp-qty" type="number" step="any" min="0" value="${o.inCart ? o.qty : 0}"
                      data-supplier="${esc(o.supplierUid)}" aria-label="Quantity from ${esc(o.supplierName ?? "")}" /></td>

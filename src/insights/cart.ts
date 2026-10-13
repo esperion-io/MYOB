@@ -4,6 +4,7 @@ import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { cartStateAll, cartStateOf, inTransaction, logChange } from "./changeLog.js";
 import { supplierLeadTimes } from "./leadTimes.js";
+import type { SupplierLead } from "./leadTimes.js";
 import type { Gap } from "./projection.js";
 import { computedItems, resolveWindow, snapshotState, type DemandWindow, type ItemComputed } from "./queries.js";
 
@@ -416,6 +417,58 @@ function lineGap(gap: Gap | null): Omit<Gap, "weeks"> | null {
   return line;
 }
 
+/** A lead time as one cart line or compare option shows it. */
+export interface LineLead {
+  days: number | null;
+  setByAllied: boolean;
+  orders: number;
+  sameDayExcluded: number;
+  /** "item": set on the item page; "supplier": on the Suppliers page; "measured": their orders' median. */
+  source: "item" | "supplier" | "measured";
+}
+
+/*
+ * The lead time shown against one supplier for one item (1.12). Allied
+ * answered Q5 (12–14 Oct): the suggested qty should match whichever supplier
+ * they pick. Q2b was not answered directly; our reading of that answer is
+ * that a lead set on an item is for its usual supplier.
+ *
+ * Until 1.12 a lead Allied set on the item page applied under every supplier
+ * the item was offered from, so N24S16M (107 days on the item, prod) read 107
+ * under Tong Ming too, against Tong Ming's own 45. Now the item's figure
+ * applies only under its usual (effective) supplier, the one computeItem
+ * builds the suggestion on; any other supplier shows its own figure, Allied's
+ * from the Suppliers page, else the measured median (leadTimes.ts), else none.
+ *
+ * An item with no usual supplier at all (none on file, or ruled none) keeps
+ * its own lead on every line, as before: there is no supplier it is "not the
+ * usual one" for, and its "No known supplier" line is the one the suggestion
+ * is built for.
+ *
+ * Display only. The suggested quantity, rationale.leadTimeDaysUsed and every
+ * cost are the item's own and do not read this; whether the quantity should
+ * follow the chosen supplier's lead is the next release. ETAs never read it
+ * either (incoming.ts uses the PO supplier's lead).
+ */
+export function leadForSupplier(
+  item: Pick<ItemComputed, "leadTimeItemDays" | "supplierUid">,
+  supplierUid: string,
+  supplierLead: Map<string, Pick<SupplierLead, "days" | "setByAllied" | "orders" | "sameDayExcluded">>,
+): LineLead | undefined {
+  const usual = item.supplierUid == null || supplierUid === item.supplierUid;
+  if (item.leadTimeItemDays != null && usual)
+    return { days: item.leadTimeItemDays, setByAllied: true, orders: 0, sameDayExcluded: 0, source: "item" };
+  const s = supplierLead.get(supplierUid);
+  if (!s) return undefined;
+  return {
+    days: s.days,
+    setByAllied: s.setByAllied,
+    orders: s.orders,
+    sameDayExcluded: s.sameDayExcluded,
+    source: s.setByAllied ? "supplier" : "measured",
+  };
+}
+
 export interface CartLine {
   itemUid: string;
   number: string | null;
@@ -442,8 +495,9 @@ export interface CartLine {
   /** Every supplier on file for the item, for the compare drawer. */
   options: CartOption[];
   /**
-   * Order-to-delivery in days: Allied's figure on the item, else on the
-   * supplier, else measured from their orders. Null when none of those exist.
+   * Order-to-delivery in days for this line's supplier: Allied's figure on
+   * the item where this is its usual supplier (1.12), else on the supplier,
+   * else measured from their orders. Null when none of those exist.
    */
   leadTimeDays: number | null;
   /** True when the figure was set by Allied rather than measured. */
@@ -451,6 +505,13 @@ export interface CartLine {
   leadTimeOrders: number;
   /** Same-day order/bill pairs ignored — see supplier_lead_time for why. */
   leadTimeSameDayExcluded: number;
+  /**
+   * Where leadTimeDays came from (1.12): "item" (set on the item page),
+   * "supplier" (set on the Suppliers page) or "measured"; null with none.
+   * Optional: a server before 1.12 sends none, and then the item's own lead
+   * was every line's.
+   */
+  leadTimeSource?: LineLead["source"] | null;
   /** What this supplier last charged, and their average. */
   lastCost: number | null;
   averageCost: number | null;
@@ -515,6 +576,8 @@ export interface CartOption extends SupplierOption {
   leadTimeSetByAllied: boolean;
   leadTimeOrders: number;
   leadTimeSameDayExcluded: number;
+  /** Where leadTimeDays came from, as on CartLine (1.12; absent before). */
+  leadTimeSource?: LineLead["source"] | null;
   /** The decision saved against this supplier, if any. */
   state: CartState | null;
   /** The saved quantity, else the suggestion. */
@@ -641,15 +704,9 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   ]);
   const { optionsFor, savedFor, ackFor, takenOff, supplierName } = sourcing;
 
-  /*
-   * A lead time Allied set on the item itself applies under every supplier it
-   * is offered from: it is a statement about how long this item takes, not
-   * about who it comes from. Otherwise the supplier's figure applies.
-   */
-  const leadFor = (item: ItemComputed, supplierUid: string) =>
-    item.leadTimeItemDays != null
-      ? { days: item.leadTimeItemDays, setByAllied: true, orders: 0, sameDayExcluded: 0 }
-      : supplierLead.get(supplierUid);
+  // The lead each line and compare option shows (1.12: an item's own lead
+  // only under its usual supplier; see leadForSupplier).
+  const leadFor = (item: ItemComputed, supplierUid: string) => leadForSupplier(item, supplierUid, supplierLead);
   const lastCost = new Map(
     lastCosts.rows.map((r) => [
       `${r.item_uid}|${r.supplier_uid}`,
@@ -693,6 +750,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         leadTimeSetByAllied: lt?.setByAllied ?? false,
         leadTimeOrders: lt?.orders ?? 0,
         leadTimeSameDayExcluded: lt?.sameDayExcluded ?? 0,
+        leadTimeSource: lt?.source ?? null,
         state: s?.state ?? null,
         qty: shownQty.get(o.supplierUid) ?? s?.qty ?? suggested,
         inCart: listed.has(o.supplierUid),
@@ -725,6 +783,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         leadTimeSetByAllied: lt?.setByAllied ?? false,
         leadTimeOrders: lt?.orders ?? 0,
         leadTimeSameDayExcluded: lt?.sameDayExcluded ?? 0,
+        leadTimeSource: lt?.source ?? null,
         lastCost: lastCost.get(key) ?? null,
         averageCost: item.averageCost,
         onHand: item.qtyOnHand,
@@ -771,10 +830,13 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
            * typed by hand, or the live lead time where none is applied; a
            * window minimum carries the window and the lead it was set from.
            * leadTimeUsedSource says where that lead came from: "item" when
-           * Allied set one on the item page, which then applies to every
-           * supplier and is not the effective supplier's own figure
-           * (N24S16M carries 107 days on prod; Shandong Tengda's is 131), so
-           * the screens don't credit it to the supplier.
+           * Allied set one on the item page, which is not the effective
+           * supplier's own figure (N24S16M carries 107 days on prod; Shandong
+           * Tengda's own is 120, Allied's; measured 131), so the screens
+           * don't credit it to the supplier.
+           * From 1.12 the line's leadTimeDays is the item's lead only on the
+           * usual supplier's line (leadForSupplier); the suggestion, and so
+           * leadTimeDaysUsed, is still built on it whichever line it is.
            */
           leadTimeDaysUsed: item.leadTimeDays,
           leadTimeUsedFor: item.supplierName,

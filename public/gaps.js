@@ -291,7 +291,11 @@ export function gapSentence(item, detail = null, opts = {}) {
     const days = item.leadTimeDays ?? null;
     if (days == null || f.today == null) return null;
     const lands = shortDate(addDays(f.today, days), f.today);
-    if (item.leadTimeSource === "item") return `An order placed today would land about ${lands} (this item's own lead time, ${plural(days, "day")}).`;
+    // From 1.12 an item's own lead is its usual supplier's only (cart.ts
+    // leadForSupplier), so say whose: a Purchasing row picked to Tong Ming
+    // shows Tong Ming's 45 d beside this sentence's 107.
+    if (item.leadTimeSource === "item")
+      return `An order placed${item.supplierName ? ` with ${item.supplierName}` : ""} today would land about ${lands} (this item's own lead time, ${plural(days, "day")}).`;
     return item.supplierName ? `An order placed with ${item.supplierName} today would land about ${lands}.` : null;
   };
 

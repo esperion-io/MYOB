@@ -37,6 +37,7 @@ import {
   groupLinesByItem,
   leadBasisSentence,
   leadOwner,
+  leadTimeNote,
   ORDER_SORT_DEFAULT,
   orderByItemRows,
   orderListSummary,
@@ -855,6 +856,50 @@ test("Lead set on the item: credited to the item, not to the usual supplier", ()
   assert.equal(leadOwner({ leadTimeUsedFor: "Hanova", leadTimeDaysUsed: 120 }), "Hanova's");
 });
 
+test("Lead set on the item, from 1.12: the usual supplier's only, so a pick's own lead is given beside it", () => {
+  // Shaped on N24S16M (107 days on the item, usual supplier Shandong Tengda), no minimum; Hobson's 30 (Allied's) is illustrative.
+  const ITEM_LEAD = { ...RATIONALE_LEAD, leadTimeDays: 30, leadTimeDaysUsed: 107, leadTimeUsedSource: "item" };
+  const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
+  const picked = n24({ supplierUid: "HOBSON", supplierName: "HOBSON", isPreferred: false, state: "selected", conflict, leadTimeDays: 30, leadTimeSetByAllied: true, leadTimeSource: "supplier", rationale: ITEM_LEAD });
+  assert.equal(
+    leadBasisSentence(picked.lines[0], N24_OPTIONS, fixedQty),
+    "Built on this item's own 107-day lead time (set on the item page). HOBSON's is 30 days.",
+  );
+  assert.equal(
+    quantityStaysMessage(picked, fixedQty),
+    "Quantity stays 2,760. It is built on this item's own 107-day lead time, set on the item page. Changing the supplier here doesn't change it.",
+  );
+  // Typed: it stays because it was typed; the item lead explains only the suggestion.
+  assert.equal(
+    quantityStaysMessage(n24({ ...picked.lines[0], qty: 3000 }), fixedQty),
+    "Quantity stays 3,000, the number you typed. Changing the supplier here doesn't change it. The suggestion (2,760) is built on this item's own 107-day lead time, set on the item page.",
+  );
+  // On the usual supplier's line: the item's lead, nothing to compare.
+  const usual = n24({ leadTimeDays: 107, leadTimeSource: "item", rationale: { ...ITEM_LEAD, leadTimeDays: 107 } });
+  assert.equal(leadBasisSentence(usual.lines[0], N24_OPTIONS, fixedQty), "Built on this item's own 107-day lead time (set on the item page).");
+  // A window minimum set from the item's lead, on a pick: the pick's own lead too.
+  const win = n24({ ...picked.lines[0], minLevel: 2349, rationale: { ...ITEM_LEAD, leadStockBasis: "window", minWindowMonths: 6, minLeadTimeDays: 107 } });
+  assert.equal(
+    leadBasisSentence(win.lines[0], N24_OPTIONS, fixedQty),
+    "Your minimum (2,349, from this item's own 107 days) sets the lead-time stock. HOBSON's lead time is 30 days.",
+  );
+  // A split's parts each show their own: left out, as before.
+  assert.equal(leadBasisSentence(picked.lines[0], N24_OPTIONS, fixedQty, false), "Built on this item's own 107-day lead time (set on the item page).");
+});
+
+test("Lead note in Compare and the drill-down: a lead set on the item says so (1.12)", () => {
+  assert.equal(leadTimeNote({ leadTimeDays: 107, leadTimeSetByAllied: true, leadTimeOrders: 0, leadTimeSource: "item" }), "set on the item");
+  assert.equal(leadTimeNote({ leadTimeDays: 30, leadTimeSetByAllied: true, leadTimeOrders: 2, leadTimeSource: "supplier" }), "set by Allied");
+  assert.equal(leadTimeNote({ leadTimeDays: 42, leadTimeSetByAllied: false, leadTimeOrders: 3, leadTimeSource: "measured" }), "from 3 orders");
+  assert.equal(leadTimeNote({ leadTimeDays: 2, leadTimeSetByAllied: false, leadTimeOrders: 1 }), "from 1 order");
+  // A server before 1.12: as it always read.
+  assert.equal(leadTimeNote({ leadTimeDays: 107, leadTimeSetByAllied: true, leadTimeOrders: 0 }), "set by Allied");
+  const src = read("../public/dashboard.js");
+  assert.match(fnBody(src, "openSupplierCompare"), /esc\(\s*leadTimeNote\(o\),?\s*\)/);
+  assert.match(fnBody(src, "orderItemPanelHtml"), /esc\(leadTimeNote\(o\)\)/);
+  assert.doesNotMatch(fnBody(src, "openSupplierCompare"), /"set by Allied"/);
+});
+
 test("Why this quantity: names the lead time and minimum actually used, and the pick's own lead", () => {
   const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
   const picked = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict, leadTimeDays: 42 });
@@ -894,6 +939,12 @@ test("dashboard.js: the lead bit of Why this quantity follows what the quantity 
   assert.equal(text(pick({ leadStockBasis: "manual" })), "this supplier 42d lead");
   // An item lead is every line's: the line's own bit says it, credited to no supplier.
   assert.equal(text({ ...pick({ leadTimeDaysUsed: 107, leadTimeUsedSource: "item" }), leadTimeDays: 107, leadTimeSetByAllied: true }), "107d lead");
+  // From 1.12 the pick shows its own lead, so the item's is given beside it.
+  assert.equal(
+    text({ ...pick({ leadTimeDaysUsed: 107, leadTimeUsedSource: "item" }), leadTimeSource: "measured" }),
+    "built on this item's own 107d lead · this supplier 42d lead",
+  );
+  assert.equal(text({ supplierUid: "SHANDONG", supplierName: "SHANDONG TENGDA", leadTimeDays: 107, leadTimeSetByAllied: true, leadTimeSource: "item", rationale: { ...RATIONALE_LEAD, leadTimeDaysUsed: 107, leadTimeUsedSource: "item" } }), "107d lead");
   // With the usual supplier, or from a server before 1.8, as it always read.
   assert.equal(text({ supplierUid: "SHANDONG", supplierName: "SHANDONG TENGDA", leadTimeDays: 131, leadTimeOrders: 3, rationale: RATIONALE_LEAD }), "131d lead");
   assert.equal(text({ ...pick({}), rationale: { leadTimeDays: 42 } }), "42d lead");

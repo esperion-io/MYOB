@@ -1,0 +1,68 @@
+{
+  "version": "1.12.0",
+  "stage": "Stage 13: Lead time per supplier in Purchasing",
+  "note": "1.12 moves displayed lead times only. Under any supplier but an item's usual (effective) one, a lead set on the item is replaced by that supplier's own figure (Allied's on the Suppliers page, else the measured median, else none): leadTimeDays, leadTimeSetByAllied, leadTimeOrders and leadTimeSameDayExcluded on those /cart lines and compare options, and rationale.leadTimeDays (the line's own lead) with them. Every line and option gains leadTimeSource (item / supplier / measured, null with none). Nothing else may move: quantities, suggestions, rationale.leadTimeDaysUsed, costs, states, totals, supplier cards (their leadTimeDays is the supplier's and always was), items, item pages, cart.csv and every other file are unchanged. The wildcards below would let a lead move on any record, so the record-level proof is `stage-check leads <before> <after>`: the rows that moved equal the rows predicted from <before>, and every non-lead /cart field is identical.",
+  "reviewed": "Written by hand from in-process captures (stage-check capture through the real router, GET only) on the 26 Aug local copy (allied_dev), the 1.11 tree (4c30b15) then this tree, 13 Oct. (1) On the copy as it is (no item leads): 370 differences, all additions apart from release.version 1.11.0 -> 1.12.0: leadTimeSource on 133 lines and 236 options; no lead value moved. (2) With two item leads set locally through setItemLeadTime (N24S16M 107 d, ST20170G 60 d) and N24S16M picked to Hobson through selectCartSupplier, then removed again (counts, platform_change_log and its sequence restored to 0 / 1,false): 401 differences, all allowed: release, 369 leadTimeSource, and 31 lead values on 7 (item, supplier) rows, exactly the 7 `stage-check leads` predicts from the 1.11 capture: N24S16M under Hobson 107 -> 24 (its line, option and Why this quantity), Tong Ming 107 -> 42, Anzor 107 -> 1, James Glen 107 -> 1, Wurth 107 -> 4 (options); ST20170G under Hanova 60 -> 83 and Shanghai Screw-Fast 60 -> none (options). The usual supplier's option keeps the item's figure. cart.csv, items, item and kit pages, overview, suppliers and divergence identical.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.11.0 -> 1.12.0) and commit"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].leadTimeSource",
+      "why": "1.12 adds where each line's lead came from (item / supplier / measured, null with none), so a lead set on the item reads as the item's"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].leadTimeSource",
+      "why": "1.12 adds where each compare option's lead came from, as on the line"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].leadTimeDays",
+      "why": "1.12: a line under a supplier other than the item's usual one shows that supplier's own lead, not the item's (cart.ts leadForSupplier); stage-check leads lists which"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].leadTimeSetByAllied",
+      "why": "1.12: with the lead, whether it is Allied's figure or measured"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].leadTimeOrders",
+      "why": "1.12: with the lead, the orders a measured figure is built on"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].leadTimeSameDayExcluded",
+      "why": "1.12: with the lead, the same-day pairs it ignores"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].rationale.leadTimeDays",
+      "why": "1.12: the line's own supplier's lead in Why this quantity, the same figure as the line's leadTimeDays; leadTimeDaysUsed (what the quantity is built on) does not move"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].leadTimeDays",
+      "why": "1.12: a compare / dropdown option for a supplier other than the item's usual one shows that supplier's own lead; this is what the fastest badge reads"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].leadTimeSetByAllied",
+      "why": "1.12: with the option's lead"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].leadTimeOrders",
+      "why": "1.12: with the option's lead"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].leadTimeSameDayExcluded",
+      "why": "1.12: with the option's lead"
+    }
+  ]
+}
