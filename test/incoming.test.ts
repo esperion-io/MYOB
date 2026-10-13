@@ -383,7 +383,8 @@ test("no gap feeds a calculation: only queries.ts reads projection.ts, in the pl
     region("export const GAP_ENABLED", "export function invalidateItemsCache("), // the switch, attachGaps, computedItems
     region("const SORT_VALUES", "export async function snapshotState("), // the gap sort key
     region('    case "gap":', '    case "incoming_overdue":'),
-    region('    case "incoming_overdue":', "  const sortKey ="),
+    // From 1.14 the filter switch is applyFilter, so the case ends with it.
+    region('    case "incoming_overdue":', "  return { rows, applied: filter };\n}"),
     region("  // 1.10: null, not 0, when there is no projection", "    relationships: relationships.rows,"), // Overview count
     region("export const GAP_CSV_COLUMNS", "export async function itemsCsv("), // 1.11: the items.csv columns
   ];

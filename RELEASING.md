@@ -156,6 +156,18 @@ Stage 14 of the plan, on Allied's answer to Q5 (13 Oct): "when they pick a diffe
 - **`node scripts/stage-check.mjs qty <capture>`** predicts, from one 1.12 capture, every Order list line whose suggested or order quantity 1.13 moves, old -> new, with its basis, lead, and est. cost: the list for Allied. It re-derives the rule independently from the capture (unrounded weekly from the demand fields, the stored burn, each line's and option's shown lead). A Chosen line at its suggestion is read as not typed (a 1.12 capture can't say; 1.13 adds `qtyTyped`) and flagged. **`qty <before> <after>`** fails unless every line's suggested, qty and est. cost equal the prediction (so exactly the predicted lines moved), every usual-supplier line equals its item's suggestion, typed quantities stayed, `qtyTyped` and `suggestionFor.basis` are right on every line, every option's own suggestion equals the prediction, supplier subtotals and the header add up from the lines, every item's own suggestion is identical, every other `/cart` field is identical, and `cart.csv` moved only on predicted rows to the predicted Order qty and Est cost (block headings only for moved suppliers). Reads captures only; sends nothing.
 - **Stage 14 deploy:** see "Stage 14 deploy" below.
 
+## What 1.14 changed
+
+Stage 15 of the plan: four defects on Inventory, moved off the Purchasing path (FEEDBACK-PLAN D6, §6). It ships as 1.14 because versions follow ship order and Stage 10 is parked. No served figure moves and nothing is written; what Allied see change is the Overview's Cover < 2 weeks list and the Used in cell, so it is announced with a before/after list like a numbers release (§4.5).
+
+- **`cover_lt2` (`queries.ts`).** A new filter key, coverWeeks < 2 on the served (1 dp) cover excl. on order, through `coverUnderTwoWeeks`, the predicate the Overview's `coverUnder2w` now counts with too, so the tile and its list can't drift. Before, the tile opened `low_cover` (< 4 weeks): 322 items behind a tile reading 303 on the 26 Aug copy (as at 14 Oct). `low_cover` is unchanged. Inventory offers it as "Cover under 2 weeks", just above "Cover under 4 weeks". On a 1.13 server the key is unknown and lists everything. `/items` now also echoes the filter it applied (additive `filter`: the key, or "all" for none or an unknown one, as `sort` echoes the order), so a 1.14 tab on a 1.13 server, which sends no echo, drops the filter from the summary line whatever the sort, as it does for `below_lead` and the gap filters. (A guess from the page, as first built, missed a Cover-sorted list: its first 50 are all under 2 weeks even unfiltered.)
+- **`filterItems` (`queries.ts`, pure, exported).** The filter `switch` moved out of `listItems` verbatim, so a test can hold a tile's count to the list it opens without a database. It still runs after the search, facets and region. Proof: 168 `listItems` responses (21 filters x 4 sorts x with / without a search and region) hash-identical between the 1.13 tree and this one on the copy.
+- **Every Overview tile opens a fresh list (`public/inventory.js`, pure, tested).** `overviewTileState(filter)` is the tile's filter with everything else at its default (no search, region, product type, finish or tag; risk order; page 1), and `overviewTileHash` its address, `#/inventory?filter=<filter>`. The address always carries a query, so `route()` reads the whole view from it. Before, a tile set `invState.filter` alone and went to a bare `#/inventory`, which keeps whatever the last visit left: on the copy, Suggested orders (133) opened 36 after a search for "bolt" from China. All seven tiles (Below min stock, Cover < 2 weeks, Suggested orders, Runs out before next delivery, Negative stock, Assembled products, Excess stock value) go through it; their totals on the copy with nothing left over: 0, 303, 133, 45, 0, 513 and 190 items, each equal to its count. Inventory's own address builder moved there as `inventoryHashFor`, unchanged (tested against the 1.13 function). Presets, Clear and the Inventory nav link are unchanged (the nav link still keeps the view, on purpose).
+- **Used in shows the figure it sorts by.** The cell is `usedInCount(item)` = max(`parentCountDeep`, `parentCount`), exactly `SORT_VALUES.used_in`; before, it showed `parentCount` (direct parents only) while sorting by the deep count. Its tooltip names both ("Used in 13 products, counting sub-assemblies: 2 directly, 11 more via sub-assemblies"). It moves on items inside a sub-assembly only: 79 of the 445 items with a parent on the copy (BN1665G 2 -> 13, N16S16M 18 -> 83, WR16301.5S16 11 -> 70). A server without `parentCountDeep` shows the direct count.
+- **Inventory subtitle.** "Position quantities are MYOB facts" becomes "On hand, committed, free stock and on order are platform figures built from MYOB transactions", the wording the 26 Aug review (C1, C2) gave the item page and the Overview.
+- **Export this list** follows the filter, sort, direction, search, region, facets and date: 1.3 made `loadInventoryTable` rebuild its link on every load. Checked, not changed; a test now pins it.
+- **Stage 15 deploy:** see "Stage 15 deploy" below.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -527,6 +539,26 @@ On the evening, or the day before (pre-flight and window as for any deploy):
 6. [ ] Send the release note.
 
 If rolled back: nothing to restore; tell Allied the listed lines are back at their 1.12 quantities.
+
+## Stage 15 deploy: Inventory small fixes
+
+A UI release whose golden diff is the release block and the new `filter` echo on `/items` (items.json `filter`: absent -> "all"), but Allied see two things read differently (the Cover < 2 weeks list, the Used in cell), so the list goes to them before the deploy (§4.5). Nothing is written, so no snapshot. Rollback is a pure revert while 1.14 is the newest release: the tile opens `low_cover` again and Used in shows direct parents.
+
+Before the evening, on the refreshed local copy (`npm run dev:local`):
+- [ ] `stage-check capture` before (1.13 checkout) and after, `diff --allow scripts/expected/1.14.0.json`: 0 not allowed (release, items.json `filter`).
+
+On the evening, or the day before (pre-flight and window as for any deploy):
+1. [ ] Capture prod before. **Produce the list for Allied** from it (reads the capture only):
+   ```sh
+   node -e 'const d=require("../captures/1.14.0-before/items.json"),o=require("../captures/1.14.0-before/overview.json");const lt=(w)=>d.items.filter(i=>i.coverWeeks!=null&&i.coverWeeks<w).length;console.log("Cover < 2 weeks tile",o.kpis.coverUnder2w,"| list it opened (under 4 weeks)",lt(4),"| list from 1.14",lt(2));for(const i of d.items)if((i.parentCountDeep??0)>(i.parentCount??0))console.log(i.number,"Used in",i.parentCount,"->",i.parentCountDeep)'
+   ```
+   The tile and "list from 1.14" must be equal. Re-derive the `RELEASES` examples (BN1665G 2 -> 13, the 303 / 322) from it and set `date`. Send the list.
+2. [ ] Push, wait for `release.version` = `1.14.0`, capture after, `diff --allow scripts/expected/1.14.0.json`: 0 not allowed.
+3. [ ] `positionParity` is 0.
+4. [ ] In the browser (GET only): on Inventory, search for something, pick a region and a sort; go to the Overview and click each tile in turn. Each opens with an empty search, All regions, All product types / finishes / tags, the tile's filter and Risk order, and the count above the list equals the tile (Excess stock value: the item count, not the dollars). Sort Inventory by Used in: the numbers run highest first, and BN1665G's tooltip reads "2 directly, 11 more via sub-assemblies" (or the prod figures). Export this list after changing the filter and sort: the CSV has the list's rows, in its order.
+5. [ ] Send the release note.
+
+If rolled back: nothing to restore.
 
 ## Snapshots and data changes
 

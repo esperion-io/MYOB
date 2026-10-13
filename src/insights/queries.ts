@@ -1392,12 +1392,93 @@ export async function listItems(params: ListParams) {
         : rows.filter((r) => r.supplierRegion === params.region);
   }
 
-  switch (params.filter) {
+  const filtered = applyFilter(rows, params.filter);
+  rows = filtered.rows;
+
+  const sortKey = params.sort && SORT_VALUES[params.sort] ? params.sort : "risk";
+  const dir =
+    params.dir === "asc" || params.dir === "desc"
+      ? params.dir
+      : (SORT_DEFAULT_DIR[sortKey] ?? "desc");
+  const value = SORT_VALUES[sortKey];
+  rows = [...rows].sort((a, b) => {
+    const va = value(a);
+    const vb = value(b);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1; // missing values always last
+    if (vb == null) return -1;
+    const c =
+      typeof va === "string" && typeof vb === "string"
+        ? va.localeCompare(vb)
+        : Number(va) - Number(vb);
+    return dir === "asc" ? c : -c;
+  });
+
+  /*
+   * The 200 cap protects the browser from a runaway page, but an export must
+   * never be silently truncated — a spreadsheet missing 2,900 of 3,100 rows
+   * looks complete and is not. `all` opts out, and only the export uses it.
+   */
+  const pageSize = params.all
+    ? rows.length
+    : Math.min(Math.max(params.pageSize ?? 50, 10), 200);
+  const page = params.all ? 1 : Math.max(params.page ?? 1, 1);
+  const start = (page - 1) * pageSize;
+
+  return {
+    total: rows.length,
+    page,
+    pageSize,
+    window: win,
+    ...(await snapshotState(win.asAt)),
+    sort: sortKey,
+    dir,
+    // The filter actually applied (1.14), "all" for an unknown key, as sort
+    // above echoes the order used. A 1.14 tab asks for cover_lt2 and reads
+    // this to tell whether it got it: no item shape gives a 1.13 server away,
+    // and a guess from the page missed a Cover-sorted first page (all 50
+    // under 2 weeks out of 3,103 unfiltered).
+    filter: filtered.applied,
+    targetCoverWeeks: config.insights.targetCoverWeeks,
+    items: rows.slice(start, start + pageSize),
+  };
+}
+
+/*
+ * Cover under two weeks (1.14), on the served cover (excl. on order, 1 dp):
+ * what the Overview's "Cover < 2 weeks" tile counts and the cover_lt2 filter
+ * its click opens lists. One predicate for both, so the tile and its list
+ * can't drift apart again: the tile used to open low_cover (under 4 weeks),
+ * a longer list than the number on the tile.
+ */
+export function coverUnderTwoWeeks(i: Pick<ItemComputed, "coverWeeks">): boolean {
+  return i.coverWeeks != null && i.coverWeeks < 2;
+}
+
+/**
+ * The Inventory filter (the `filter` key of /items and items.csv), applied
+ * after the search, facets and region. Pure, and exported (1.14) so a test
+ * can hold an Overview tile's count to the list its click opens. An unknown
+ * key lists everything: an older tab, or a bookmark, still opens a list.
+ */
+export function filterItems(rows: ItemComputed[], filter: string | undefined): ItemComputed[] {
+  return applyFilter(rows, filter).rows;
+}
+
+/** filterItems, plus the key it applied: the one asked for, or "all" when unknown. */
+function applyFilter(
+  rows: ItemComputed[],
+  filter: string | undefined,
+): { rows: ItemComputed[]; applied: string } {
+  switch (filter) {
     case "attention":
       rows = rows.filter((r) => r.risk.score >= 25);
       break;
     case "below_min":
       rows = rows.filter((r) => r.flags.includes("below_min"));
+      break;
+    case "cover_lt2":
+      rows = rows.filter(coverUnderTwoWeeks);
       break;
     case "low_cover":
       rows = rows.filter((r) => r.coverWeeks != null && r.coverWeeks < 4);
@@ -1466,49 +1547,10 @@ export async function listItems(params: ListParams) {
     case "incoming_overdue":
       rows = rows.filter((r) => (r.incomingOverdueQty ?? 0) > 0);
       break;
+    default:
+      return { rows, applied: "all" };
   }
-
-  const sortKey = params.sort && SORT_VALUES[params.sort] ? params.sort : "risk";
-  const dir =
-    params.dir === "asc" || params.dir === "desc"
-      ? params.dir
-      : (SORT_DEFAULT_DIR[sortKey] ?? "desc");
-  const value = SORT_VALUES[sortKey];
-  rows = [...rows].sort((a, b) => {
-    const va = value(a);
-    const vb = value(b);
-    if (va == null && vb == null) return 0;
-    if (va == null) return 1; // missing values always last
-    if (vb == null) return -1;
-    const c =
-      typeof va === "string" && typeof vb === "string"
-        ? va.localeCompare(vb)
-        : Number(va) - Number(vb);
-    return dir === "asc" ? c : -c;
-  });
-
-  /*
-   * The 200 cap protects the browser from a runaway page, but an export must
-   * never be silently truncated — a spreadsheet missing 2,900 of 3,100 rows
-   * looks complete and is not. `all` opts out, and only the export uses it.
-   */
-  const pageSize = params.all
-    ? rows.length
-    : Math.min(Math.max(params.pageSize ?? 50, 10), 200);
-  const page = params.all ? 1 : Math.max(params.page ?? 1, 1);
-  const start = (page - 1) * pageSize;
-
-  return {
-    total: rows.length,
-    page,
-    pageSize,
-    window: win,
-    ...(await snapshotState(win.asAt)),
-    sort: sortKey,
-    dir,
-    targetCoverWeeks: config.insights.targetCoverWeeks,
-    items: rows.slice(start, start + pageSize),
-  };
+  return { rows, applied: filter };
 }
 
 export async function overview(opts?: Partial<DemandWindow>) {
@@ -1523,7 +1565,8 @@ export async function overview(opts?: Partial<DemandWindow>) {
   // count above is zero for want of a decision, not for want of stock, and
   // the Overview says so.
   const minStockSet = items.filter((i) => i.minLevel != null).length;
-  const lowCover = items.filter((i) => i.coverWeeks != null && i.coverWeeks < 2);
+  // The same predicate as the cover_lt2 filter this tile opens (1.14).
+  const lowCover = items.filter(coverUnderTwoWeeks);
   const negative = items.filter((i) => i.flags.includes("negative_stock"));
   const suggested = items.filter((i) => i.suggestion != null);
   const stockValue = items.reduce((s, i) => s + (i.currentValue ?? 0), 0);

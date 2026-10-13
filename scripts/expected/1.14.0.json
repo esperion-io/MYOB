@@ -1,0 +1,18 @@
+{
+  "version": "1.14.0",
+  "stage": "Stage 15: Inventory small fixes",
+  "note": "1.14 moves no served figure. The server gains one filter key, cover_lt2 (coverWeeks < 2, the predicate the Overview's coverUnder2w counts with, coverUnderTwoWeeks), and the filter switch moves verbatim out of listItems into the pure filterItems (its applyFilter also names the key applied); no capture requests cover_lt2, so no capture can change. /items also echoes the filter it applied (additive `filter`, \"all\" for none or an unknown key, as `sort` echoes the order), which a 1.14 tab reads to tell whether a server knew cover_lt2. Everything else is in the browser: the Overview tiles open their filter on a fresh Inventory view (public/inventory.js overviewTileHash), the Used in cell shows max(parentCountDeep, parentCount) (fields every item already carries) and the Inventory subtitle is reworded. Every capture (items, items.csv, cart.json, cart.csv, suppliers, overview, divergence, item and kit pages) must be identical apart from the release block /sync/status reports and that new items.json `filter`; anything else changing is a failure.",
+  "reviewed": "Written by hand from two in-process captures (stage-check capture through the real router, GET only) on the 26 Aug local copy (allied_dev), the 1.13 tree (7f5ccc1) then this tree, 13 Oct (as at 14 Oct NZ): 1 difference, release.version 1.13.0 -> 1.14.0; after review added the /items filter echo, re-captured: 2 differences, that and items.json filter (absent) -> \"all\". Also in process on the copy: listItems for all 21 existing filters x sorts risk / used_in / cover / number x (no search | q=bolt, region=China), all: true, 168 responses, hash-identical between the trees; items.csv (suggested, used_in) identical; overview() identical bar generatedAt. cover_lt2 lists 303 = kpis.coverUnder2w 303 (low_cover, which the tile opened before, 322); on the 1.13 tree it lists all 3,103 (unknown key). Every Overview tile's filter total equals its count with no search or region: below_min 0, cover_lt2 303, suggested 133, gap 45, negative 0, parents 513, excess 190 items; with q=bolt and region=China left on (the 1.13 click) they were 0 / 40 / 36 / 18 / 0 / 40 / 99. At 20 Aug: 337 / 188 / 513 / 170, equal, no gap tile. No database writes.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.13.0 -> 1.14.0) and commit"
+    },
+    {
+      "file": "items.json",
+      "path": "filter",
+      "why": "additive: /items echoes the filter it applied (\"all\" here, the capture asks for none), so a 1.14 tab can tell a server that ignored cover_lt2"
+    }
+  ]
+}

@@ -38,6 +38,7 @@ import {
   statusModel,
 } from "./incoming.js";
 import { gapCell, gapSentence, gapTile, hasGapFields, outlookModel } from "./gaps.js";
+import { inventoryHashFor, overviewTileHash, overviewTileState, usedInCount, usedInTitle } from "./inventory.js";
 
 /*
  * Which version this tab is running, and what each version changed (1.0).
@@ -55,9 +56,32 @@ import { gapCell, gapSentence, gapTile, hasGapFields, outlookModel } from "./gap
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.13.0";
+const UI_VERSION = "1.14.0";
 
 const RELEASES = [
+  {
+    version: "1.14.0",
+    // Set to the ship date, and re-derive the figures named here from that
+    // evening's prod capture: the Cover < 2 weeks tile against the low_cover
+    // total it used to open (`/items?filter=low_cover` and `filter=cover_lt2`,
+    // GET only), and the items whose Used in moves (every item whose
+    // parentCountDeep exceeds its parentCount in items.json). The examples
+    // are from the 26 Aug local copy, as at 14 Oct: the tile 303, the list it
+    // opened 322; 79 items inside a sub-assembly show a bigger Used in, e.g.
+    // BN1665G 2 -> 13 and N16S16M 18 -> 83.
+    // (Stage 10 has not shipped; versions follow ship order, so Stage 15 is
+    // 1.14.)
+    date: "2026-10-14",
+    stage: "Stage 15: Inventory small fixes",
+    changes: [
+      "Each count on the Overview now opens a list of exactly that many items (and Excess stock value, exactly the items that make it up). Clicking Cover under 2 weeks used to open every item with less than 4 weeks of cover, a longer list than the number on the tile. It now opens a new filter, Cover under 2 weeks, which you can also choose on Inventory beside Cover under 4 weeks.",
+      "Every Overview tile (Below min stock, Cover under 2 weeks, Suggested orders, Runs out before next delivery, Negative stock, Assembled products, Excess stock value) now opens Inventory fresh: only that tile's filter, with no search, region, product type, finish or tag left over from your last visit, sorted by risk. Before, a search or region you had set on Inventory stayed on, so the list could be shorter than the tile.",
+      "On Inventory, the Used in column now shows every product an item ends up in, counting sub-assemblies, which is the number the column already sorted by. Before, it showed only the products that use the item directly, so the order looked wrong. For example, BN1665G read 2 and now reads 13: it goes into 2 products directly, and through those into 11 more. Hover over the number to see how many are direct.",
+      "The line under the Inventory heading now says that on hand, committed, free stock and on order are worked out here from your MYOB transactions. It used to call them MYOB figures, which they haven't been since we started building them from your counts, bills, invoices, builds and orders.",
+    ],
+    numbers: "No stock figure, suggestion, minimum or order sheet changes. Two things read differently: the list behind Cover under 2 weeks on the Overview is now the items with under 2 weeks of cover, matching the tile (before, under 4 weeks), and Used in on Inventory now counts sub-assemblies, on items that sit inside one (for example BN1665G 2 → 13). Items used only directly read as before.",
+    check: "Open Inventory, search for something and pick a region. Go to the Overview and click Cover under 2 weeks: the search box is empty, the region reads All regions, the filter reads Cover under 2 weeks, and the count above the list equals the number on the tile. Do the same with Suggested orders. On Inventory, sort by Used in: the numbers now run highest first; hover over BN1665G's to read \"2 directly, 11 more via sub-assemblies\".",
+  },
   {
     version: "1.13.0",
     // Set to the ship date, and re-derive every item and figure named here
@@ -513,6 +537,7 @@ const INVENTORY_FILTERS = [
   ["attention", "Needs attention"],
   ["suggested", "Suggested orders"],
   ["below_min", "Below min stock"],
+  ["cover_lt2", "Cover under 2 weeks"],
   ["low_cover", "Cover under 4 weeks (about a month)"],
   ["below_lead", "Below lead time (even with on order)"],
   ["gap", "Runs out before next delivery"],
@@ -1187,18 +1212,7 @@ function applyInventoryQuery(queryString) {
 }
 
 function inventoryHash() {
-  const p = new URLSearchParams();
-  if (invState.q) p.set("q", invState.q);
-  if (invState.filter && invState.filter !== "all") p.set("filter", invState.filter);
-  if (invState.region) p.set("region", invState.region);
-  if (invState.sort && invState.sort !== "risk") p.set("sort", invState.sort);
-  if (invState.dir) p.set("dir", invState.dir);
-  if (invState.productType) p.set("productType", invState.productType);
-  if (invState.productFinish) p.set("productFinish", invState.productFinish);
-  if (invState.tag) p.set("tag", invState.tag);
-  if (invState.page > 1) p.set("page", String(invState.page));
-  const qs = p.toString();
-  return `#/inventory${qs ? `?${qs}` : ""}`;
+  return inventoryHashFor(invState);
 }
 
 /** Update the address bar without re-rendering the whole page. */
@@ -1584,7 +1598,7 @@ async function renderOverview() {
         <span class="k-label">Below min stock</span><span class="k-value">${qty(k.belowMin)}</span>
         ${k.minStockSet ? "" : '<span class="k-note">none set yet</span>'}
       </div>
-      <div class="kpi link ${k.coverUnder2w ? "warn" : ""}" data-filter="low_cover"><span class="k-label">Cover &lt; ${coverWords(2)}</span><span class="k-value">${qty(k.coverUnder2w)}</span></div>
+      <div class="kpi link ${k.coverUnder2w ? "warn" : ""}" data-filter="cover_lt2"><span class="k-label">Cover &lt; ${coverWords(2)}</span><span class="k-value">${qty(k.coverUnder2w)}</span></div>
       <div class="kpi link" data-filter="suggested"><span class="k-label">Suggested orders</span><span class="k-value">${qty(k.suggestedOrders)}</span></div>
       ${
         // 1.11. Null (a past date, gaps switched off) or missing (a server
@@ -1713,11 +1727,18 @@ async function renderOverview() {
   main.querySelectorAll("tr.rowlink").forEach((tr) =>
     tr.addEventListener("click", () => (location.hash = `#/item/${tr.dataset.uid}`)),
   );
+  /*
+   * A tile opens its own list and nothing else (1.14): the tile's filter,
+   * no search, region, facet or tag, and the default sort, so the list total
+   * is the number on the tile. It used to set only the filter and keep what
+   * the last visit to Inventory left, so "Suggested orders" (133 on the
+   * 26 Aug copy) opened 36 after a search for "bolt" from China. The address
+   * carries the filter, so Back and a reload show the same list.
+   */
   main.querySelectorAll(".kpi.link").forEach((el) =>
     el.addEventListener("click", () => {
-      invState.filter = el.dataset.filter;
-      invState.page = 1;
-      location.hash = "#/inventory";
+      Object.assign(invState, overviewTileState(el.dataset.filter));
+      location.hash = overviewTileHash(el.dataset.filter);
     }),
   );
 }
@@ -1729,7 +1750,7 @@ async function renderInventory() {
     <div class="page-head">
       <div>
         <h1>Inventory</h1>
-        <p class="page-sub">All synced SKUs with demand, cover and risk. Position quantities are MYOB facts.</p>
+        <p class="page-sub">All synced SKUs with demand, cover and risk. On hand, committed, free stock and on order are platform figures built from MYOB transactions.</p>
       </div>
     </div>
     <div class="presets">
@@ -1883,7 +1904,12 @@ async function loadInventoryTable() {
       data.items.length > 0 &&
       !("coverWeeksInclOnOrder" in data.items[0])) ||
     // The gap filters (1.11) on a server before 1.10, which has no gap fields.
-    (GAP_FILTERS.has(invState.filter) && data.items.length > 0 && !hasGapFields(data.items[0]));
+    (GAP_FILTERS.has(invState.filter) && data.items.length > 0 && !hasGapFields(data.items[0])) ||
+    // cover_lt2 (1.14) on a server before 1.14: no item shape tells, so 1.14
+    // echoes the filter it applied and anything earlier sends none. A guess
+    // from the page missed a Cover-sorted list, whose first page is all under
+    // 2 weeks even unfiltered.
+    (invState.filter === "cover_lt2" && data.filter !== "cover_lt2");
 
   syncInventoryUrl();
   // Built once in renderInventory, so it went stale on every filter, sort or
@@ -1936,7 +1962,7 @@ async function loadInventoryTable() {
                     <td>${coverInclFmt(i)}</td>
                     <td class="gap-cell">${gapCellHtml(i.gap ?? null, i.gapStatus ?? null, hasGapFields(i), i.qtyFreeStock != null)}</td>
                     <td class="num">${money(i.currentValue)}</td>
-                    <td class="num">${i.parentCount || "—"}</td>
+                    <td class="num" title="${esc(usedInTitle(i))}">${usedInCount(i) || "—"}</td>
                     <td>${flagChips(i.flags)}</td>
                   </tr>`,
                 )
@@ -4630,7 +4656,11 @@ async function renderData() {
       <h2>Definitions &amp; known limitations</h2>
       <dl class="glossary">
         <dt>Position quantities (on hand, committed, on order, available)</dt>
-        <dd>Taken directly from the MYOB item master and never recalculated by this platform.
+        <dd>Platform figures built from MYOB's own transactions: on hand is the last stock count
+        (or the opening balance) plus every movement since; committed comes from open sale orders;
+        on order is what is still to arrive on open purchase orders, leaving out the reversal
+        documents MYOB keeps open; available is free stock plus on order. MYOB's own quantities
+        are kept alongside so any difference shows on this page.
         Every stocked item is re-read from MYOB on every sync: MYOB does not update an item's
         LastModified when stock moves, so fetching only "changed" items would quietly serve
         month-old quantities. Note: MYOB's "available" includes stock on order (verified against
