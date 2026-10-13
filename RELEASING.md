@@ -52,6 +52,17 @@ Groundwork for the by-item Order list (1.6), shipped on its own so a defect in i
 - **`public/order-list.js`** exports `groupLinesByItem(cart)`: one row per item, qty and est. cost summed over its lines (a split's parts add up), options taken once, the item's stock fields carried, the 1.5 fields read with `?? null`. Not used on screen until 1.6. It is DOM-free, so `test/order-list.test.ts` imports it directly; `test/release.test.ts` now also checks that every `public/` module but the two page scripts loads without a DOM.
 - **Stage 5 deploy:** see "Stage 5 deploy" below. The snapshot is mandatory, because every Order list write now goes through the new reload.
 
+## What 1.6 changed
+
+Allied's request #3: the Order list by item. Browser only; no server file changes, so every capture is identical apart from `release`.
+
+- **Purchasing opens on By item** (`#/purchasing`). By supplier, unchanged, is `#/purchasing/suppliers`; Minimum stock review stays `#/purchasing/minimums`. Any other tab opens By item, as any other tab opened the Order list before; so on a rollback to 1.5, both new URLs open the old Order list.
+- **One row per item**, drawn from `/cart` by `public/order-list.js` (`orderByItemRows`: `groupLinesByItem`, then risk highest first, then item number). The pure models for each cell (`supplierCell`, `qtyCell`, `rowLeadTimes`, `orderListSummary`, `BY_ITEM_COLUMNS`) live there and are tested in `test/order-list.test.ts`; `dashboard.js` only renders them.
+- **Header:** "N items to order · M taken off · $X estimated". N + M = `totalItems`, and $X is `/cart`'s `estimatedCost`, never re-added in the browser.
+- **Writes are By supplier's own.** The qty box uses the same `wireCartQtyInput` (POST `/cart/line` with the line's supplier, `edited` unless the line is Chosen or Split), × is `/cart/take-off`, Use preferred / Keep are the same buttons, and Compare is the same drawer. Split rows and two-supplier rows are read-only ("edit in Compare"). The header buttons, notices, Decided and Taken off lists are shared functions (`orderListActions`, `cartDuplicatesNotice`, `cartKitNotice`, `wireOrderListCommon`), moved out of `drawCart` unchanged.
+- **Drill-down** (item code or ▸) fetches `/items/:uid` at the dates on screen, cached by URL and re-fetched if its stock no longer matches the row, and opens Inventory's expand panel through `toggleExpandRow` (colspan = `BY_ITEM_COLUMNS.length`, 15), with By item's own section (`ctx.extraHtml`: why this quantity, suppliers on file) and the detail it already holds (`ctx.detail`, so the chart isn't fetched twice). Inventory passes neither and is unchanged.
+- **Stage 6 deploy:** see "Stage 6 deploy" below. The snapshot is mandatory: By item is a second place every Order list write can be made from.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -257,6 +268,31 @@ On the evening (pre-flight and window as for any deploy):
 5. [ ] Send the release note: nothing changes on screen except the past-date note.
 
 If rolled back (R1–R5): R5 is `status`, then `diff --from pre_s5_<yyyymmdd>`. Nothing needs restoring, because 1.5 writes only through the existing endpoints and states; `undo <id>` handles any single bad write.
+
+## Stage 6 deploy: Purchasing by item
+
+A UI release: By item becomes Purchasing's default view. No figure moves and no server file changes, but every Order list write can now be made from a second view, so the snapshot comes first (§4.10). Done by Anthony: production Postgres is reached only from the Render shell.
+
+Before the evening, on the refreshed local copy (`npm run dev:local`):
+- [ ] Both views list the same (item, supplier, qty) set; By item's "N items to order · M taken off" adds up to By supplier's "items need an order", and its "$X estimated" equals By supplier's total (they part only while an item sits under two suppliers undecided; the duplicates notice says so).
+- [ ] Type a qty in By item: it shows on By supplier, marked Edited, with an `edit_line` change-log row carrying `detail.release = 1.6.0`. `supplier-rollback.mjs undo <id>` restores it. × then Put back round-trips. Use preferred / Keep and Compare → Choose / Split from By item behave as from By supplier. Put the copy back afterwards (`Start again`, then delete the test `cart` log rows).
+- [ ] On a checkout of `v1.5.0`, `#/purchasing` and `#/purchasing/suppliers` both open the Order list.
+
+On the evening (pre-flight and window as for any deploy):
+1. [ ] **Snapshot**, from the Render shell, before pushing:
+   ```sh
+   DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status        # note the database name it prints
+   DATABASE_URL=<prod> node scripts/supplier-rollback.mjs snapshot pre_s6_<yyyymmdd> --apply --confirm <that database name>
+   DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status        # pre_s6_<yyyymmdd> listed, no PROBLEM lines
+   ```
+   Record the snapshot name and its row counts in the 1.6.0 row of `FIX-PLAN.md` Part 5. No snapshot, no deploy.
+2. [ ] Re-derive the BN1665G row in the 1.6.0 `RELEASES` `check` from that evening's before-capture (`items.json`/`cart.json`): suggested, on hand, committed, free stock, on order, weekly, both covers, lead time, supplier. Set `date`.
+3. [ ] Capture before, push, wait for `release.version` = `1.6.0`, capture after, then `diff --allow scripts/expected/1.6.0.json`: 0 not allowed. `/cart` and `cart.csv` must be identical.
+4. [ ] `positionParity` is 0.
+5. [ ] In the browser (GET only, no edits on prod): Purchasing opens on By item; the header's two counts add up to By supplier's "items need an order" and the totals agree; BN1665G's row matches step 2; ▸ on it opens the panel with why this quantity and its suppliers on file; By supplier looks exactly as on 1.5.
+6. [ ] Send the release note. Ask Allied to edit one agreed item in By item and check it on By supplier, then tell us which item. Put it back with `supplier-rollback.mjs log`, then `undo <id>` on that `edit_line` (dry run, then `--apply --confirm <db>`). Not by typing the suggested quantity back: that saves a lasting `edited` row fixed at that day's suggestion, and the UI has no Undo for a qty edit.
+
+If rolled back (R1–R5): both new URLs open the 1.5 Order list. R5 is `status`, then `diff --from pre_s6_<yyyymmdd>`. Nothing needs restoring: rows written from By item are the same `edited` and `removed` rows and take-off markers By supplier writes, and `undo <id>` handles any single bad write. To withdraw By item later without a revert, ship a release that makes By supplier the default again (`orderListView`'s default and `renderPurchasing`'s mapping).
 
 ## Snapshots and data changes
 

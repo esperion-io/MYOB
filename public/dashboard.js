@@ -1,6 +1,15 @@
 /* Allied Fastenings — Inventory Intelligence (read-only MYOB). */
 
 import { displayVersion, releaseBanner } from "./release-banner.js";
+import {
+  BY_ITEM_COLUMNS,
+  orderByItemRows,
+  orderListSummary,
+  qtyCell,
+  rowLeadTimes,
+  supplierCell,
+  supplierRole,
+} from "./order-list.js";
 
 /*
  * Which version this tab is running, and what each version changed (1.0).
@@ -18,9 +27,27 @@ import { displayVersion, releaseBanner } from "./release-banner.js";
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.5.0";
+const UI_VERSION = "1.6.0";
 
 const RELEASES = [
+  {
+    version: "1.6.0",
+    // Set to the ship date, and re-derive the BN1665G row in `check` from
+    // that evening's capture: its figures drift with every sync. The
+    // snapshot pre_s6_<date> comes first (RELEASING.md, "Stage 6 deploy").
+    date: "2026-10-14",
+    stage: "Stage 6: Purchasing by item",
+    changes: [
+      "Purchasing now opens on the Order list by item, as you asked: one row per item, with the suggested quantity, the quantity on the order, and the item's current position beside it: on hand, committed, free stock, on order, weekly demand, cover excl. on order and cover incl. on order. The supplier, its lead time and the estimated cost are on the same row. Items most at risk come first (the same risk score as Inventory), then by item number.",
+      "The top of the page says how many items are on the order, how many you have taken off, and the estimated cost: \"N items to order · M taken off · $X estimated\". The two counts add up to By supplier's \"items need an order\", and the cost is the total the order sheets add up to.",
+      "The Supplier column says why the item is with that supplier: \"Hanova · preferred\" (set on the item page), \"· MYOB primary\", \"· from bills\" (the supplier who has billed it most) or \"· tagged\" (on the item page, not preferred). A supplier you picked earlier that isn't the preferred one reads \"Jiaxing · your pick (preferred: Hanova)\", with the same Use Hanova and Keep buttons as before. A split reads \"Split: Hanova 142 · Bremick 142\". Compare opens the same supplier comparison as before; for now that is where you choose a different supplier or split an item.",
+      "Type in Order qty to change a quantity. It is saved exactly as on By supplier, shows there too, and is marked Edited. A split item's quantities are changed in Compare. An item below its minimum stock whose free stock plus what is already on order covers it shows 0, labelled \"covered by on order\". × takes an item off the order; Put back is in the Taken off list above the table, as before.",
+      "Click an item code, or ▸, to open its detail under the row: the same panel as on Inventory, plus why this quantity, every supplier on file with its role, lead time and last cost, and a link to the full item page.",
+      "By supplier stays one click away for raising POs: one card is still one purchase order. The order sheet export is unchanged. Start again, the kit note and the list of earlier picks work as before on both tabs.",
+    ],
+    numbers: "None. No figure on any page changes in this version. By item shows the same items, suppliers, quantities and total as By supplier.",
+    check: "Open Purchasing: it opens on By item. Find BN1665G: suggested 1,779, on hand 333, committed 10, free stock 323, on order 2,000, 166.4 a week, cover excl. on order 1.9w, cover incl. on order 14w in red, lead time 120 d, supplier \"HANOVA INTERNATIONAL LTD · preferred\". Open By supplier: BN1665G is on the Hanova card with the same quantity, and the counts and total at the top agree. Type a new quantity for one item we agree on in By item and check it on By supplier, then tell us which item: we put it back exactly as it was. (Typing the suggested quantity back would leave it marked Edited and fixed at today's figure.)",
+  },
   {
     version: "1.5.0",
     // Set to the ship date. Nothing visible changes apart from the past-date
@@ -382,6 +409,23 @@ const MIN_STATUS_OPTIONS = [
   ["stale", "minimum set, but not moving"],
 ];
 
+/*
+ * The Order list's view state (1.6). Declared up here, not with the Order
+ * list code, because route() runs while this module is still loading: a
+ * page opened on #/purchasing reaches renderPurchasing before a `let` further
+ * down would exist.
+ *   orderListView  which view is on screen: "items" (By item, the default) or
+ *                  "suppliers" (By supplier). Every write redraws that one.
+ *   orderItemOpen  By item drill-downs left open, re-opened after a redraw.
+ *   orderItemRows  By item's rows on screen, by item uid.
+ *   orderItemDetails  /items/:uid for a drill-down, by its URL, which carries
+ *                  the as-at date and window, so changing either never shows
+ *                  another date's figures.
+ */
+let orderListView = "items";
+const orderItemOpen = new Set();
+let orderItemRows = new Map();
+const orderItemDetails = new Map();
 const prodState = { q: "", page: 1 };
 const supState = { q: "" };
 
@@ -1710,6 +1754,9 @@ function leadStockLine(r) {
  * so no other list could use it; the Order list's by-item view (1.6) will
  * pass its own. Inventory passes invItems, its header count (14) and its
  * target cover, which is what this read before, so it opens exactly as it did.
+ * By item (1.6) passes the one item it fetched, its own header count (15),
+ * the "Why this quantity" and suppliers section (ctx.extraHtml) and the item
+ * detail it already holds (ctx.detail), so the demand chart isn't fetched twice.
  */
 function toggleExpandRow(tr, lookup, colspan, ctx = {}) {
   const next = tr.nextElementSibling;
@@ -1728,7 +1775,7 @@ function toggleExpandRow(tr, lookup, colspan, ctx = {}) {
   );
   tr.classList.add("expanded");
   tr.querySelector(".caret").textContent = "▾";
-  loadExpandExtras(item.uid, tr.nextElementSibling.querySelector(".expand-extra"));
+  loadExpandExtras(item.uid, tr.nextElementSibling.querySelector(".expand-extra"), ctx.detail ?? null);
 }
 
 /**
@@ -1903,7 +1950,9 @@ function kvRow(label, value, cls = "") {
 /**
  * Inline detail panel, rendered instantly from the items-list payload.
  * `ctx.targetCoverWeeks` is the target the cover row quotes; the caller
- * passes it (1.5) rather than this reading Inventory's.
+ * passes it (1.5) rather than this reading Inventory's. `ctx.extraHtml` is a
+ * section the caller adds under the three columns (By item's "Why this
+ * quantity" and suppliers on file, 1.6); Inventory passes none.
  */
 function expandPanelHtml(i, ctx = {}) {
   const targetCover = ctx.targetCoverWeeks ?? null;
@@ -1996,16 +2045,21 @@ function expandPanelHtml(i, ctx = {}) {
         <div>${demand}</div>
         <div>${action}</div>
       </div>
+      ${ctx.extraHtml ? `<div class="expand-order">${ctx.extraHtml}</div>` : ""}
       <div class="expand-extra"><p class="loading">Loading 12-month demand and recent movements…</p></div>
       <p class="expand-foot"><a href="#/item/${esc(i.uid)}">Open full item page &rarr;</a></p>
     </div>`;
 }
 
-/** Lazily add the demand chart + latest movements from the item detail API. */
-async function loadExpandExtras(uid, el) {
+/**
+ * Lazily add the demand chart + latest movements from the item detail API.
+ * A caller already holding the detail for the dates on screen passes it
+ * (`known`, By item in 1.6) and nothing is fetched.
+ */
+async function loadExpandExtras(uid, el, known = null) {
   if (!el) return;
   try {
-    let detail = itemDetailCache.get(uid);
+    let detail = known ?? itemDetailCache.get(uid);
     if (!detail) {
       detail = await fetchJson(withWindow(`/api/insights/items/${encodeURIComponent(uid)}`));
       itemDetailCache.set(uid, detail);
@@ -4643,15 +4697,25 @@ let cartData = null;
 const cartOpen = new Set();
 
 /*
- * Purchasing has two sub-tabs: the order list (the cart) and the minimum stock
- * review that decides what "below minimum" means for it. Both are one
- * question — what should we be buying — asked at two horizons.
+ * Purchasing has three sub-tabs: the order list one row per item (#/purchasing,
+ * the default from 1.6, as Allied asked), the same order one card per supplier
+ * (#/purchasing/suppliers, unchanged: one card is one PO, so it stays for
+ * raising them) and the minimum stock review that decides what "below
+ * minimum" means for both. All one question — what should we be buying —
+ * asked at two horizons.
+ *
+ * Any other tab opens By item, as any other tab opened the Order list before
+ * 1.6. That is also how a rollback stays safe: a release before 1.6 opens
+ * both #/purchasing and #/purchasing/suppliers as its one Order list.
  */
 async function renderPurchasing(tab) {
   if (tab === "minimums") {
     await renderMinStockReview();
     return;
   }
+  orderListView = tab === "suppliers" ? "suppliers" : "items";
+  // A fresh visit opens with every drill-down closed; redraws after a write keep them.
+  orderItemOpen.clear();
   main.innerHTML = '<p class="loading">Building the order list…</p>';
   await reloadOrderList();
 }
@@ -4661,23 +4725,24 @@ async function renderPurchasing(tab) {
  *
  * Every write on the Order list (a typed qty, ×, Put back, Use preferred,
  * Keep, Choose, Split, Undo) used to re-fetch /cart and call drawCart itself,
- * in eight places. The by-item view (1.6) must redraw itself after the same
- * writes, so they all come here and this decides which view to draw. Only
- * By supplier exists today, so it draws that, exactly as each site did.
+ * in eight places. They all come here instead, and this redraws whichever
+ * view the write was made from, By item or By supplier.
  */
 async function reloadOrderList() {
   cartData = await fetchJson(withWindow("/api/insights/cart"));
   drawOrderList();
 }
 
-/** Draw whichever Order list view is active. Only By supplier until 1.6. */
+/** Draw whichever Order list view is active. */
 function drawOrderList() {
-  drawCart();
+  if (orderListView === "suppliers") drawCart();
+  else drawOrderByItem();
 }
 
 function purchasingTabs(active) {
   return `<nav class="subtabs" aria-label="Purchasing sections">
-    <a href="#/purchasing" class="${active === "cart" ? "active" : ""}">Order list</a>
+    <a href="#/purchasing" class="${active === "items" ? "active" : ""}">By item</a>
+    <a href="#/purchasing/suppliers" class="${active === "suppliers" ? "active" : ""}">By supplier</a>
     <a href="#/purchasing/minimums" class="${active === "minimums" ? "active" : ""}">Minimum stock review</a>
   </nav>`;
 }
@@ -4713,7 +4778,6 @@ function cartRequirementLabel(d) {
 
 function drawCart() {
   const d = cartData;
-  const undecided = d.unresolvedDuplicates;
 
   main.innerHTML = `
     ${historicalNotice(d)}
@@ -4724,16 +4788,43 @@ function drawCart() {
         ${qty(d.suppliers.length)} suppliers · ${cartRequirementLabel(d)} ·
         demand over the last ${windowLabel()}. Nothing is written to MYOB.</p>
       </div>
-      <div class="head-actions">
+      ${orderListActions()}
+    </div>
+    ${purchasingTabs("suppliers")}
+
+    ${cartDuplicatesNotice(d)}
+
+    ${cartKitNotice(d)}
+
+    ${cartPickConflicts(d)}
+    ${cartDecisionsMade(d)}
+    ${cartRemovedItems(d)}
+
+    <div class="cart-suppliers">
+      ${d.suppliers.map(cartSupplierCard).join("")}
+    </div>`;
+
+  wireOrderListCommon();
+  wireCartCards();
+}
+
+/*
+ * What both Order list views share (1.6): the header buttons, the notices
+ * above the list, and the Start again, Work through them, Undo, Put back and
+ * Use preferred / Keep wiring. Moved here out of drawCart unchanged, so By
+ * item and By supplier can never word or wire them differently.
+ */
+function orderListActions() {
+  return `<div class="head-actions">
         <button class="btn" id="cart-reset" type="button" title="Discard every edit, choice and split">Start again</button>
         <a class="btn primary" href="${cartExportUrl()}" download>Export order sheets</a>
-      </div>
-    </div>
-    ${purchasingTabs("cart")}
+      </div>`;
+}
 
-    ${
-      undecided
-        ? `<div class="notice warn cart-decisions">
+function cartDuplicatesNotice(d) {
+  const undecided = d.unresolvedDuplicates;
+  return undecided
+    ? `<div class="notice warn cart-decisions">
              <strong>${qty(undecided)} item${undecided === 1 ? " sits" : "s sit"} under more than one supplier</strong>
              with no choice recorded. Each is a sourcing decision — usually a smaller local order against a
              cheaper, slower one direct from the factory. Left undecided they can be ordered twice, so the
@@ -4745,33 +4836,27 @@ function drawCart() {
              }
              <button class="btn small" id="cart-decide" type="button">Work through them</button>
            </div>`
-        : `<div class="notice ok">Every item has one supplier, or a deliberate split. Nothing can be ordered twice.</div>`
-    }
+    : `<div class="notice ok">Every item has one supplier, or a deliberate split. Nothing can be ordered twice.</div>`;
+}
 
-    ${
-      d.kit && (d.kit.buildPlans || d.kit.doubleOrders)
-        ? `<div class="notice cart-kit">
+function cartKitNotice(d) {
+  return d.kit && (d.kit.buildPlans || d.kit.doubleOrders)
+    ? `<div class="notice cart-kit">
              ${d.kit.buildPlans ? `<strong>${qty(d.kit.buildPlans)} product${d.kit.buildPlans === 1 ? " has" : "s have"} never been bought complete</strong>,
                so they are not in this cart — there is no purchase price to put on them. They show on
                <a href="#/products">Products &amp; BOM</a> as a quantity to build. ` : ""}
              ${d.kit.doubleOrders ? `<strong>${qty(d.kit.doubleOrders)} kit${d.kit.doubleOrders === 1 ? " is" : "s are"}</strong> on order
                together with ${d.kit.doubleOrders === 1 ? "its" : "their"} own parts, or with a kit ${d.kit.doubleOrders === 1 ? "it goes" : "they go"} into — worth a look before exporting. ` : ""}
            </div>`
-        : ""
-    }
+    : "";
+}
 
-    ${cartPickConflicts(d)}
-    ${cartDecisionsMade(d)}
-    ${cartRemovedItems(d)}
-
-    <div class="cart-suppliers">
-      ${d.suppliers.map(cartSupplierCard).join("")}
-    </div>`;
-
+function wireOrderListCommon() {
   document.getElementById("cart-reset").addEventListener("click", async () => {
     if (!confirm("Discard every quantity edit, supplier choice and split? Allied data only — MYOB is untouched.")) return;
     await fetchJson("/api/insights/cart/reset", { method: "POST" });
-    renderPurchasing();
+    // Back to the view it was pressed on, not to the default.
+    renderPurchasing(orderListView);
   });
   const decide = document.getElementById("cart-decide");
   if (decide) decide.addEventListener("click", showCartDecisions);
@@ -4801,7 +4886,349 @@ function drawCart() {
     }),
   );
   wirePickConflictButtons(main);
-  wireCartCards();
+}
+
+/* ================= Order list by item (1.6) =================
+ *
+ * Allied's request #3: "change the view to be by item NOT by Supplier — it
+ * shows recommended order qty; drill down in item code; it shows current data
+ * on that item". One row per item, the item's stock beside its order, highest
+ * risk first (Inventory's default), then item number.
+ *
+ * Nothing here is a second source of numbers. The rows are /cart's lines
+ * regrouped (order-list.js), so this view and By supplier list the same items,
+ * suppliers and quantities, and every write goes through the endpoints By
+ * supplier uses: a typed qty is the same POST /cart/line with the line's
+ * supplier, × the same take-off, Use preferred / Keep the same buttons, and a
+ * supplier choice or split the same Compare drawer. The stock columns are the
+ * item's own figures, copied onto each line by the server (1.5), so they equal
+ * Inventory's and the item page's.
+ *
+ * Choosing the supplier on the row is a later release; until then it is done
+ * in Compare, which every row links to.
+ */
+function drawOrderByItem() {
+  const d = cartData;
+  const rows = orderByItemRows(d);
+  const sum = orderListSummary(d, rows);
+  orderItemRows = new Map(rows.map((r) => [r.itemUid, r]));
+  const cols = BY_ITEM_COLUMNS.length;
+  // Forget drill-downs for items no longer on the list (taken off, or settled).
+  for (const uid of [...orderItemOpen]) if (!orderItemRows.has(uid)) orderItemOpen.delete(uid);
+
+  main.innerHTML = `
+    ${historicalNotice(d)}
+    <div class="page-head">
+      <div>
+        <h1>Purchasing</h1>
+        <p class="page-sub">${qty(sum.toOrder)} item${sum.toOrder === 1 ? "" : "s"} to order · ${qty(sum.takenOff)} taken off ·
+        ${money(sum.estimatedCost)} estimated · demand over the last ${windowLabel()}. Nothing is written to MYOB.</p>
+      </div>
+      ${orderListActions()}
+    </div>
+    ${purchasingTabs("items")}
+
+    ${cartDuplicatesNotice(d)}
+
+    ${cartKitNotice(d)}
+
+    ${cartPickConflicts(d)}
+    ${cartDecisionsMade(d)}
+    ${cartRemovedItems(d)}
+
+    <p class="view-summary">${qty(rows.length)} item${rows.length === 1 ? "" : "s"} · highest risk first ·
+      click an item or ▸ for its detail · To raise a purchase order, use By supplier: one card is one order.</p>
+    <div class="table-wrap obi-wrap"><table class="obi-table">
+      <thead><tr>${BY_ITEM_COLUMNS.map(byItemTh).join("")}</tr></thead>
+      <tbody>
+        ${
+          rows.length
+            ? rows.map(orderItemRowHtml).join("")
+            : `<tr><td colspan="${cols}" class="muted">Nothing needs an order${
+                sum.takenOff ? "; the items taken off are listed above" : ""
+              }.</td></tr>`
+        }
+      </tbody>
+    </table></div>`;
+
+  wireOrderListCommon();
+  wireOrderByItem(cols);
+}
+
+/** A By item header: Inventory's label and glossary hover where it has one, else its own tip. */
+function byItemTh(c) {
+  if (c.term) return th(c.term, c.label, c.cls ?? "");
+  if (!c.tip) return `<th class="${c.cls ?? ""}">${esc(c.label)}</th>`;
+  return `<th class="${c.cls ?? ""}"><span class="term" title="${esc(c.tip)}">${esc(c.label)}</span></th>`;
+}
+
+/** The Supplier cell, from supplierCell's model. */
+function byItemSupplierHtml(r) {
+  const m = supplierCell(r);
+  let html;
+  if (m.kind === "split" || m.kind === "several") {
+    const parts = m.parts.map((p) => `${esc(p.name ?? "—")} ${qty(p.qty)}`).join(" · ");
+    html =
+      m.kind === "split"
+        ? `<span title="Deliberately ordered from more than one supplier">Split:</span> ${parts}`
+        : `${parts} <span class="badge warn" title="The item sits under more than one supplier with no choice recorded; it can be ordered twice">decide in Compare</span>`;
+    if (m.conflict)
+      html += `<br /><span class="muted" title="${esc(pickReason(m.conflict))}">preferred: ${esc(m.conflict.preferredSupplierName ?? "—")}</span>
+        <span class="nowrap">${pickConflictButtons(r.itemUid, r.number, m.conflict.preferredSupplierName)}</span>`;
+  } else if (m.kind === "conflict") {
+    // A struck preferred line is not a pick: say what happened, as By supplier's chip does.
+    const why = m.struck
+      ? `· preferred ${esc(m.preferredName ?? "supplier")} was struck off`
+      : `· your pick (preferred: ${esc(m.preferredName ?? "—")})`;
+    html = `${esc(m.name ?? "—")} <span class="muted" title="${esc(pickReason(m.conflict))}">${why}</span>
+      <br /><span class="nowrap">${pickConflictButtons(r.itemUid, r.number, m.preferredName)}</span>`;
+  } else if (m.kind === "kept") {
+    const over = `kept over ${esc(m.preferredName ?? "preferred")}`;
+    html = `${esc(m.name ?? "—")} <span class="muted" title="${esc(pickReason(m.conflict))} Kept on purpose.">· ${m.struck ? over : `your pick (${over})`}</span>`;
+  } else if (m.kind === "unknown") {
+    html = `<span class="muted">${esc(m.name ?? "No known supplier")}</span>`;
+  } else {
+    html = `${esc(m.name ?? "—")}${m.role ? ` <span class="muted">· ${esc(m.role)}</span>` : ""}`;
+  }
+  const chosen = r.lines.length === 1 && r.lines[0].state === "selected"
+    ? ' <span class="badge ok" title="Chosen supplier for this item">Chosen</span>'
+    : "";
+  const compare = r.options.length
+    ? ` <button class="linkish obi-compare" type="button" title="Compare every supplier on file for this item">Compare</button>`
+    : "";
+  return `${html}${chosen}${compare}`;
+}
+
+/** The Order qty cell, from qtyCell's model. */
+function byItemQtyHtml(r) {
+  const q = qtyCell(r);
+  if (!q.editable)
+    return `<strong>${qty(q.qty)}</strong><br />
+      <button class="linkish obi-compare" type="button" title="${
+        q.why === "split" ? "A split's parts are set in Compare" : "Choose one supplier, or record a split, in Compare"
+      }">edit in Compare</button>`;
+  return `<input class="cart-qty" type="number" step="any" min="0" value="${q.qty}"
+      aria-label="Order quantity for ${esc(r.number ?? "")}" />
+    ${q.edited ? '<br /><span class="badge brand" title="You typed this quantity">Edited</span>' : ""}
+    ${q.coveredByOnOrder ? '<br /><span class="muted" title="Below its minimum, but free stock plus what is already on order meets the target, so nothing more is suggested">covered by on order</span>' : ""}
+    ${q.carriedFrom ? `<br /><span class="muted" title="Typed while this item was under ${esc(q.carriedFrom)}; it follows the item">typed under ${esc(q.carriedFrom)}</span>` : ""}`;
+}
+
+/** The Lead time cell: each line's figure once, "unknown" where there is none. */
+function byItemLeadHtml(r) {
+  const leads = rowLeadTimes(r);
+  if (!leads.length) return "—";
+  return leads
+    .map((t) =>
+      t.days == null
+        ? '<span class="muted" title="No lead time set, and none measured from their orders">unknown</span>'
+        : `<span title="${t.setByAllied ? "Set by Allied" : `Median measured across ${t.orders} matched order${t.orders === 1 ? "" : "s"}`}">${qty(t.days)} d</span>`,
+    )
+    .join(" / ");
+}
+
+function orderItemRowHtml(r) {
+  const first = r.lines[0] ?? {};
+  // A server before 1.5 sends no Cover incl. on order; that reads "—", not "no demand".
+  const incl =
+    "coverWeeksInclOnOrder" in first
+      ? { coverWeeksInclOnOrder: r.coverWeeksInclOnOrder, coverBelowLeadTime: r.coverBelowLeadTime }
+      : {};
+  const kitBadge = r.kitDoubleOrder
+    ? ' <span class="badge warn" title="This item and something it is made of are both on the order list — one requirement can end up bought twice">kit + parts both ordered</span>'
+    : "";
+  return `
+    <tr class="obi-row" data-uid="${esc(r.itemUid)}" data-number="${esc(r.number ?? "")}"
+        data-supplier="${esc(r.lines.length === 1 ? first.supplierUid : "")}" data-state="${esc(r.lines.length === 1 ? first.state : "")}">
+      <td class="caret obi-caret" title="Show this item's detail">▸</td>
+      <td><button class="linkish obi-toggle" type="button" title="Show this item's detail"><strong>${esc(r.number ?? "—")}</strong></button>${kitBadge}
+        <br /><span class="muted">${esc((r.name ?? "").slice(0, 60))}${r.productFinish ? ` · ${esc(r.productFinish)}` : ""}</span></td>
+      <td class="obi-supplier">${byItemSupplierHtml(r)}</td>
+      <td class="num">${qty(r.suggestedQty)}</td>
+      <td class="num obi-qty">${byItemQtyHtml(r)}</td>
+      <td class="num">${qty(r.onHand)}</td>
+      <td class="num">${qty(r.qtyCommitted)}</td>
+      <td class="num"><strong>${qty(r.freeStock)}</strong></td>
+      <td class="num">${qty(r.incomingQty)}</td>
+      <td class="num">${r.weeklyDemand ? Number(r.weeklyDemand).toFixed(1) : "—"}</td>
+      <td>${coverFmt(r.coverWeeks, first.rationale?.demandBasis)}</td>
+      <td>${coverInclFmt(incl)}</td>
+      <td class="num nowrap">${byItemLeadHtml(r)}</td>
+      <td class="num">${money(r.estCost)}</td>
+      <td class="num"><button class="tag-x obi-remove" type="button" title="Take this item off this order">×</button></td>
+    </tr>`;
+}
+
+function wireOrderByItem(cols) {
+  main.querySelectorAll("tr.obi-row").forEach((tr) => {
+    const itemUid = tr.dataset.uid;
+    const number = tr.dataset.number;
+
+    tr.querySelector(".obi-caret").addEventListener("click", () => toggleOrderItemRow(tr, cols));
+    tr.querySelector(".obi-toggle").addEventListener("click", () => toggleOrderItemRow(tr, cols));
+
+    const qtyInput = tr.querySelector(".cart-qty");
+    if (qtyInput) wireCartQtyInput(qtyInput, itemUid, tr.dataset.supplier, tr.dataset.state);
+
+    tr.querySelectorAll(".obi-compare").forEach((b) =>
+      b.addEventListener("click", () => openCompareFromList(itemUid, tr.dataset.supplier || null, number)),
+    );
+
+    // × takes the whole item off, split or not, exactly as By supplier's ×
+    // does for an unsplit line. Put back is in the Taken off list above.
+    const remove = tr.querySelector(".obi-remove");
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      try {
+        await fetchJson("/api/insights/cart/take-off", {
+          method: "POST",
+          body: JSON.stringify({ itemUid }),
+        });
+        orderItemOpen.delete(itemUid);
+        await reloadOrderList();
+      } catch (err) {
+        remove.disabled = false;
+        alert(err.message);
+      }
+    });
+  });
+
+  // A redraw after a write re-opens what was open, from the cached detail.
+  for (const uid of orderItemOpen) {
+    const tr = main.querySelector(`tr.obi-row[data-uid="${CSS.escape(uid)}"]`);
+    if (tr) toggleOrderItemRow(tr, cols);
+  }
+}
+
+/*
+ * The item's own detail for a drill-down: GET /items/:uid at the dates on
+ * screen. The row's stock came from /cart; the panel's comes from here, and
+ * the two are the same computed item. If a sync landed in between they would
+ * differ, so a cached copy whose stock no longer matches the row is fetched
+ * again rather than shown beside it.
+ */
+async function orderItemDetail(row) {
+  const url = withWindow(`/api/insights/items/${encodeURIComponent(row.itemUid)}`);
+  const cached = orderItemDetails.get(url);
+  if (cached && sameStock(row, cached.item)) return cached;
+  const detail = await fetchJson(url);
+  orderItemDetails.set(url, detail);
+  return detail;
+}
+
+function sameStock(row, i) {
+  return (
+    i != null &&
+    row.onHand === i.qtyOnHand &&
+    row.freeStock === i.qtyFreeStock &&
+    row.incomingQty === i.incomingQty &&
+    (row.qtyCommitted == null || row.qtyCommitted === i.qtyCommitted)
+  );
+}
+
+/*
+ * Open or close an item's drill-down: Inventory's expand panel for the full
+ * computed item, plus why this quantity and the suppliers on file. The panel
+ * is Inventory's own (toggleExpandRow), so the two can't drift apart.
+ */
+async function toggleOrderItemRow(tr, cols) {
+  const uid = tr.dataset.uid;
+  if (tr.nextElementSibling?.classList.contains("expand-row")) {
+    orderItemOpen.delete(uid);
+    toggleExpandRow(tr, null, cols);
+    return;
+  }
+  const row = orderItemRows.get(uid);
+  if (!row || tr.dataset.loading) return;
+  const caret = tr.querySelector(".caret");
+  tr.dataset.loading = "1";
+  caret.textContent = "…";
+  let detail;
+  try {
+    detail = await orderItemDetail(row);
+  } catch (err) {
+    caret.textContent = "▸";
+    delete tr.dataset.loading;
+    alert(`Could not load ${row.number ?? "this item"}: ${err.message}`);
+    return;
+  }
+  delete tr.dataset.loading;
+  caret.textContent = "▸";
+  // Redrawn while it loaded, or opened twice: nothing to add.
+  if (!tr.isConnected || tr.nextElementSibling?.classList.contains("expand-row")) return;
+  orderItemOpen.add(uid);
+  toggleExpandRow(tr, new Map([[uid, detail.item]]), cols, {
+    targetCoverWeeks: orderTargetCover(row, detail),
+    extraHtml: orderItemPanelHtml(row),
+    detail,
+  });
+  tr.nextElementSibling
+    ?.querySelectorAll(".obi-compare")
+    .forEach((b) => b.addEventListener("click", () => openCompareFromList(uid, tr.dataset.supplier || null, row.number)));
+}
+
+/*
+ * The target cover the panel's cover row quotes. It is one setting for every
+ * item (TARGET_COVER_WEEKS, 8), but /items/:uid carries it only inside a
+ * suggestion, and an item below its minimum but covered by on order has none
+ * (D19). So: this item's rationale, else any row's on the list, else the one
+ * Inventory last loaded, so the panel reads as Inventory's does.
+ */
+function orderTargetCover(row, detail) {
+  const own = row.lines[0]?.rationale?.targetCoverWeeks ?? detail.item?.suggestion?.rationale?.targetCoverWeeks;
+  if (own != null) return own;
+  for (const r of orderItemRows.values())
+    for (const l of r.lines) if (l.rationale?.targetCoverWeeks != null) return l.rationale.targetCoverWeeks;
+  return invTargetCover ?? null;
+}
+
+/** The drill-down's own section: why this quantity, and every supplier on file. */
+function orderItemPanelHtml(r) {
+  const why =
+    r.lines.length === 1
+      ? cartRationale(r.lines[0])
+      : r.lines
+          .map((l) => `<div><strong>${esc(l.supplierName ?? "—")}</strong> ${qty(l.qty)} · ${cartRationale(l)}</div>`)
+          .join("");
+  const q = qtyCell(r);
+  const options = r.options ?? [];
+  return `
+    <div class="expand-order-grid">
+      <div>
+        <h3>Why this quantity</h3>
+        <p class="obi-why-head">Suggested <strong>${qty(r.suggestedQty)}</strong> · on this order <strong>${qty(r.qty)}</strong>${
+          q.edited ? ' <span class="badge brand">Edited</span>' : ""
+        }${q.coveredByOnOrder ? ' <span class="muted">· covered by on order</span>' : ""}</p>
+        ${why}
+      </div>
+      <div>
+        <h3>Suppliers on file — ${qty(options.length)}</h3>
+        ${
+          options.length
+            ? `<div class="table-wrap"><table>
+                <thead><tr><th>Supplier</th><th>Role</th><th class="num">Lead time</th><th class="num">Last cost</th></tr></thead>
+                <tbody>${options
+                  .map(
+                    (o) => `<tr>
+                      <td>${esc(o.supplierName ?? "—")} ${
+                        o.inCart ? (o.state === "split" ? '<span class="badge ok">In the split</span>' : '<span class="badge brand">On this order</span>') : ""
+                      }</td>
+                      <td>${esc(supplierRole(o) ?? "—")}</td>
+                      <td class="num">${
+                        o.leadTimeDays == null
+                          ? '<span class="muted">unknown</span>'
+                          : `${qty(o.leadTimeDays)} d <span class="muted">${o.leadTimeSetByAllied ? "set by Allied" : `from ${o.leadTimeOrders} order${o.leadTimeOrders === 1 ? "" : "s"}`}</span>`
+                      }</td>
+                      <td class="num">${o.lastCost != null ? price(o.lastCost) : '<span class="muted" title="This supplier has never billed the item">—</span>'}</td>
+                    </tr>`,
+                  )
+                  .join("")}</tbody>
+              </table></div>
+              <p><button class="btn small obi-compare" type="button">Compare and choose</button></p>`
+            : '<p class="muted">No supplier on file. Add one on the item page.</p>'
+        }
+      </div>
+    </div>`;
 }
 
 /*
@@ -5103,30 +5530,7 @@ function wireCartCards() {
     const supplierUid = tr.dataset.supplier;
 
     const qtyInput = tr.querySelector(".cart-qty");
-    if (qtyInput) {
-      // Save on blur rather than per keystroke: Allied are typing a considered
-      // number, not searching, and a request per digit would fight them.
-      //
-      // Only a changed number is saved, and a Chosen or Split line keeps its
-      // state. Clicking in and out of the box used to save it as a plain edit,
-      // which quietly undid the choice it belonged to.
-      qtyInput.addEventListener("blur", async () => {
-        // An emptied or unreadable box puts the saved number back rather than
-        // saving 0, which would quietly order none. Typing 0 still saves.
-        if (qtyInput.value.trim() === "" || qtyInput.validity.badInput) {
-          qtyInput.value = qtyInput.defaultValue;
-          return;
-        }
-        const value = Number(qtyInput.value);
-        if (!Number.isFinite(value) || value < 0) return;
-        if (value === Number(qtyInput.defaultValue)) return;
-        const decided = tr.dataset.state === "selected" || tr.dataset.state === "split";
-        await saveCartLine({ itemUid, supplierUid, qty: value, ...(decided ? {} : { state: "edited" }) });
-      });
-      qtyInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") qtyInput.blur();
-      });
-    }
+    if (qtyInput) wireCartQtyInput(qtyInput, itemUid, supplierUid, tr.dataset.state);
 
     const remove = tr.querySelector(".cart-remove");
     if (remove)
@@ -5152,19 +5556,52 @@ function wireCartCards() {
 
     const compare = tr.querySelector(".cart-compare");
     if (compare)
-      compare.addEventListener("click", () => {
-        // Entering from a duplicate queues the other duplicates too, so a
-        // decision made here can roll straight into the next one. An item
-        // that is already settled just opens its comparison.
-        const line = cartLine(itemUid, supplierUid);
-        const undecidedHere =
-          line && line.supplierCount > 1 && line.state !== "selected" && line.state !== "split";
-        if (!undecidedHere) decisionQueue = [];
-        else if (!decisionQueue.includes(itemUid)) {
-          decisionQueue = [itemUid, ...buildDecisionQueue().filter((u) => u !== itemUid)];
-        }
-        openSupplierCompare(itemUid, compare.dataset.number);
-      });
+      compare.addEventListener("click", () => openCompareFromList(itemUid, supplierUid, compare.dataset.number));
+  });
+}
+
+/** The compare drawer, opened from a row of either Order list view. */
+function openCompareFromList(itemUid, supplierUid, number) {
+  // Entering from a duplicate queues the other duplicates too, so a
+  // decision made here can roll straight into the next one. An item
+  // that is already settled just opens its comparison.
+  const line = cartLine(itemUid, supplierUid);
+  const undecidedHere =
+    line && line.supplierCount > 1 && line.state !== "selected" && line.state !== "split";
+  if (!undecidedHere) decisionQueue = [];
+  else if (!decisionQueue.includes(itemUid)) {
+    decisionQueue = [itemUid, ...buildDecisionQueue().filter((u) => u !== itemUid)];
+  }
+  openSupplierCompare(itemUid, number);
+}
+
+/*
+ * A typed order quantity, saved. One function for both Order list views
+ * (1.6), so a qty typed in By item is the same request, the same row and the
+ * same change-log entry as one typed in By supplier.
+ */
+function wireCartQtyInput(qtyInput, itemUid, supplierUid, state) {
+  // Save on blur rather than per keystroke: Allied are typing a considered
+  // number, not searching, and a request per digit would fight them.
+  //
+  // Only a changed number is saved, and a Chosen or Split line keeps its
+  // state. Clicking in and out of the box used to save it as a plain edit,
+  // which quietly undid the choice it belonged to.
+  qtyInput.addEventListener("blur", async () => {
+    // An emptied or unreadable box puts the saved number back rather than
+    // saving 0, which would quietly order none. Typing 0 still saves.
+    if (qtyInput.value.trim() === "" || qtyInput.validity.badInput) {
+      qtyInput.value = qtyInput.defaultValue;
+      return;
+    }
+    const value = Number(qtyInput.value);
+    if (!Number.isFinite(value) || value < 0) return;
+    if (value === Number(qtyInput.defaultValue)) return;
+    const decided = state === "selected" || state === "split";
+    await saveCartLine({ itemUid, supplierUid, qty: value, ...(decided ? {} : { state: "edited" }) });
+  });
+  qtyInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") qtyInput.blur();
   });
 }
 

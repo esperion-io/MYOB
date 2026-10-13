@@ -1,0 +1,13 @@
+{
+  "version": "1.6.0",
+  "stage": "Stage 6: Purchasing by item",
+  "note": "1.6 is browser-only: the By item view regroups the /cart the server already sends, and no server file changes. Every capture (items, cart.json, cart.csv, suppliers, overview, divergence, item and kit pages) must be identical apart from the release block /sync/status reports; anything else changing is a failure.",
+  "reviewed": "Written by hand: `git diff df5968f -- src/` is empty, so no API response or CSV can change. On the 26 Aug local copy (allied_dev), in process: /cart has 133 items, 133 lines, 0 taken off, estimatedCost 29,814.29; the By item rows (orderByItemRows) are 133 = distinct items, list the same (item, supplier, qty) set as the supplier groups, Σ qty 37,041 and Σ est. cost 29,814.29 equal to the cent, and every row's on hand, committed, free stock, on order, weekly demand, both covers, below-lead flag, risk and suggestion equal /items/:uid for the item (0 mismatches over 133), with committed = on hand - free stock. With an edited qty (2THR16G 5 -> 105), a take-off (CBNSP1690G), a split (B24160S16 579/579) and a pick (N24S16M to Tong Ming) written through the real cart functions: still equal (Σ est. 30,941.76 both ways; rows 132 + 1 taken off = 133), the edited qty shows under its supplier, and the edit_line entry carries detail.release 1.6.0. Put back returned the item. All rows removed afterwards (cart 0, off 0, ack 0, log 0, sequence reset).",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.5.0 -> 1.6.0) and commit"
+    }
+  ]
+}
