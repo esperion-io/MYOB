@@ -408,3 +408,238 @@ export function orderSortSummary(state) {
   const word = s.text ? (d === "asc" ? "A to Z" : "Z to A") : d === "asc" ? "lowest first" : "highest first";
   return `sorted by ${s.label.toLowerCase()}, ${word}`;
 }
+
+/*
+ * Choosing the supplier on the row (1.8). Allied asked to "select supplier —
+ * preferred is the default but I want the option to change it". The Supplier
+ * cell becomes a dropdown of the suppliers on file, which is exactly the
+ * compare drawer's list (the line's `options`, already in the server's order:
+ * preferred, MYOB primary, top biller, other tagged, picked earlier), set to
+ * the supplier the item is ordered from now. Choosing one sends what Compare
+ * → Choose sends, so the pick is the same row, flagged the same way, with the
+ * same Use preferred / Keep. Only suppliers on file are offered (D9): adding
+ * one is the item page's job, which keeps the Order list's inputs unchanged.
+ *
+ *   select   one line under a known supplier: the dropdown. `single` when
+ *            only one supplier is on file, so the cell can point at the item
+ *            page instead of offering a choice of one.
+ *   split    a split (or a split down to one part): its parts are changed in
+ *            Compare, where the quantities are, never from a dropdown.
+ *   several  two lines that are not a split: decided in Compare, as in 1.6.
+ *   ruled    Allied ruled on the item page that it has no supplier.
+ *   unknown  no supplier on file at all.
+ */
+export function supplierSelect(row) {
+  const cell = supplierCell(row);
+  if (cell.kind === "split") return { kind: "split", count: cell.parts.length, cell };
+  if (cell.kind === "several") return { kind: "several", cell };
+  const l = row?.lines?.[0];
+  if (cell.kind === "unknown" || !l) return { kind: l?.supplierRuledNone ? "ruled" : "unknown", cell };
+  const options = [...(row.options ?? [])];
+  // The line's own supplier is always among its options; if a server ever
+  // sent one that wasn't, the dropdown still shows where the item is now.
+  if (!options.some((o) => o.supplierUid === l.supplierUid))
+    options.unshift({ supplierUid: l.supplierUid, supplierName: l.supplierName, isPreferred: !!l.isPreferred, source: l.supplierSource, leadTimeDays: l.leadTimeDays, lastCost: l.lastCost });
+  return {
+    kind: "select",
+    cell,
+    current: l.supplierUid,
+    preferredUid: row.preferredSupplierUid ?? null,
+    single: options.length === 1,
+    options: options.map((o) => ({
+      supplierUid: o.supplierUid,
+      name: o.supplierName ?? null,
+      role: supplierRole(o),
+      leadTimeDays: o.leadTimeDays ?? null,
+      lastCost: o.lastCost ?? null,
+      selected: o.supplierUid === l.supplierUid,
+    })),
+  };
+}
+
+/*
+ * What an option reads: "Hanova — preferred · 120 d · $0.42 last". A part
+ * that is missing (no lead time known, never billed) is left out rather than
+ * shown as "—", so the closed dropdown stays short. `price` formats the last
+ * cost; dashboard.js passes its own, a test passes a fixed one.
+ */
+export function supplierOptionLabel(o, price = (v) => `$${Number(v).toFixed(2)}`) {
+  const bits = [
+    o.role,
+    o.leadTimeDays != null ? `${Number(o.leadTimeDays).toLocaleString()} d` : null,
+    o.lastCost != null ? `${price(o.lastCost)} last` : null,
+  ].filter(Boolean);
+  return `${o.name ?? "—"}${bits.length ? ` — ${bits.join(" · ")}` : ""}`;
+}
+
+/*
+ * The request a choice in the dropdown sends, or null when nothing changes.
+ *
+ *   the preferred supplier again   use-preferred: the pick is cleared and a
+ *                                  typed quantity comes with it, exactly as
+ *                                  the Use preferred button does
+ *   any other supplier             select, as Compare → Choose: this order
+ *                                  only, the preferred supplier unchanged,
+ *                                  the pick flagged with Use preferred / Keep
+ *   no preferred supplier at all   select, whichever is chosen, including the
+ *                                  default again: it is recorded as Chosen,
+ *                                  as Compare → Choose records it
+ */
+export function supplierChangeRequest(row, supplierUid) {
+  const m = supplierSelect(row);
+  if (m.kind !== "select" || !supplierUid || supplierUid === m.current) return null;
+  if (!m.options.some((o) => o.supplierUid === supplierUid)) return null;
+  if (m.preferredUid && supplierUid === m.preferredUid)
+    return { endpoint: "use-preferred", body: { itemUid: row.itemUid } };
+  return { endpoint: "select", body: { itemUid: row.itemUid, supplierUid } };
+}
+
+/*
+ * Why the quantity does not move when the supplier does (1.8). The
+ * suggestion is the item's own, built on its usual (effective) supplier's
+ * lead time whichever supplier the line is on (whether it should follow the
+ * chosen supplier is Allied's question Q5, Stage 14). So the message names
+ * what the quantity IS built on, by the kind of minimum, from the rationale
+ * fields /cart carries from 1.8:
+ *
+ *   window  "Quantity stays 1,779. It is built from your minimum of 2,771,
+ *           which was set from Hanova's 120-day lead time over 6 months of
+ *           use. Changing the supplier here doesn't change it."
+ *   manual  "… built from your minimum of M, which you set by hand."
+ *   lead    "… built on Hanova's 120-day lead time, the item's usual supplier."
+ *
+ * A window minimum quotes the lead it was set from (it is not re-derived
+ * when a supplier's lead changes; the minimum review shows that drift). A
+ * server before 1.8 sends none of these fields: then just the first sentence.
+ * A typed quantity stays because it was typed, not because of any minimum:
+ * "Quantity stays 3,000, the number you typed. … The suggestion (2,760) is
+ * built on …". Without that, the 3,000 Allied typed on N24S16M read as if
+ * Shandong Tengda's lead had produced it.
+ */
+/*
+ * leadStockBasis is one of three (cart.ts): a minimum set from a consumption
+ * window, a minimum typed by hand ("manual"), or none, the live lead time
+ * ("lead"). The first is told apart by elimination: test/order-list.test.ts
+ * keeps this module free of the browser's global names, that word included.
+ */
+const minFromWindow = (r) => r.leadStockBasis !== "manual" && r.leadStockBasis !== "lead";
+
+/*
+ * Whose lead time a figure is, as a possessive, or null where it can't be
+ * said (1.8 review). Where Allied set a lead on the item itself
+ * (leadTimeUsedSource "item": N24S16M carries 107 days on prod while
+ * Shandong Tengda's own is 131) the suggestion is built on that, whichever
+ * supplier the line is on, so crediting it to the usual supplier would be
+ * false. A window minimum quotes the lead it was set from; platform_min_stock
+ * keeps no supplier, so on an item lead it is "this item's own" only where
+ * it is still the item's figure, and unattributed otherwise. A server before
+ * the review sends no leadTimeUsedSource: the usual supplier, as before.
+ */
+export function leadOwner(r, days = r?.leadTimeDaysUsed) {
+  if (r?.leadTimeUsedSource === "item")
+    return days != null && Number(days) === Number(r.leadTimeDaysUsed) ? "this item's own" : null;
+  return r?.leadTimeUsedFor ? `${r.leadTimeUsedFor}'s` : null;
+}
+
+/*
+ * Whether the row's quantity is one Allied typed rather than the suggestion
+ * (1.8 review): an Edited line, a quantity carried from another supplier, or
+ * a Chosen line whose quantity is not the suggestion (a pick keeps a typed
+ * qty). Then the quantity stays because it was typed, and the minimum or
+ * lead only explains the suggestion beside it.
+ */
+function typedQty(row) {
+  const l = row?.lines?.[0];
+  if (!l) return false;
+  if (l.state === "edited" || l.qtyCarriedFrom) return true;
+  return row.suggestedQty != null && Number(row.qty) !== Number(row.suggestedQty);
+}
+
+export function quantityStaysMessage(row, qty = (v) => Number(v).toLocaleString()) {
+  const l = row?.lines?.[0];
+  const r = l?.rationale ?? {};
+  const typed = typedQty(row);
+  const head = typed
+    ? `Quantity stays ${qty(row?.qty ?? 0)}, the number you typed. Changing the supplier here doesn't change it.`
+    : `Quantity stays ${qty(row?.qty ?? 0)}.`;
+  if (!("leadStockBasis" in r)) return head;
+  // "It", or for a typed quantity the suggestion it replaced.
+  const it = typed ? `The suggestion (${qty(row.suggestedQty ?? 0)})` : "It";
+  const min = qty(l.minLevel ?? r.minLevel ?? 0);
+  if (r.leadStockBasis === "manual") return `${head} ${it} is built from your minimum of ${min}, which you set by hand.`;
+  if (minFromWindow(r)) {
+    const days = r.minLeadTimeDays ?? r.leadTimeDaysUsed;
+    const owner = leadOwner(r, days);
+    const lead = days != null ? `${owner ?? "a"} ${qty(days)}-day lead time` : `${owner ?? "the"} lead time then in force`;
+    const over = r.minWindowMonths != null ? ` over ${r.minWindowMonths} months of use` : "";
+    const tail = typed ? "" : " Changing the supplier here doesn't change it.";
+    return `${head} ${it} is built from your minimum of ${min}, which was set from ${lead}${over}.${tail}`;
+  }
+  const who = r.leadTimeUsedFor ?? "the usual supplier";
+  if (r.leadTimeDaysUsed == null)
+    return `${head} No lead time is known for ${who}, the item's usual supplier, so ${typed ? "the suggestion" : "it"} is built on cover alone.`;
+  if (r.leadTimeUsedSource === "item")
+    return `${head} ${it} is built on this item's own ${qty(r.leadTimeDaysUsed)}-day lead time, set on the item page, whichever supplier it is ordered from.`;
+  return `${head} ${it} is built on ${who}'s ${qty(r.leadTimeDaysUsed)}-day lead time, the item's usual supplier.`;
+}
+
+/*
+ * "Why this quantity", the lead-time sentence (1.8): the lead time and the
+ * minimum the suggestion was actually built on, then this line's supplier's
+ * own lead where the line is with someone else. Before 1.8 the drill-down
+ * quoted only the line's lead, so a pick of Tong Ming (42 days) read as if
+ * the quantity were built on 42 days when it was built on Shandong Tengda's
+ * 131. Null for a server before 1.8, which sends no basis. `compare` false
+ * leaves the line's own lead out, for a split, whose parts each show theirs.
+ * An item lead is every line's lead, so there is nothing to compare.
+ *
+ *   "Built on Hanova's 120-day lead time (preferred). Jiaxing's is 120 days."
+ *   "Your minimum (2,771, from Hanova's 120 days) sets the lead-time stock."
+ *   "Built on this item's own 107-day lead time (set on the item page), whichever supplier it is ordered from."
+ */
+export function leadBasisSentence(line, options = [], qty = (v) => Number(v).toLocaleString(), compare = true) {
+  const r = line?.rationale ?? {};
+  if (!("leadStockBasis" in r)) return null;
+  const who = r.leadTimeUsedFor ?? null;
+  const used = r.leadTimeDaysUsed ?? null;
+  const itemLead = r.leadTimeUsedSource === "item";
+  const min = qty(line.minLevel ?? r.minLevel ?? 0);
+  const daysText = (d) => `${qty(d)} ${Number(d) === 1 ? "day" : "days"}`;
+  let s;
+  if (minFromWindow(r)) {
+    const days = r.minLeadTimeDays ?? used;
+    const owner = leadOwner(r, days);
+    const from = days != null ? `${owner ? `${owner} ` : ""}${daysText(days)}` : owner ? `${owner} lead time` : "a lead time";
+    s = `Your minimum (${min}, from ${from}) sets the lead-time stock.`;
+  } else if (r.leadStockBasis === "manual") {
+    s = `Your minimum (${min}, set by hand) sets the lead-time stock.`;
+  } else if (used == null) {
+    s = who ? `No lead time is known for ${who}, so no lead-time stock is added.` : "No supplier is known, so no lead-time stock is added.";
+  } else if (itemLead) {
+    s = `Built on this item's own ${qty(used)}-day lead time (set on the item page), whichever supplier it is ordered from.`;
+  } else {
+    const role = supplierRole((options ?? []).find((o) => o.supplierName === who));
+    s = `Built on ${who ? `${who}'s` : "the usual supplier's"} ${qty(used)}-day lead time${role ? ` (${role})` : ""}.`;
+  }
+  const mine = line.supplierName;
+  if (compare && !itemLead && who && mine && line.supplierUid !== "none" && mine !== who) {
+    const d = line.leadTimeDays;
+    const lead = r.leadStockBasis === "lead" ? "" : " lead time";
+    s += d != null ? ` ${mine}'s${lead} is ${daysText(d)}.` : ` ${mine}'s${lead} is not known.`;
+  }
+  return s;
+}
+
+/*
+ * The first sentence of the message after a choice in the dropdown: what
+ * happened, for this order only. The quantity sentence follows it.
+ */
+export function supplierChangedMessage(row, endpoint) {
+  const l = row?.lines?.[0];
+  const name = l?.supplierName ?? "the chosen supplier";
+  const number = row?.number ?? "This item";
+  if (endpoint === "use-preferred") return `${number} is back with its preferred supplier, ${name}.`;
+  if (row?.preferredSupplierName && !l?.isPreferred)
+    return `${number} is now ordered from ${name}, for this order only. Its preferred supplier is still ${row.preferredSupplierName}; change that on the item page.`;
+  return `${number} is now ordered from ${name}, for this order only.`;
+}

@@ -8,7 +8,10 @@ import { release, staleWriteError } from "../release.js";
 import type { CartState } from "../insights/cart.js";
 import {
   cartExport,
+  cartSupplierOptions,
   purchaseCart,
+  selectSupplierProblem,
+  splitPartsProblem,
   undoCartDecision,
   keepCartPick,
   putCartItemBack,
@@ -805,6 +808,13 @@ insightsRouter.post("/cart/select", async (req, res) => {
       res.status(400).json({ error: "itemUid and supplierUid are required." });
       return;
     }
+    // Only a supplier the Order list offers this item (1.8), checked before
+    // anything is written.
+    const problem = selectSupplierProblem(await cartSupplierOptions(itemUid), supplierUid);
+    if (problem) {
+      res.status(400).json({ error: problem });
+      return;
+    }
     await selectCartSupplier(itemUid, supplierUid);
     res.json({ ok: true });
   } catch (err) {
@@ -821,7 +831,17 @@ insightsRouter.post("/cart/split", async (req, res) => {
       res.status(400).json({ error: "itemUid and at least two parts are required." });
       return;
     }
-    await splitCartItem(itemUid, parts);
+    // Distinct suppliers the Order list offers this item, each with a qty of
+    // zero or more (1.8), checked before anything is written.
+    const problem = splitPartsProblem(await cartSupplierOptions(itemUid), parts);
+    if (problem) {
+      res.status(400).json({ error: problem });
+      return;
+    }
+    await splitCartItem(
+      itemUid,
+      (parts as { supplierUid: string; qty: number }[]).map((p) => ({ supplierUid: p.supplierUid, qty: p.qty })),
+    );
     res.json({ ok: true });
   } catch (err) {
     send500(res, err);

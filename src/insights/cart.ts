@@ -352,6 +352,52 @@ export async function loadSourcing(db: Pick<PoolClient, "query">, uids: string[]
   };
 }
 
+/*
+ * The suppliers an item can be put with on the Order list (1.8): exactly the
+ * options the Order list offers it — on file (Allied's tags, MYOB's primary,
+ * the top biller) plus any supplier it was already chosen or split to here.
+ * /cart/select and /cart/split check against this before writing anything.
+ * They used to accept any uid at all, so a stale tab or a typo could put an
+ * item with a supplier that is on file nowhere, where only "picked earlier"
+ * would ever explain it. The compare drawer only ever offers these, so a tab
+ * from before 1.8 never meets the check.
+ */
+export async function cartSupplierOptions(itemUid: string): Promise<SupplierOption[]> {
+  await ensureInsightsSchema();
+  return (await loadSourcing(getPool(), [itemUid])).optionsFor(itemUid);
+}
+
+const NOT_ON_FILE =
+  "is not a supplier on file for this item. Add it on the item page first, then choose it here.";
+
+/** Why /cart/select must refuse this supplier for an item with these options, or null. */
+export function selectSupplierProblem(options: SupplierOption[], supplierUid: unknown): string | null {
+  if (typeof supplierUid !== "string" || !supplierUid) return "supplierUid is required.";
+  if (!options.length) return "This item has no supplier on file to choose. Add one on the item page first.";
+  if (!options.some((o) => o.supplierUid === supplierUid)) return `That supplier ${NOT_ON_FILE}`;
+  return null;
+}
+
+/**
+ * Why /cart/split must refuse these parts, or null: at least two, each a
+ * different supplier on file for the item, each with a quantity of zero or
+ * more. A supplier twice would write one row and drop the other part's qty.
+ */
+export function splitPartsProblem(options: SupplierOption[], parts: unknown): string | null {
+  if (!Array.isArray(parts) || parts.length < 2) return "A split needs at least two parts.";
+  const seen = new Set<string>();
+  for (const p of parts as unknown[]) {
+    const { supplierUid, qty } = (p ?? {}) as { supplierUid?: unknown; qty?: unknown };
+    if (typeof supplierUid !== "string" || !supplierUid) return "Every part of a split needs a supplierUid.";
+    if (typeof qty !== "number" || !Number.isFinite(qty) || qty < 0)
+      return "Every part of a split needs a qty of zero or more.";
+    if (seen.has(supplierUid)) return "A supplier can appear only once in a split.";
+    seen.add(supplierUid);
+    if (!options.some((o) => o.supplierUid === supplierUid)) return `A supplier in this split ${NOT_ON_FILE}`;
+  }
+  return null;
+}
+
 /** One item's plan exactly as the Order list would show it. */
 async function planFor(db: Pick<PoolClient, "query">, itemUid: string) {
   const s = await loadSourcing(db, [itemUid]);
@@ -378,6 +424,12 @@ export interface CartLine {
   preferredSupplierName: string | null;
   /** A saved decision that disagrees with the preferred supplier, if any. */
   conflict: PickConflict | null;
+  /**
+   * Allied ruled on the item page that this item has no supplier (1.8), so
+   * the Order list can say "No supplier (ruled)" rather than "No known
+   * supplier", which reads as a gap still to fill.
+   */
+  supplierRuledNone: boolean;
   /** Every supplier on file for the item, for the compare drawer. */
   options: CartOption[];
   /**
@@ -672,6 +724,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         preferredSupplierUid: plan.preferred?.supplierUid ?? null,
         preferredSupplierName: plan.preferred?.supplierName ?? null,
         conflict: plan.conflict,
+        supplierRuledNone: item.supplierRuledNone,
         options: compare,
         leadTimeDays: lt?.days ?? null,
         leadTimeSetByAllied: lt?.setByAllied ?? false,
@@ -709,6 +762,30 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
           coverWeeks: item.coverWeeks,
           leadTimeDays: lt?.days ?? null,
           incoming: item.incomingQty,
+          /*
+           * The lead time the suggestion was actually built on (1.8), and
+           * whose. The suggestion is the item's own (computeItem), built on
+           * its effective supplier's lead whichever line it sits on, while
+           * leadTimeDays above is this line's supplier's (kept for tabs
+           * from before 1.8). They differ on a pick: N24S16M picked to Tong
+           * Ming reads 42 days on its line but was built on Shandong
+           * Tengda's 131. "Why this quantity" used to quote the line's and
+           * so named a lead time it never used. leadStockBasis says what set
+           * the lead-time stock: Allied's minimum from a window, a minimum
+           * typed by hand, or the live lead time where none is applied; a
+           * window minimum carries the window and the lead it was set from.
+           * leadTimeUsedSource says where that lead came from: "item" when
+           * Allied set one on the item page, which then applies to every
+           * supplier and is not the effective supplier's own figure
+           * (N24S16M carries 107 days on prod; Shandong Tengda's is 131), so
+           * the screens don't credit it to the supplier.
+           */
+          leadTimeDaysUsed: item.leadTimeDays,
+          leadTimeUsedFor: item.supplierName,
+          leadTimeUsedSource: item.leadTimeSource,
+          leadStockBasis: item.minStock?.basis ?? "lead",
+          minWindowMonths: item.minStock?.windowMonths ?? null,
+          minLeadTimeDays: item.minStock?.leadTimeDays ?? null,
         },
       };
 
@@ -1306,10 +1383,30 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
  * Reverse a decision, putting the item back under its default supplier — the
  * preferred one, else the fallback. Deleting the rows is enough: with no cart
  * row the item defaults again, exactly as before the choice was made.
+ *
+ * Except for a quantity Allied typed (1.8). Choose carries the number on show
+ * onto the chosen row, so deleting every row used to throw that number away
+ * and the item fell back to the suggestion: undo a pick of 3,000 and the
+ * order quietly went back to 2,760. The number on show now goes with the item
+ * to its default supplier as a typed quantity, in the same transaction, so
+ * the one undo_decision entry records it in its before and after. A split has
+ * no single number (typedQtyOnShow), so undoing one keeps nothing, as before.
  */
 export async function undoCartDecision(itemUid: string): Promise<void> {
   await cartWrite(itemUid, "undo_decision", null, async (client) => {
+    const { plan } = await planFor(client, itemUid);
+    const keepQty = typedQtyOnShow(plan);
     await client.query(`DELETE FROM platform_purchase_cart WHERE item_uid = $1`, [itemUid]);
     await clearPickAck(client, itemUid);
+    if (keepQty == null) return;
+    // Read again with the rows gone: a supplier on file only because it was
+    // picked has dropped out, so the first option is the default the item
+    // now goes to. None on file (or ruled none): its No known supplier line.
+    const home = (await loadSourcing(client, [itemUid])).optionsFor(itemUid)[0]?.supplierUid ?? NO_SUPPLIER.supplierUid;
+    await client.query(
+      `INSERT INTO platform_purchase_cart (item_uid, supplier_uid, qty, state, updated_by, updated_at)
+       VALUES ($1, $2, $3, 'edited', 'dashboard', NOW())`,
+      [itemUid, home, keepQty],
+    );
   });
 }

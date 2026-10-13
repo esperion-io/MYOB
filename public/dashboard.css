@@ -931,6 +931,33 @@ tr.ledger-anchor td { background: var(--paper); font-weight: 600; }
 .obi-table th.sortable:not(.sorted):hover .sort-arrow::after { position: absolute; margin-left: 0.1rem; }
 .obi-table td, .obi-table > thead th { padding-left: 0.45rem; padding-right: 0.45rem; }
 .obi-supplier .btn.small { margin-top: 0.2rem; }
+/* The supplier dropdown (1.8). A native select is as wide as its longest
+   option ("SHANDONG TENGDA — preferred · 131 d · $0.9627 last" is about
+   330 px), which would push the fifteen columns off a 1366 px laptop. So it
+   fills the Supplier column (a percentage width gives a select no minimum of
+   its own in table layout) down to 8rem, under the width the cell already
+   took for a long name such as INTERNATIONAL (147 px at 1366 px), and clips
+   the closed text; the open list shows each option in full, and the
+   select's title carries the current one. A fixed 9rem made the table 4 px
+   too wide at 1366 px. */
+.obi-supplier-select {
+  font: inherit; font-size: 0.78rem; width: 100%; min-width: 8rem; max-width: 12rem;
+  padding: 0.2rem 0.3rem; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--panel); color: var(--ink); text-overflow: ellipsis;
+}
+.obi-supplier-select:disabled { opacity: 0.6; }
+.obi-add-supplier { font-size: 0.72rem; }
+.obi-why-basis { margin: 0.3rem 0 0; font-size: 0.78rem; }
+/* A message that needs no answer (1.8): bottom right, above the page. */
+.toast {
+  position: fixed; right: 1rem; bottom: 1rem; z-index: 70;
+  display: flex; align-items: flex-start; gap: 0.6rem;
+  max-width: min(28rem, calc(100vw - 2rem)); padding: 0.7rem 0.8rem;
+  background: var(--panel); color: var(--ink); font-size: 0.85rem;
+  border: 1px solid var(--line); border-left: 3px solid var(--brand);
+  border-radius: 6px; box-shadow: 0 6px 24px rgba(34, 38, 42, 0.18);
+}
+.toast p { margin: 0; }
 td.obi-caret { cursor: pointer; }
 tr.obi-row.expanded { background: var(--brand-soft); }
 tr.obi-row.expanded td { border-bottom: none; }

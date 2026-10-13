@@ -17,10 +17,13 @@
  * And the By item view (1.6) drawn from it, further down: its columns, its
  * order, what each Supplier and Order qty cell says, and that it lists the
  * same (item, supplier, qty) set as By supplier.
- * And its sorting (1.7), at the foot: every key both ways with empty values
+ * And its sorting (1.7): every key both ways with empty values
  * last, a sort that only reorders, Inventory's first-click direction for the
  * keys the two share, the address it is kept in, and Inventory's own header
  * left alone.
+ * And choosing the supplier on the row (1.8), at the foot: what the dropdown
+ * offers and in what order, the request each choice sends, and the wording
+ * of the message and of "Why this quantity" for each kind of minimum.
  * No database: public/order-list.js is a plain browser module, imported as is,
  * and queries.ts only for a constant (its pool is created on first use).
  */
@@ -32,6 +35,8 @@ import {
   BY_ITEM_COLUMNS,
   byRiskThenNumber,
   groupLinesByItem,
+  leadBasisSentence,
+  leadOwner,
   ORDER_SORT_DEFAULT,
   orderByItemRows,
   orderListSummary,
@@ -40,11 +45,16 @@ import {
   parseOrderSort,
   PURCHASING_SORTS,
   qtyCell,
+  quantityStaysMessage,
   rowLeadTimes,
   sortDirection,
   sortRows,
   supplierCell,
+  supplierChangedMessage,
+  supplierChangeRequest,
+  supplierOptionLabel,
   supplierRole,
+  supplierSelect,
 } from "../public/order-list.js";
 import { SORT_DEFAULT_DIR } from "../src/insights/queries.js";
 
@@ -663,4 +673,260 @@ test("dashboard.js: Purchasing sorts with its own header and state; Inventory's 
   assert.match(fnBody(src, "drawOrderByItem"), /syncOrderSortUrl\(\)/);
   // By supplier's cards are not sorted by it.
   assert.doesNotMatch(fnBody(src, "drawCart"), /orderSort|sortRows/);
+});
+
+/* ---------- choosing the supplier on the row (1.8) ---------- */
+
+// N24S16M on the 26 Aug copy: preferred Shandong Tengda (131 d), MYOB's
+// primary Tong Ming (42 d, never billed), two more tagged, in /cart's order.
+const N24_OPTIONS = [
+  { supplierUid: "SHANDONG", supplierName: "SHANDONG TENGDA", source: "allied", isPreferred: true, leadTimeDays: 131, lastCost: 0.962742 },
+  { supplierUid: "TONGMING", supplierName: "TONG MING", source: "myob", isPreferred: false, leadTimeDays: 42, lastCost: null },
+  { supplierUid: "ANZOR", supplierName: "ANZOR", source: "allied", isPreferred: false, leadTimeDays: 1, lastCost: 4.3366 },
+  { supplierUid: "GONE", supplierName: "OLD CO", source: "picked", isPreferred: false, leadTimeDays: null, lastCost: null },
+];
+const RATIONALE_LEAD = { demandWindowMonths: 6, leadTimeDays: 131, leadTimeDaysUsed: 131, leadTimeUsedFor: "SHANDONG TENGDA", leadStockBasis: "lead", minWindowMonths: null, minLeadTimeDays: null };
+const n24 = (over: Record<string, unknown> = {}) =>
+  groupLinesByItem(cart([line("N24S16M", "SHANDONG", "suggested", 2760, 0.962742, {
+    supplierName: "SHANDONG TENGDA", isPreferred: true, supplierSource: "allied", options: N24_OPTIONS,
+    preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA", leadTimeDays: 131, minLevel: null,
+    rationale: RATIONALE_LEAD, ...over,
+  })]))[0];
+const fixedQty = (v: unknown) => Number(v).toLocaleString("en-NZ");
+const fixedPrice = (v: unknown) => `$${Number(v).toFixed(2)}`;
+
+test("Supplier dropdown: the suppliers on file in /cart's order, set to where the item is now", () => {
+  const m = supplierSelect(n24());
+  assert.equal(m.kind, "select");
+  assert.equal(m.current, "SHANDONG");
+  assert.equal(m.preferredUid, "SHANDONG");
+  assert.equal(m.single, false);
+  assert.deepEqual(m.options.map((o: { supplierUid: string }) => o.supplierUid), ["SHANDONG", "TONGMING", "ANZOR", "GONE"]);
+  assert.deepEqual(m.options.map((o: { role: string }) => o.role), ["preferred", "MYOB primary", "tagged", "picked earlier"]);
+  assert.deepEqual(m.options.filter((o: { selected: boolean }) => o.selected).map((o: { supplierUid: string }) => o.supplierUid), ["SHANDONG"]);
+  // A pick: set to the picked supplier, the preferred one still offered first.
+  const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
+  const pick = supplierSelect(n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict }));
+  assert.equal(pick.kind, "select");
+  assert.equal(pick.current, "TONGMING");
+  assert.equal(pick.cell.kind, "conflict");
+  assert.equal(pick.options[0].supplierUid, "SHANDONG");
+});
+
+test("Supplier dropdown: option text is role, lead time and last cost, leaving out what is unknown", () => {
+  const [pref, myob, , gone] = supplierSelect(n24()).options;
+  assert.equal(supplierOptionLabel(pref, fixedPrice), "SHANDONG TENGDA — preferred · 131 d · $0.96 last");
+  assert.equal(supplierOptionLabel(myob, fixedPrice), "TONG MING — MYOB primary · 42 d");
+  assert.equal(supplierOptionLabel(gone, fixedPrice), "OLD CO — picked earlier");
+  assert.equal(supplierOptionLabel({ name: null, role: null, leadTimeDays: null, lastCost: null }), "—");
+});
+
+test("Supplier dropdown: one supplier on file, splits, two lines, ruled none and unknown", () => {
+  const one = supplierSelect(n24({ options: [N24_OPTIONS[0]] }));
+  assert.equal(one.kind, "select");
+  assert.equal(one.single, true);
+  const [split] = groupLinesByItem(cart([
+    line("FG250P", "SKELLERUP", "split", 142, 1.5, { options: N24_OPTIONS }),
+    line("FG250P", "BREMICK", "split", 142, 1.25, { options: N24_OPTIONS }),
+  ]));
+  assert.deepEqual([supplierSelect(split).kind, supplierSelect(split).count], ["split", 2]);
+  const twoLine = groupLinesByItem(cart(MIXED)).find((r: Row) => r.itemUid === "TWOLINE");
+  assert.equal(supplierSelect(twoLine).kind, "several");
+  const none = { supplierUid: "none", supplierName: "No known supplier", options: [] };
+  assert.equal(supplierSelect(single({ ...none, supplierRuledNone: true })).kind, "ruled");
+  assert.equal(supplierSelect(single({ ...none, supplierRuledNone: false })).kind, "unknown");
+  // A server before 1.8 sends no supplierRuledNone: "No known supplier", as in 1.6.
+  assert.equal(supplierSelect(single(none)).kind, "unknown");
+  // Nothing to choose from on a row the dropdown isn't drawn for.
+  assert.equal(supplierChangeRequest(split, "SKELLERUP"), null);
+});
+
+test("Supplier dropdown: another supplier is a select; the preferred again is use-preferred", () => {
+  const row = n24();
+  assert.deepEqual(supplierChangeRequest(row, "TONGMING"), { endpoint: "select", body: { itemUid: "N24S16M", supplierUid: "TONGMING" } });
+  // No change, nothing chosen, or a uid the dropdown never offered: nothing sent.
+  assert.equal(supplierChangeRequest(row, "SHANDONG"), null);
+  assert.equal(supplierChangeRequest(row, ""), null);
+  assert.equal(supplierChangeRequest(row, "MADE-UP"), null);
+  // From a pick, the preferred supplier again clears the pick (and keeps a typed qty).
+  const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
+  const picked = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict });
+  assert.deepEqual(supplierChangeRequest(picked, "SHANDONG"), { endpoint: "use-preferred", body: { itemUid: "N24S16M" } });
+  assert.deepEqual(supplierChangeRequest(picked, "ANZOR"), { endpoint: "select", body: { itemUid: "N24S16M", supplierUid: "ANZOR" } });
+  // A preferred line struck before × existed: the preferred again is use-preferred too.
+  const struck = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, conflict: { ...conflict, kind: "removed" } });
+  assert.equal(supplierChangeRequest(struck, "SHANDONG")?.endpoint, "use-preferred");
+});
+
+test("Supplier dropdown: with no preferred supplier every choice is a select, the default again included", () => {
+  const noPref = N24_OPTIONS.map((o) => ({ ...o, isPreferred: false }));
+  // Tong Ming is MYOB's primary, so it is the default; choosing another, then it again.
+  const atDefault = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, supplierSource: "myob", options: noPref, preferredSupplierUid: null, preferredSupplierName: null });
+  assert.equal(supplierChangeRequest(atDefault, "ANZOR")?.endpoint, "select");
+  const atAnzor = n24({ supplierUid: "ANZOR", supplierName: "ANZOR", isPreferred: false, state: "selected", options: noPref, preferredSupplierUid: null, preferredSupplierName: null });
+  assert.deepEqual(supplierChangeRequest(atAnzor, "TONGMING"), { endpoint: "select", body: { itemUid: "N24S16M", supplierUid: "TONGMING" } });
+});
+
+test("Quantity message: worded by the kind of minimum, from the rationale /cart sends", () => {
+  // BN1665G, live 13 Oct: a window minimum of 2,771 from Hanova's 120 days over 6 months.
+  const windowMin = n24({ minLevel: 2771, qty: 1779, suggestedQty: 1779, rationale: { ...RATIONALE_LEAD, leadTimeDaysUsed: 120, leadTimeUsedFor: "Hanova", leadStockBasis: "window", minWindowMonths: 6, minLeadTimeDays: 120 } });
+  assert.equal(
+    quantityStaysMessage(windowMin, fixedQty),
+    "Quantity stays 1,779. It is built from your minimum of 2,771, which was set from Hanova's 120-day lead time over 6 months of use. Changing the supplier here doesn't change it.",
+  );
+  const manual = n24({ minLevel: 500, qty: 640, suggestedQty: 640, rationale: { ...RATIONALE_LEAD, leadStockBasis: "manual" } });
+  assert.equal(quantityStaysMessage(manual, fixedQty), "Quantity stays 640. It is built from your minimum of 500, which you set by hand.");
+  assert.equal(
+    quantityStaysMessage(n24(), fixedQty),
+    "Quantity stays 2,760. It is built on SHANDONG TENGDA's 131-day lead time, the item's usual supplier.",
+  );
+  // A window minimum quotes the lead it was set from, not today's: the
+  // supplier's lead moved after it was applied and nobody pressed Recalculate.
+  const drifted = n24({ minLevel: 2771, qty: 1779, suggestedQty: 1779, rationale: { ...RATIONALE_LEAD, leadTimeDaysUsed: 90, leadTimeUsedFor: "Hanova", leadStockBasis: "window", minWindowMonths: 6, minLeadTimeDays: 120 } });
+  assert.match(quantityStaysMessage(drifted, fixedQty), /set from Hanova's 120-day lead time over 6 months/);
+  const noLead = n24({ rationale: { ...RATIONALE_LEAD, leadTimeDaysUsed: null } });
+  assert.match(quantityStaysMessage(noLead, fixedQty), /No lead time is known for SHANDONG TENGDA, the item's usual supplier/);
+  // A server before 1.8: just the quantity.
+  assert.equal(quantityStaysMessage(n24({ rationale: { demandWindowMonths: 6, leadTimeDays: 131 } }), fixedQty), "Quantity stays 2,760.");
+});
+
+test("Quantity message: a typed quantity stays because it was typed, and the minimum explains only the suggestion", () => {
+  // Checklist step 4: 3,000 typed on N24S16M, then the preferred supplier again.
+  const edited = n24({ state: "edited", qty: 3000 });
+  assert.equal(
+    quantityStaysMessage(edited, fixedQty),
+    "Quantity stays 3,000, the number you typed. Changing the supplier here doesn't change it. The suggestion (2,760) is built on SHANDONG TENGDA's 131-day lead time, the item's usual supplier.",
+  );
+  // A pick that kept a typed qty is Chosen, not Edited: told by qty against the suggestion.
+  const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
+  const pickedTyped = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict, qty: 3000, suggestedQty: 1779, minLevel: 2771, rationale: { ...RATIONALE_LEAD, leadStockBasis: "window", minWindowMonths: 6, minLeadTimeDays: 120 } });
+  assert.equal(
+    quantityStaysMessage(pickedTyped, fixedQty),
+    "Quantity stays 3,000, the number you typed. Changing the supplier here doesn't change it. The suggestion (1,779) is built from your minimum of 2,771, which was set from SHANDONG TENGDA's 120-day lead time over 6 months of use.",
+  );
+  const manualTyped = n24({ state: "edited", qty: 3000, minLevel: 500, rationale: { ...RATIONALE_LEAD, leadStockBasis: "manual" } });
+  assert.match(quantityStaysMessage(manualTyped, fixedQty), /the number you typed\. .* The suggestion \(2,760\) is built from your minimum of 500, which you set by hand\.$/);
+  // A quantity carried from another supplier was typed too.
+  assert.match(quantityStaysMessage(n24({ qtyCarriedFrom: "ANZOR" }), fixedQty), /^Quantity stays 2,760, the number you typed\./);
+  // A pick still on the suggestion is explained by it.
+  const pickedOnSuggestion = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict });
+  assert.match(quantityStaysMessage(pickedOnSuggestion, fixedQty), /^Quantity stays 2,760\. It is built on SHANDONG TENGDA's 131-day lead time/);
+  // A server before 1.8: the typed sentence alone.
+  assert.equal(
+    quantityStaysMessage(n24({ state: "edited", qty: 3000, rationale: { leadTimeDays: 131 } }), fixedQty),
+    "Quantity stays 3,000, the number you typed. Changing the supplier here doesn't change it.",
+  );
+});
+
+test("Lead set on the item: credited to the item, not to the usual supplier", () => {
+  // N24S16M on prod: 107 days set on the item, Shandong Tengda's own 131, Tong Ming's 42.
+  const ITEM_LEAD = { ...RATIONALE_LEAD, leadTimeDays: 107, leadTimeDaysUsed: 107, leadTimeUsedSource: "item" };
+  const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
+  const picked = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict, leadTimeDays: 107, rationale: ITEM_LEAD });
+  assert.equal(
+    quantityStaysMessage(picked, fixedQty),
+    "Quantity stays 2,760. It is built on this item's own 107-day lead time, set on the item page, whichever supplier it is ordered from.",
+  );
+  // Every line carries the item's lead, so there is no "Tong Ming's is …" to add.
+  assert.equal(
+    leadBasisSentence(picked.lines[0], N24_OPTIONS, fixedQty),
+    "Built on this item's own 107-day lead time (set on the item page), whichever supplier it is ordered from.",
+  );
+  // A window minimum set from the item's lead says so; from another figure, it names no one.
+  const winItem = { ...ITEM_LEAD, leadStockBasis: "window", minWindowMonths: 6, minLeadTimeDays: 107 };
+  const m = n24({ minLevel: 2771, suggestedQty: 2760, rationale: winItem });
+  assert.match(quantityStaysMessage(m, fixedQty), /set from this item's own 107-day lead time over 6 months of use\./);
+  assert.equal(leadBasisSentence(m.lines[0], [], fixedQty), "Your minimum (2,771, from this item's own 107 days) sets the lead-time stock.");
+  const older = n24({ minLevel: 2771, rationale: { ...winItem, minLeadTimeDays: 120 } });
+  assert.match(quantityStaysMessage(older, fixedQty), /set from a 120-day lead time over 6 months of use\./);
+  assert.equal(leadBasisSentence(older.lines[0], [], fixedQty), "Your minimum (2,771, from 120 days) sets the lead-time stock.");
+  assert.equal(leadOwner(winItem, 107), "this item's own");
+  assert.equal(leadOwner(winItem, 120), null);
+  assert.equal(leadOwner(RATIONALE_LEAD), "SHANDONG TENGDA's");
+  // A server from before this field: the usual supplier, as before.
+  assert.equal(leadOwner({ leadTimeUsedFor: "Hanova", leadTimeDaysUsed: 120 }), "Hanova's");
+});
+
+test("Why this quantity: names the lead time and minimum actually used, and the pick's own lead", () => {
+  const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
+  const picked = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict, leadTimeDays: 42 });
+  assert.equal(
+    leadBasisSentence(picked.lines[0], N24_OPTIONS, fixedQty),
+    "Built on SHANDONG TENGDA's 131-day lead time (preferred). TONG MING's is 42 days.",
+  );
+  // With the usual supplier, only the lead it is built on.
+  assert.equal(leadBasisSentence(n24().lines[0], N24_OPTIONS, fixedQty), "Built on SHANDONG TENGDA's 131-day lead time (preferred).");
+  // A split's parts each show their own lead; the sentence leaves it out.
+  assert.equal(leadBasisSentence(picked.lines[0], N24_OPTIONS, fixedQty, false), "Built on SHANDONG TENGDA's 131-day lead time (preferred).");
+  const windowMin = n24({ supplierName: "Hanova", minLevel: 2771, rationale: { ...RATIONALE_LEAD, leadTimeDaysUsed: 120, leadTimeUsedFor: "Hanova", leadStockBasis: "window", minWindowMonths: 6, minLeadTimeDays: 120 } });
+  assert.equal(leadBasisSentence(windowMin.lines[0], [], fixedQty), "Your minimum (2,771, from Hanova's 120 days) sets the lead-time stock.");
+  const windowPick = { ...windowMin.lines[0], supplierUid: "J", supplierName: "Jiaxing", leadTimeDays: 120 };
+  assert.equal(
+    leadBasisSentence(windowPick, [], fixedQty),
+    "Your minimum (2,771, from Hanova's 120 days) sets the lead-time stock. Jiaxing's lead time is 120 days.",
+  );
+  const manual = n24({ minLevel: 500, rationale: { ...RATIONALE_LEAD, leadStockBasis: "manual" } });
+  assert.equal(leadBasisSentence(manual.lines[0], N24_OPTIONS, fixedQty), "Your minimum (500, set by hand) sets the lead-time stock.");
+  // Anzor's one day is a day.
+  const anzorPick = { ...manual.lines[0], supplierUid: "ANZOR", supplierName: "ANZOR", leadTimeDays: 1 };
+  assert.equal(leadBasisSentence(anzorPick, N24_OPTIONS, fixedQty), "Your minimum (500, set by hand) sets the lead-time stock. ANZOR's lead time is 1 day.");
+  assert.equal(leadBasisSentence(n24({ rationale: { leadTimeDays: 131 } }).lines[0], N24_OPTIONS, fixedQty), null);
+});
+
+test("dashboard.js: the lead bit of Why this quantity follows what the quantity was built on", () => {
+  const src = read("../public/dashboard.js");
+  const fn = (name: string) => `function${fnBody(src, name).slice("unction".length)}`;
+  const esc = (v: unknown) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  const cartLeadBit = new Function("esc", "leadOwner", `${fn("cartLeadBit")}; return cartLeadBit;`)(esc, leadOwner);
+  const text = (l: Record<string, unknown>) => String(cartLeadBit(l)).replace(/<[^>]*>/g, "");
+  // N24S16M picked to Tong Ming (42 d); the usual supplier is Shandong Tengda (131 d).
+  const pick = (r: Record<string, unknown>) => ({ supplierUid: "TONGMING", supplierName: "TONG MING", leadTimeDays: 42, leadTimeOrders: 3, rationale: { ...RATIONALE_LEAD, ...r } });
+  assert.equal(text(pick({})), "built on SHANDONG TENGDA's 131d lead · this supplier 42d lead");
+  assert.equal(text(pick({ leadStockBasis: "window", minWindowMonths: 6, minLeadTimeDays: 120 })), "min from SHANDONG TENGDA's 120d lead · this supplier 42d lead");
+  assert.equal(text(pick({ leadStockBasis: "manual" })), "this supplier 42d lead");
+  // An item lead is every line's: the line's own bit says it, credited to no supplier.
+  assert.equal(text({ ...pick({ leadTimeDaysUsed: 107, leadTimeUsedSource: "item" }), leadTimeDays: 107, leadTimeSetByAllied: true }), "107d lead");
+  // With the usual supplier, or from a server before 1.8, as it always read.
+  assert.equal(text({ supplierUid: "SHANDONG", supplierName: "SHANDONG TENGDA", leadTimeDays: 131, leadTimeOrders: 3, rationale: RATIONALE_LEAD }), "131d lead");
+  assert.equal(text({ ...pick({}), rationale: { leadTimeDays: 42 } }), "42d lead");
+});
+
+test("After a choice: what happened, for this order only", () => {
+  const conflict = { kind: "pick", acknowledged: false, preferredSupplierUid: "SHANDONG", preferredSupplierName: "SHANDONG TENGDA" };
+  const picked = n24({ supplierUid: "TONGMING", supplierName: "TONG MING", isPreferred: false, state: "selected", conflict });
+  assert.equal(
+    supplierChangedMessage(picked, "select"),
+    "N24S16M is now ordered from TONG MING, for this order only. Its preferred supplier is still SHANDONG TENGDA; change that on the item page.",
+  );
+  assert.equal(supplierChangedMessage(n24(), "use-preferred"), "N24S16M is back with its preferred supplier, SHANDONG TENGDA.");
+  assert.equal(
+    supplierChangedMessage(n24({ preferredSupplierUid: null, preferredSupplierName: null, isPreferred: false, state: "selected" }), "select"),
+    "N24S16M is now ordered from SHANDONG TENGDA, for this order only.",
+  );
+});
+
+test("dashboard.js: the row's dropdown sends only the existing select / use-preferred requests", () => {
+  const src = read("../public/dashboard.js");
+  assert.match(fnBody(src, "byItemSupplierHtml"), /supplierSelect\(r\)/);
+  assert.match(fnBody(src, "byItemSupplierHtml"), /class="obi-supplier-select"/);
+  assert.match(fnBody(src, "byItemSupplierHtml"), /Add a supplier on the item page →/);
+  assert.match(fnBody(src, "byItemSupplierHtml"), /No supplier \(ruled\)/);
+  assert.match(fnBody(src, "wireOrderByItem"), /changeRowSupplier\(tr, supplierPick\.value\)/);
+  const change = fnBody(src, "changeRowSupplier");
+  assert.match(change, /supplierChangeRequest\(orderItemRows\.get\(itemUid\), supplierUid\)/);
+  assert.match(change, /`\/api\/insights\/cart\/\$\{req\.endpoint\}`/);
+  // Locked while it saves; a refusal says why and fetches /cart again (a 400
+  // means the tab's options are stale), falling back to a redraw that unlocks it.
+  assert.match(change, /el\.disabled = true/);
+  assert.match(change, /alert\(err\.message\);[\s\S]*?reloadOrderList\(\)\.catch\(\(\) => drawOrderList\(\)\)/);
+  assert.doesNotMatch(change, /drawOrderByItem\(\)/);
+  assert.match(change, /orderListView === "items"/);
+  assert.match(change, /quantityStaysMessage\(row, qty\)/);
+  // Compare's Choose and Split say why when refused, not fail silently.
+  const compare = fnBody(src, "openSupplierCompare");
+  assert.equal((compare.match(/catch \(err\) \{\s*await refused\(err\);/g) ?? []).length, 2);
+  // No new endpoint: every /cart write the page knows is one 1.7 already sent.
+  const writes = new Set([...src.matchAll(/\/api\/insights\/cart\/([a-z-]+)/g)].map((m) => m[1]));
+  for (const w of writes)
+    assert.ok(["line", "select", "split", "reset", "undo", "take-off", "put-back", "use-preferred", "keep-pick"].includes(w), w);
 });

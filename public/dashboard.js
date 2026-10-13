@@ -12,9 +12,15 @@ import {
   qtyCell,
   rowLeadTimes,
   sortDirection,
+  leadBasisSentence,
+  leadOwner,
+  quantityStaysMessage,
   sortRows,
-  supplierCell,
+  supplierChangedMessage,
+  supplierChangeRequest,
+  supplierOptionLabel,
   supplierRole,
+  supplierSelect,
 } from "./order-list.js";
 
 /*
@@ -33,9 +39,29 @@ import {
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.7.0";
+const UI_VERSION = "1.8.0";
 
 const RELEASES = [
+  {
+    version: "1.8.0",
+    // Set to the ship date, and re-derive BN1665G's figures in `changes`
+    // (suggested, minimum, its window and lead, Hanova's last cost) from
+    // that evening's capture: they drift with every sync. The snapshot
+    // pre_s8_<date> comes first (RELEASING.md, "Stage 8 deploy").
+    date: "2026-10-14",
+    stage: "Stage 8: Choose the supplier on the row",
+    changes: [
+      "On Purchasing (By item), you can now choose the supplier on the row, as you asked: the Supplier column is a dropdown of the suppliers on file for the item, preferred first, then MYOB primary, the supplier who has billed it most, the others tagged on the item page, and any you picked earlier. Each reads like \"HANOVA INTERNATIONAL LTD — preferred · 120 d · $0.42 last\": its role, lead time and what it last charged. It opens on the supplier the item is ordered from now. If you change it with the keyboard rather than the mouse, it asks you to confirm first.",
+      "Choosing a different supplier is for this order only. It works exactly as Choose in Compare: the item moves to that supplier here, on By supplier and in the exported order sheets, and the Lead time and Est. cost columns show that supplier's figures. The preferred supplier doesn't change; you change that on the item page. As with any pick that differs from the preferred supplier, the row says \"your pick (preferred: HANOVA INTERNATIONAL LTD)\" with Use preferred and Keep buttons, and the item is listed under \"Earlier picks that differ from the preferred supplier\" until you press Keep.",
+      "Choosing the preferred supplier again is the same as Use preferred: the pick is cleared, and a quantity you typed stays. For an item with no preferred supplier, choosing a supplier records it as Chosen, as Compare does.",
+      "The order quantity doesn't change when you change the supplier, and a note at the bottom right says why. The suggestion is built on the item's usual supplier's lead time: for example \"Quantity stays 1,779. It is built from your minimum of 2,771, which was set from HANOVA INTERNATIONAL LTD's 120-day lead time over 6 months of use. Changing the supplier here doesn't change it.\" For a minimum you typed by hand it says so, and for an item with no minimum it names the usual supplier's lead time, or the lead time you set on the item itself, which applies whichever supplier it is ordered from. If you typed the quantity, it says the number you typed stays, and what the suggestion beside it is built on. Whether the quantity should follow the supplier you choose is one of our questions to you; until you say so, it doesn't.",
+      "Split items aren't changed from the row: they read \"Split (2) — change in Compare\". An item with only one supplier on file shows that supplier and \"Add a supplier on the item page →\". An item you have ruled has no supplier reads \"No supplier (ruled)\".",
+      "Why this quantity, under an item's detail, now names the lead time and minimum the quantity was actually built on, for example \"Your minimum (2,771, from HANOVA INTERNATIONAL LTD's 120 days) sets the lead-time stock.\" On a pick it also gives the picked supplier's own lead time. Before, it quoted the lead time of whichever supplier the line was on, even though the quantity wasn't built on it.",
+      "Undo on a supplier you picked now keeps a quantity you typed: the item goes back to its usual supplier with your number, where before it went back to the suggested quantity.",
+    ],
+    numbers: "None. No suggested quantity, preferred supplier or total changes. Only the items you choose a different supplier for move, on this order only, exactly as choosing them in Compare always has.",
+    check: "Open Purchasing (By item) and find an item we agree on. Its Supplier dropdown shows the preferred supplier. Choose another one: the note at the bottom right says the quantity stays the same and why; the row reads \"your pick (preferred: …)\" with Use preferred and Keep; By supplier shows the item under the new supplier with the same quantity. Choose the preferred supplier again: the pick is gone and the quantity is unchanged. Tell us which item you tried; we check the change log matches.",
+  },
   {
     version: "1.7.0",
     // Set to the ship date. Nothing here depends on live figures: the check
@@ -4960,8 +4986,9 @@ function wireOrderListCommon() {
  * item's own figures, copied onto each line by the server (1.5), so they equal
  * Inventory's and the item page's.
  *
- * Choosing the supplier on the row is a later release; until then it is done
- * in Compare, which every row links to.
+ * From 1.8 the supplier is chosen on the row itself, from a dropdown of the
+ * suppliers on file that sends Compare → Choose's own request; splits are
+ * still made in Compare, which every row links to.
  */
 function drawOrderByItem() {
   const d = cartData;
@@ -5071,41 +5098,61 @@ function byItemTh(c) {
   return `<th class="${c.cls ?? ""}"><span class="term" title="${esc(c.tip)}">${esc(c.label)}</span></th>`;
 }
 
-/** The Supplier cell, from supplierCell's model. */
+/*
+ * The Supplier cell (1.8): a dropdown of the suppliers on file (supplierSelect),
+ * with what 1.6 said beside it: why the item is with that supplier when it
+ * disagrees with the preferred one, and Use preferred / Keep. The option text
+ * carries each supplier's role, lead time and last cost, so the closed
+ * dropdown also says why the current one is there. Splits, two-line items,
+ * and items with no supplier keep 1.6's text and are changed in Compare or on
+ * the item page.
+ */
 function byItemSupplierHtml(r) {
-  const m = supplierCell(r);
-  let html;
-  if (m.kind === "split" || m.kind === "several") {
+  const s = supplierSelect(r);
+  const m = s.cell;
+  const compareBtn = (label = "Compare", title = "Compare every supplier on file for this item") =>
+    `<button class="linkish obi-compare" type="button" title="${esc(title)}">${esc(label)}</button>`;
+  if (s.kind === "split" || s.kind === "several") {
     const parts = m.parts.map((p) => `${esc(p.name ?? "—")} ${qty(p.qty)}`).join(" · ");
-    html =
-      m.kind === "split"
-        ? `<span title="Deliberately ordered from more than one supplier">Split:</span> ${parts}`
-        : `${parts} <span class="badge warn" title="The item sits under more than one supplier with no choice recorded; it can be ordered twice">decide in Compare</span>`;
+    let html =
+      s.kind === "split"
+        ? `<span title="Deliberately ordered from more than one supplier">Split (${qty(s.count)})</span> —
+            ${compareBtn("change in Compare", "A split's suppliers and quantities are changed in Compare")}
+            <br /><span class="muted">${parts}</span>`
+        : `${parts} <span class="badge warn" title="The item sits under more than one supplier with no choice recorded; it can be ordered twice">decide in Compare</span> ${compareBtn()}`;
     if (m.conflict)
       html += `<br /><span class="muted" title="${esc(pickReason(m.conflict))}">preferred: ${esc(m.conflict.preferredSupplierName ?? "—")}</span>
-        <span class="nowrap">${pickConflictButtons(r.itemUid, r.number, m.conflict.preferredSupplierName)}</span>`;
-  } else if (m.kind === "conflict") {
+        <br />${pickConflictButtons(r.itemUid, r.number, m.conflict.preferredSupplierName, true)}`;
+    return html;
+  }
+  if (s.kind === "ruled")
+    return '<span class="muted" title="Allied ruled on the item page that this item has no supplier">No supplier (ruled)</span>';
+  if (s.kind === "unknown") return `<span class="muted">${esc(m.name ?? "No known supplier")}</span>`;
+
+  const labels = s.options.map((o) => supplierOptionLabel(o, price));
+  const current = labels[s.options.findIndex((o) => o.selected)] ?? "";
+  const select = `<select class="obi-supplier-select" title="${esc(current)}" data-current="${esc(s.current ?? "")}"
+      aria-label="Supplier for ${esc(r.number ?? "this item")}">${s.options
+        .map((o, i) => `<option value="${esc(o.supplierUid)}" data-name="${esc(o.name ?? "")}"${o.selected ? " selected" : ""}>${esc(labels[i])}</option>`)
+        .join("")}${s.single ? '<option disabled value="">Add a supplier on the item page →</option>' : ""}</select>`;
+  let why = "";
+  if (m.kind === "conflict") {
     // A struck preferred line is not a pick: say what happened, as By supplier's chip does.
-    const why = m.struck
-      ? `· preferred ${esc(m.preferredName ?? "supplier")} was struck off`
-      : `· your pick (preferred: ${esc(m.preferredName ?? "—")})`;
-    html = `${esc(m.name ?? "—")} <span class="muted" title="${esc(pickReason(m.conflict))}">${why}</span>
-      <br /><span class="nowrap">${pickConflictButtons(r.itemUid, r.number, m.preferredName)}</span>`;
+    why = `<br /><span class="muted" title="${esc(pickReason(m.conflict))}">${
+      m.struck ? `preferred ${esc(m.preferredName ?? "supplier")} was struck off` : `your pick (preferred: ${esc(m.preferredName ?? "—")})`
+    }</span>
+      <br />${pickConflictButtons(r.itemUid, r.number, m.preferredName, true)}`;
   } else if (m.kind === "kept") {
     const over = `kept over ${esc(m.preferredName ?? "preferred")}`;
-    html = `${esc(m.name ?? "—")} <span class="muted" title="${esc(pickReason(m.conflict))} Kept on purpose.">· ${m.struck ? over : `your pick (${over})`}</span>`;
-  } else if (m.kind === "unknown") {
-    html = `<span class="muted">${esc(m.name ?? "No known supplier")}</span>`;
-  } else {
-    html = `${esc(m.name ?? "—")}${m.role ? ` <span class="muted">· ${esc(m.role)}</span>` : ""}`;
+    why = `<br /><span class="muted" title="${esc(pickReason(m.conflict))} Kept on purpose.">${m.struck ? over : `your pick (${over})`}</span>`;
   }
-  const chosen = r.lines.length === 1 && r.lines[0].state === "selected"
+  const chosen = r.lines[0]?.state === "selected"
     ? ' <span class="badge ok" title="Chosen supplier for this item">Chosen</span>'
     : "";
-  const compare = r.options.length
-    ? ` <button class="linkish obi-compare" type="button" title="Compare every supplier on file for this item">Compare</button>`
+  const add = s.single
+    ? `<br /><a class="obi-add-supplier" href="#/item/${esc(r.itemUid)}" title="Only one supplier is on file for this item">Add a supplier on the item page →</a>`
     : "";
-  return `${html}${chosen}${compare}`;
+  return `${select}${why}<br />${chosen}${chosen ? " " : ""}${compareBtn()}${add}`;
 }
 
 /** The Order qty cell, from qtyCell's model. */
@@ -5123,15 +5170,20 @@ function byItemQtyHtml(r) {
     ${q.carriedFrom ? `<br /><span class="muted" title="Typed while this item was under ${esc(q.carriedFrom)}; it follows the item">typed under ${esc(q.carriedFrom)}</span>` : ""}`;
 }
 
-/** The Lead time cell: each line's figure once, "unknown" where there is none. */
+/*
+ * The Lead time cell: each line's figure once, "unknown" where there is none.
+ * Each figure stays on one line, but a split under two leads may break
+ * between them (1.8): "42 d / 131 d" on one line made the column 107 px and
+ * the table 28 px too wide at 1366 px.
+ */
 function byItemLeadHtml(r) {
   const leads = rowLeadTimes(r);
   if (!leads.length) return "—";
   return leads
     .map((t) =>
       t.days == null
-        ? '<span class="muted" title="No lead time set, and none measured from their orders">unknown</span>'
-        : `<span title="${t.setByAllied ? "Set by Allied" : `Median measured across ${t.orders} matched order${t.orders === 1 ? "" : "s"}`}">${qty(t.days)} d</span>`,
+        ? '<span class="muted nowrap" title="No lead time set, and none measured from their orders">unknown</span>'
+        : `<span class="nowrap" title="${t.setByAllied ? "Set by Allied" : `Median measured across ${t.orders} matched order${t.orders === 1 ? "" : "s"}`}">${qty(t.days)} d</span>`,
     )
     .join(" / ");
 }
@@ -5162,7 +5214,7 @@ function orderItemRowHtml(r) {
       <td class="num">${r.weeklyDemand ? Number(r.weeklyDemand).toFixed(1) : "—"}</td>
       <td>${coverFmt(r.coverWeeks, first.rationale?.demandBasis)}</td>
       <td>${coverInclFmt(incl)}</td>
-      <td class="num nowrap">${byItemLeadHtml(r)}</td>
+      <td class="num">${byItemLeadHtml(r)}</td>
       <td class="num">${money(r.estCost)}</td>
       <td class="num"><button class="tag-x obi-remove" type="button" title="Take this item off this order">×</button></td>
     </tr>`;
@@ -5182,6 +5234,32 @@ function wireOrderByItem(cols) {
     tr.querySelectorAll(".obi-compare").forEach((b) =>
       b.addEventListener("click", () => openCompareFromList(itemUid, tr.dataset.supplier || null, number)),
     );
+
+    /*
+     * On Windows, an arrow key or a typed letter on a closed dropdown changes
+     * it and fires "change" at once, so a keyboard user looking through the
+     * suppliers would record a pick (a log entry, the item moved on By
+     * supplier and in the export) with each key. A change that came from the
+     * keyboard is confirmed first; a mouse choice is already deliberate.
+     */
+    const supplierPick = tr.querySelector(".obi-supplier-select");
+    if (supplierPick) {
+      let viaKeys = false;
+      supplierPick.addEventListener("keydown", () => {
+        viaKeys = true;
+      });
+      supplierPick.addEventListener("pointerdown", () => {
+        viaKeys = false;
+      });
+      supplierPick.addEventListener("change", () => {
+        const name = supplierPick.selectedOptions[0]?.dataset.name || "this supplier";
+        if (viaKeys && !confirm(`Order ${number} from ${name}, for this order only?`)) {
+          supplierPick.value = supplierPick.dataset.current ?? "";
+          return;
+        }
+        changeRowSupplier(tr, supplierPick.value);
+      });
+    }
 
     // × takes the whole item off, split or not, exactly as By supplier's ×
     // does for an unsplit line. Put back is in the Taken off list above.
@@ -5207,6 +5285,64 @@ function wireOrderByItem(cols) {
     const tr = main.querySelector(`tr.obi-row[data-uid="${CSS.escape(uid)}"]`);
     if (tr) toggleOrderItemRow(tr, cols);
   }
+}
+
+/*
+ * A supplier chosen in the row's dropdown (1.8). It sends what Compare →
+ * Choose sends (or, for the preferred supplier again, what Use preferred
+ * sends: supplierChangeRequest), so the pick is the same row with the same
+ * flag and the same change-log entry. The row is locked while it saves. A
+ * refusal (400: not a supplier on file; 409: the page is out of date) says
+ * why and fetches /cart again, which puts the dropdown back where the item
+ * really is.
+ * Afterwards a message says why the quantity didn't move with the supplier,
+ * read from the redrawn row, so it quotes what the server now says.
+ */
+async function changeRowSupplier(tr, supplierUid) {
+  const itemUid = tr.dataset.uid;
+  const req = supplierChangeRequest(orderItemRows.get(itemUid), supplierUid);
+  if (!req) return;
+  tr.querySelectorAll("select, button, input").forEach((el) => {
+    el.disabled = true;
+  });
+  try {
+    await fetchJson(`/api/insights/cart/${req.endpoint}`, { method: "POST", body: JSON.stringify(req.body) });
+  } catch (err) {
+    alert(err.message);
+    // Fetched again, not redrawn from the cache: a 400 means this tab's
+    // options are out of date, and the cache would offer the same choice.
+    reloadOrderList().catch(() => drawOrderList());
+    return;
+  }
+  try {
+    await reloadOrderList();
+  } catch (err) {
+    alert(err.message);
+    drawOrderList(); // unlock the row
+    return;
+  }
+  // Only on By item: the view may have been switched while it saved.
+  const row = orderListView === "items" ? orderItemRows.get(itemUid) : null;
+  if (row) showToast(`${supplierChangedMessage(row, req.endpoint)} ${quantityStaysMessage(row, qty)}`);
+}
+
+/*
+ * A short message that doesn't block the page (1.8), for news that needs no
+ * answer. Errors still use alert(), as everywhere else here. One at a time:
+ * a new one replaces the last. It stays until closed or for 20 seconds,
+ * long enough to read two sentences.
+ */
+let toastTimer = null;
+function showToast(text) {
+  document.querySelector(".toast")?.remove();
+  clearTimeout(toastTimer);
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.setAttribute("role", "status");
+  el.innerHTML = `<p>${esc(text)}</p><button class="tag-x" type="button" title="Close" aria-label="Close">×</button>`;
+  el.querySelector("button").addEventListener("click", () => el.remove());
+  document.body.appendChild(el);
+  toastTimer = setTimeout(() => el.remove(), 20000);
 }
 
 /*
@@ -5301,6 +5437,9 @@ function orderItemPanelHtml(r) {
           .join("");
   const q = qtyCell(r);
   const options = r.options ?? [];
+  // The lead time and minimum the suggestion was built on (1.8), and, on a
+  // pick, the picked supplier's own lead beside it. Absent from an old server.
+  const basis = r.lines[0] ? leadBasisSentence(r.lines[0], options, qty, r.lines.length === 1) : null;
   return `
     <div class="expand-order-grid">
       <div>
@@ -5309,6 +5448,7 @@ function orderItemPanelHtml(r) {
           q.edited ? ' <span class="badge brand">Edited</span>' : ""
         }${q.coveredByOnOrder ? ' <span class="muted">· covered by on order</span>' : ""}</p>
         ${why}
+        ${basis ? `<p class="obi-why-basis">${esc(basis)}</p>` : ""}
       </div>
       <div>
         <h3>Suppliers on file — ${qty(options.length)}</h3>
@@ -5389,10 +5529,19 @@ function cartPickConflicts(d) {
     </section>`;
 }
 
-function pickConflictButtons(itemUid, number, preferredName) {
+/*
+ * `short` (1.8, By item's Supplier cell): the button reads "Use preferred",
+ * because the cell already names the preferred supplier and "Use SHANDONG
+ * TENGDA" beside Keep is 241 px, which pushed the fifteen columns past a
+ * 1440 px window whenever a pick was open. The title and the confirm still
+ * name it.
+ */
+function pickConflictButtons(itemUid, number, preferredName, short = false) {
   return `<button class="btn small primary cart-use-preferred" type="button" data-item="${esc(itemUid)}"
             data-number="${esc(number ?? "")}" data-preferred="${esc(preferredName ?? "")}"
-            title="Clear the earlier pick; the item goes to its preferred supplier">Use ${esc(preferredName ?? "preferred")}</button>
+            title="Clear the earlier pick; the item goes to its preferred supplier${preferredName ? `, ${esc(preferredName)}` : ""}">Use ${
+              short ? "preferred" : esc(preferredName ?? "preferred")
+            }</button>
           <button class="btn small cart-keep-pick" type="button" data-item="${esc(itemUid)}"
             title="Keep the earlier pick and stop warning about it">Keep</button>`;
 }
@@ -5612,15 +5761,69 @@ function cartLineRow(g, l) {
 function cartRationale(l) {
   const bits = [
     `<span title="Free stock today">${qty(l.freeStock)} free</span>`,
-    l.minLevel ? `<span title="Minimum stock level set under Purchasing › Minimum stock review">min ${qty(l.minLevel)}</span>` : "",
+    l.minLevel ? `<span title="${esc(cartMinTitle(l))}">min ${qty(l.minLevel)}</span>` : "",
     `<span title="Demand over the last ${l.rationale.demandWindowMonths} months">${l.weeklyDemand.toFixed(1)}/wk</span>`,
     l.coverWeeks != null ? `<span title="Cover at that rate">${coverLabel(l.coverWeeks)} cover</span>` : "",
     l.incomingQty ? `<span title="Already on order and not yet received">+${qty(l.incomingQty)} incoming</span>` : "",
-    l.leadTimeDays != null
-      ? `<span title="${l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
-      : "",
+    cartLeadBit(l),
   ].filter(Boolean);
   return `<span class="why-bits">${bits.join(" · ")}</span>`;
+}
+
+/** Where the minimum came from (1.8): a window and the lead it was set from, or typed by hand. */
+function cartMinTitle(l) {
+  const r = l.rationale ?? {};
+  const base = "Minimum stock level set under Purchasing › Minimum stock review";
+  if (r.leadStockBasis === "manual") return `${base}, typed by hand`;
+  if (r.leadStockBasis !== "window") return base;
+  const owner = leadOwner(r, r.minLeadTimeDays);
+  const lead = r.minLeadTimeDays != null ? ` ${owner ? `${owner} ` : "a "}${r.minLeadTimeDays}-day lead time` : " lead time";
+  return `${base}, from${lead}${r.minWindowMonths != null ? ` over ${r.minWindowMonths} months of use` : ""}. It sets the lead-time stock.`;
+}
+
+/*
+ * The lead-time bit of the working, named for what the quantity was built on
+ * (1.8, rationale.leadStockBasis):
+ *
+ *   lead    the item's usual (effective) supplier's lead (leadTimeDaysUsed,
+ *           leadTimeUsedFor), not this line's. On a pick the two differ, and
+ *           quoting only the line's read as if the quantity were built on it:
+ *           N24S16M picked to Tong Ming said "42d lead" while built on
+ *           Shandong Tengda's 131. An item lead is every line's, so the
+ *           line's own bit already says it.
+ *   window  Allied's minimum replaces the live lead term (queries.ts), so no
+ *           live lead is in the arithmetic: "min from X's 120d lead", beside
+ *           this line's own where they differ.
+ *   manual  no lead at all; the min bit's title says it was typed by hand,
+ *           and the line's own lead is shown for reference.
+ *
+ * With the usual supplier, or from a server before 1.8, it reads as it
+ * always did.
+ */
+function cartLeadBit(l) {
+  const r = l.rationale ?? {};
+  const own =
+    l.leadTimeDays != null
+      ? `<span title="${l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
+      : "";
+  if (!("leadTimeDaysUsed" in r)) return own;
+  const picked = !!r.leadTimeUsedFor && l.supplierUid !== "none" && r.leadTimeUsedFor !== l.supplierName;
+  const mine = () => (l.leadTimeDays != null ? `this supplier ${own}` : '<span class="muted">this supplier\'s lead unknown</span>');
+  if (r.leadStockBasis === "manual") return picked ? mine() : own;
+  if (r.leadStockBasis === "window") {
+    const days = r.minLeadTimeDays;
+    if (days == null || (!picked && Number(days) === Number(l.leadTimeDays))) return own;
+    const owner = leadOwner(r, days);
+    const from = `<span title="Your minimum sets the lead-time stock; it was set from ${esc(owner ? `${owner} ` : "a ")}${days}-day lead time">min from ${esc(owner ? `${owner} ` : "")}${days}d lead</span>`;
+    return `${from} · ${picked ? mine() : own || '<span class="muted">lead unknown</span>'}`;
+  }
+  if (!picked || r.leadTimeUsedSource === "item") return own;
+  const who = esc(r.leadTimeUsedFor);
+  const used =
+    r.leadTimeDaysUsed != null
+      ? `<span title="The suggested quantity is built on ${who}'s lead time, the item's usual supplier, whichever supplier it is ordered from">built on ${who}'s ${r.leadTimeDaysUsed}d lead</span>`
+      : `<span title="No lead time is known for ${who}, the item's usual supplier, so the quantity adds no lead-time stock">no lead time for ${who}</span>`;
+  return `${used} · ${mine()}`;
 }
 
 /** Expand/collapse, inline quantity edits, removals and the compare drawer. */
@@ -5905,13 +6108,34 @@ function openSupplierCompare(itemUid, number) {
       if (next) openSupplierCompare(next, null);
     });
 
+  /*
+   * A refusal from Choose or Split (1.8: a supplier no longer on file for the
+   * item, say a pick cleared in another tab that was the only reason it was
+   * offered, 400) used to go unanswered with the button left disabled. It
+   * now says why and reopens the drawer on the item's current options.
+   */
+  const refused = async (err) => {
+    alert(err.message);
+    try {
+      await reloadOrderList();
+    } catch {
+      drawOrderList();
+    }
+    openSupplierCompare(itemUid, null);
+  };
+
   document.querySelectorAll(".cmp-choose").forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true;
-      await fetchJson("/api/insights/cart/select", {
-        method: "POST",
-        body: JSON.stringify({ itemUid, supplierUid: b.dataset.supplier }),
-      });
+      try {
+        await fetchJson("/api/insights/cart/select", {
+          method: "POST",
+          body: JSON.stringify({ itemUid, supplierUid: b.dataset.supplier }),
+        });
+      } catch (err) {
+        await refused(err);
+        return;
+      }
       await afterCartDecision(itemUid);
     }),
   );
@@ -5936,10 +6160,15 @@ function openSupplierCompare(itemUid, number) {
       );
       if (!ok) return;
     }
-    await fetchJson("/api/insights/cart/split", {
-      method: "POST",
-      body: JSON.stringify({ itemUid, parts }),
-    });
+    try {
+      await fetchJson("/api/insights/cart/split", {
+        method: "POST",
+        body: JSON.stringify({ itemUid, parts }),
+      });
+    } catch (err) {
+      await refused(err);
+      return;
+    }
     await afterCartDecision(itemUid);
   });
 }
@@ -6077,7 +6306,8 @@ function cartDecisionsMade(d) {
     <section class="panel cart-decided">
       <h2>Decided — ${qty(d.decisions.length)} item${d.decisions.length === 1 ? "" : "s"}</h2>
       <p class="hint">These are settled and will export cleanly. Undo puts an item back
-      under its preferred supplier, or the supplier MYOB names if none is set.</p>
+      under its preferred supplier, or the supplier MYOB names if none is set. A quantity you
+      typed for a chosen supplier comes with it; a split's separate quantities do not.</p>
       <div class="table-wrap"><table>
         <thead><tr><th>Item</th><th>Decision</th><th class="num">Qty</th><th></th></tr></thead>
         <tbody>
