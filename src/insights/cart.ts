@@ -756,12 +756,15 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
      * sourcing decisions are made.
      *
      * Since the Order list follows the preferred supplier, an item normally has
-     * one line and the two ends meet. They part only where an item still sits
-     * under two suppliers — a saved quantity kept beside the default line — and
-     * each of those lines carries the FULL suggested quantity, so summing lines
-     * answers "what if it were ordered from both" while reading as "what we
-     * need to spend". It used to part on every item, when the list put each
-     * one under every supplier it could find.
+     * one line and the two ends meet. The one normal way it gets more is a
+     * split, and a split's lines are parts of one order, not alternatives, so
+     * they are added up (1.4): FG250P split 142/142 between Skellerup and
+     * Specialised Washers is both parts at each end, where it used to be one
+     * part at each. The ends part only where lines really are alternatives —
+     * two suppliers each carrying the FULL suggested quantity — and summing
+     * those would answer "what if it were ordered from both" while reading as
+     * "what we need to spend". It used to part on every item, when the list
+     * put each one under every supplier it could find.
      *
      * On the live file that sum was NZ$826,199 against a real requirement of
      * NZ$427,255 to NZ$592,140. It was not a cautious estimate, it was
@@ -794,43 +797,41 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
           .reduce((a, i) => a + (i.kit?.buildPlanQty ?? 0) * (i.averageCost ?? 0), 0)
           .toFixed(2),
       ),
-      doubleOrders: suppliers.reduce(
-        (a, g) => a + g.lines.filter((l) => l.kitDoubleOrder).length,
-        0,
-      ),
+      doubleOrders: kitDoubleOrderItems(suppliers),
     },
   };
 }
 
 /**
  * Each item counted once, at its cheapest and its dearest candidate supplier.
+ * The parts of a split are one candidate between them, at their sum: the
+ * split orders every part, so no choice is left that could make it cheaper.
  *
  * `estimatedCost` is kept alongside as the sum of every line — what the export
  * sheets add up to when nothing has been decided — so nothing that relied on it
- * breaks. It is simply no longer what the page leads with.
+ * breaks. It is simply no longer what the page leads with. Where every item
+ * has one line or one split, the range is a single figure equal to it.
  */
-function requirementRange(
-  suppliers: { lines: { itemUid: string; estCost: number }[] }[],
+export function requirementRange(
+  suppliers: { lines: { itemUid: string; estCost: number; state: CartState }[] }[],
 ): { requirementLow: number; requirementHigh: number; estimatedCost: number } {
-  const perItem = new Map<string, { low: number; high: number }>();
+  const perItem = new Map<string, { split: number | null; others: number[] }>();
   let estimatedCost = 0;
   for (const group of suppliers) {
     for (const line of group.lines) {
       estimatedCost += line.estCost;
-      const seen = perItem.get(line.itemUid);
-      if (!seen) {
-        perItem.set(line.itemUid, { low: line.estCost, high: line.estCost });
-        continue;
-      }
-      seen.low = Math.min(seen.low, line.estCost);
-      seen.high = Math.max(seen.high, line.estCost);
+      const seen = perItem.get(line.itemUid) ?? { split: null, others: [] };
+      if (line.state === "split") seen.split = (seen.split ?? 0) + line.estCost;
+      else seen.others.push(line.estCost);
+      perItem.set(line.itemUid, seen);
     }
   }
   let requirementLow = 0;
   let requirementHigh = 0;
-  for (const { low, high } of perItem.values()) {
-    requirementLow += low;
-    requirementHigh += high;
+  for (const { split, others } of perItem.values()) {
+    const candidates = split == null ? others : [split, ...others];
+    requirementLow += Math.min(...candidates);
+    requirementHigh += Math.max(...candidates);
   }
   const round = (v: number): number => Number(v.toFixed(2));
   return {
@@ -838,6 +839,28 @@ function requirementRange(
     requirementHigh: round(requirementHigh),
     estimatedCost: round(estimatedCost),
   };
+}
+
+/**
+ * How many items on the Order list are flagged as a kit ordered alongside
+ * something it is made of. Items, not lines (1.4): a flagged kit split between
+ * two suppliers is one kit with its parts on order, and counting its lines
+ * made it two. The export's warning still counts lines, because it points at
+ * the rows to look at.
+ *
+ * The flag sits on both sides of a clash (kits.ts), so a sub-assembly kit is
+ * counted when its own parts are on the list and also when only the kit it
+ * goes into is. That can make this count higher than Products & BOM's, which
+ * counts the parent kits alone; the page note names both roles. On the 26 Aug
+ * copy they agree: 3 and 3, all three top-level kits.
+ */
+export function kitDoubleOrderItems(
+  suppliers: { lines: { itemUid: string; kitDoubleOrder: boolean }[] }[],
+): number {
+  const flagged = new Set<string>();
+  for (const group of suppliers)
+    for (const line of group.lines) if (line.kitDoubleOrder) flagged.add(line.itemUid);
+  return flagged.size;
 }
 
 /*
@@ -1141,10 +1164,13 @@ export async function cartExport(opts?: Partial<DemandWindow>): Promise<{
   };
 
   const lines: string[] = [];
-  if (cart.kit.doubleOrders > 0) {
+  // Rows, not items: the sheet says how many rows carry Kit CHECK, and it is
+  // unchanged by 1.4 counting items for the page.
+  const kitClashLines = cart.suppliers.reduce((a, g) => a + g.lines.filter((l) => l.kitDoubleOrder).length, 0);
+  if (kitClashLines > 0) {
     lines.push(
       esc(
-        `WARNING: ${cart.kit.doubleOrders} line(s) order a kit and something it is made of at the same time. Review the rows marked in "Kit CHECK" before ordering.`,
+        `WARNING: ${kitClashLines} line(s) order a kit and something it is made of at the same time. Review the rows marked in "Kit CHECK" before ordering.`,
       ),
     );
     lines.push("");

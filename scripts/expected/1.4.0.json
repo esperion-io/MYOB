@@ -1,0 +1,28 @@
+{
+  "version": "1.4.0",
+  "stage": "Stage 4: Order list total for split items",
+  "note": "1.4 moves three figures in /cart and nothing else: the two header ends requirementLow and requirementHigh, which now count a split item's parts added together instead of one part at each end, and kit.doubleOrders, which now counts flagged items instead of flagged lines. Every line, qty, per-supplier subtotal, estimatedCost, suggestion and both CSVs (cart.csv's kit warning still counts rows) must be unchanged; anything else changing is a failure. Each of the three moves only where the cart holds a split item or a flagged kit on more than one line; stage-check splits <after> --before <before> checks they moved by exactly Δlow = Σ(sum − smallest part) and Δhigh = Σ(sum − largest part).",
+  "reviewed": "Written by hand, 13 Oct, because the 26 Aug local copy has no split decision and its three flagged kit items (BN1240G8, SB16450G and item 9) sit on one line each, so a generated list would hold the release entry alone. Checked on that copy: in-process captures of the 1.3 tree (b34cbfa) and this tree on the same data differ only in sync-status.json release. With three splits (N10S16, and the flagged kits SB16450G and BN1240G8) and one pick (B20140S16) written locally through splitCartItem and selectCartSupplier, then removed, the two trees differed only in cart.json requirementLow 29,504.61 -> 30,184.48, requirementHigh 29,677.32 -> 30,184.48 (= estimatedCost) and kit.doubleOrders 5 -> 3, exactly as stage-check splits predicted (low +679.87, high +507.16); cart.csv was byte-identical. The three cart entries name only those paths, so a line, subtotal or CSV cell moving on production still fails.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.3.0 -> 1.4.0) and commit"
+    },
+    {
+      "file": "cart.json",
+      "path": "requirementLow",
+      "why": "a split item's parts are added together at the low end; moves by Σ(sum − smallest part) over split items, 0 with none"
+    },
+    {
+      "file": "cart.json",
+      "path": "requirementHigh",
+      "why": "a split item's parts are added together at the high end; moves by Σ(sum − largest part) over split items, 0 with none"
+    },
+    {
+      "file": "cart.json",
+      "path": "kit.doubleOrders",
+      "why": "counts flagged items, not lines; moves only where a flagged kit or part sits on more than one line (a split)"
+    }
+  ]
+}

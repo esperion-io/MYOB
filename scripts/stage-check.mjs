@@ -14,6 +14,7 @@
  *   node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]
  *   node scripts/stage-check.mjs expect <before> <after> [--stage "…"]   (1.2: generate an allow-list)
  *   node scripts/stage-check.mjs cover <after> [--before <before>] [--base …]   (1.3: the cover identities)
+ *   node scripts/stage-check.mjs splits <after> [--before <before>]   (1.4: the Order list total for splits)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -652,6 +653,102 @@ export async function coverCheck(dir, { get = null, beforeDir = null } = {}) {
   return coverChecks({ items, csv, beforeCsv, belowLead, sortedIncl });
 }
 
+/* ---------- 1.4: the Order list total for split items ---------- */
+
+/*
+ * `stage-check splits`: the identities 1.4's header total and kit count must
+ * satisfy, from the /cart of a capture. With one capture (taken on 1.3 before
+ * shipping) it counts what 1.4 will move: split items, kits ordered with their
+ * parts, and the figure each header end will gain. With --before (1.3) and the
+ * capture after (1.4) on the same data it checks that the ends moved by exactly
+ * that: Δlow = Σ(sum − smallest part) and Δhigh = Σ(sum − largest part) over
+ * split items, while every line, every supplier subtotal and estimatedCost stay
+ * as they were. On the 26 Aug copy the cart holds no decisions, so there both
+ * deltas are 0.
+ */
+function cartSplits(cart) {
+  const perItem = new Map();
+  for (const g of cart?.suppliers ?? [])
+    for (const l of g.lines ?? []) {
+      const e = perItem.get(l.itemUid) ?? { number: l.number ?? l.itemUid, split: [], others: [], kit: false };
+      (l.state === "split" ? e.split : e.others).push(l.estCost);
+      e.kit ||= Boolean(l.kitDoubleOrder);
+      perItem.set(l.itemUid, e);
+    }
+  const sum = (xs) => xs.reduce((a, x) => a + x, 0);
+  let dLow = 0;
+  let dHigh = 0;
+  const split = [];
+  for (const e of perItem.values()) {
+    if (!e.split.length) continue;
+    split.push(e.number);
+    // What 1.3 counted at each end (one line, min and max over every line)
+    // against what 1.4 counts (the parts together as one candidate).
+    const all = [...e.split, ...e.others];
+    const now = [sum(e.split), ...e.others];
+    dLow += Math.min(...now) - Math.min(...all);
+    dHigh += Math.max(...now) - Math.max(...all);
+  }
+  return {
+    split: split.sort(),
+    dLow: Number(dLow.toFixed(2)),
+    dHigh: Number(dHigh.toFixed(2)),
+    kitItems: [...perItem.values()].filter((e) => e.kit).length,
+    kitLines: (cart?.suppliers ?? []).reduce((a, g) => a + (g.lines ?? []).filter((l) => l.kitDoubleOrder).length, 0),
+  };
+}
+
+/** Every 1.4 check as { check, ok, detail }; `before` is optional. */
+export function splitChecks({ after, before = null }) {
+  const out = [];
+  const add = (check, bad, detail) =>
+    out.push({ check, ok: bad.length === 0, detail: bad.length ? `${bad.length}: ${bad.slice(0, 5).join("; ")}` : detail });
+  const s = cartSplits(before ?? after);
+  out.push({
+    check: "split items and kit double orders (count before shipping)",
+    ok: true,
+    detail: `${s.split.length} split item(s)${s.split.length ? ` (${s.split.slice(0, 5).join(", ")})` : ""}; ` +
+      `${s.kitItems} kit item(s) on ${s.kitLines} line(s); header low +${s.dLow}, high +${s.dHigh}`,
+  });
+  if (!before) return out;
+  const near = (a, b) => Math.abs((a ?? NaN) - (b ?? NaN)) <= 0.011;
+  add("estimatedCost unchanged", near(before.estimatedCost, after.estimatedCost) ? [] : [`${before.estimatedCost} -> ${after.estimatedCost}`], `${after.estimatedCost}`);
+  const subA = new Map((before.suppliers ?? []).map((g) => [g.supplierUid, g]));
+  const sub = [];
+  const lines = [];
+  for (const g of after.suppliers ?? []) {
+    const b = subA.get(g.supplierUid);
+    if (!b || !near(b.estimatedCost, g.estimatedCost)) sub.push(`${g.supplierName}: ${b?.estimatedCost} -> ${g.estimatedCost}`);
+    const bl = new Map((b?.lines ?? []).map((l) => [l.itemUid, l]));
+    for (const l of g.lines ?? []) {
+      const x = bl.get(l.itemUid);
+      if (!x || x.qty !== l.qty || !near(x.estCost, l.estCost) || x.state !== l.state) lines.push(`${l.number}|${g.supplierName}`);
+    }
+  }
+  if ((before.suppliers ?? []).length !== (after.suppliers ?? []).length) sub.push(`${before.suppliers?.length} suppliers -> ${after.suppliers?.length}`);
+  // And the other way: a line that vanished leaves nothing to walk above, and
+  // at $0 (item 9 under No known supplier is one) it moves no subtotal either.
+  const kept = new Set((after.suppliers ?? []).flatMap((g) => (g.lines ?? []).map((l) => `${g.supplierUid}|${l.itemUid}`)));
+  for (const g of before.suppliers ?? [])
+    for (const l of g.lines ?? []) if (!kept.has(`${g.supplierUid}|${l.itemUid}`)) lines.push(`${l.number}|${g.supplierName} gone`);
+  if (before.totalLines !== after.totalLines) lines.push(`totalLines ${before.totalLines} -> ${after.totalLines}`);
+  add("every supplier subtotal unchanged", sub, `${(after.suppliers ?? []).length} suppliers`);
+  add("every line's qty, cost and state unchanged", lines, `${after.totalLines} lines`);
+  const dLow = Number((after.requirementLow - before.requirementLow).toFixed(2));
+  const dHigh = Number((after.requirementHigh - before.requirementHigh).toFixed(2));
+  add("Δlow = Σ(sum − smallest part) over split items", near(dLow, s.dLow) ? [] : [`moved ${dLow}, expected ${s.dLow}`], `+${dLow}`);
+  add("Δhigh = Σ(sum − largest part) over split items", near(dHigh, s.dHigh) ? [] : [`moved ${dHigh}, expected ${s.dHigh}`], `+${dHigh}`);
+  const sa = cartSplits(after);
+  add("kit.doubleOrders counts items, not lines", after.kit?.doubleOrders === sa.kitItems ? [] : [`${after.kit?.doubleOrders} vs ${sa.kitItems} items`], `${sa.kitItems} item(s)`);
+  return out;
+}
+
+/** `splits <capture> [--before <capture>]`: read the /cart of each. */
+export function splitCheck(dir, { beforeDir = null } = {}) {
+  const read = (d) => JSON.parse(readFileSync(join(d, "cart.json"), "utf8"));
+  return splitChecks({ after: read(dir), before: beforeDir ? read(beforeDir) : null });
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -694,6 +791,13 @@ async function main() {
     process.exit(checks.every((c) => c.ok) ? 0 : 1);
   }
 
+  if (command === "splits" && args.length === 1 && !options.allow && !options.base) {
+    const checks = splitCheck(args[0], { beforeDir: options.before ?? null });
+    for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
+    if (!options.before) console.log("note: counted only; pass --before <the 1.3 capture> to check the header moved by exactly that.");
+    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  }
+
   if (command === "capture" && args.length === 1 && !options.allow) {
     const base = resolveBase(options.base);
     const key = process.env.DASHBOARD_KEY?.trim() ?? "";
@@ -733,7 +837,8 @@ async function main() {
       "  DASHBOARD_KEY=… node scripts/stage-check.mjs capture <dir> [--base local|prod|URL]\n" +
       "  node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]\n" +
       "  node scripts/stage-check.mjs expect <before> <after> [--stage \"Stage N: …\"] > scripts/expected/<version>.json\n" +
-      "  node scripts/stage-check.mjs cover <after> [--before <before>] [--base local|prod|URL]",
+      "  node scripts/stage-check.mjs cover <after> [--before <before>] [--base local|prod|URL]\n" +
+      "  node scripts/stage-check.mjs splits <after> [--before <before>]",
   );
 }
 

@@ -18,9 +18,26 @@ import { displayVersion, releaseBanner } from "./release-banner.js";
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.3.0";
+const UI_VERSION = "1.4.0";
 
 const RELEASES = [
+  {
+    version: "1.4.0",
+    // Set to the ship date. Before shipping, run stage-check splits on that
+    // evening's capture. If it finds no split items, keep `numbers` as it is:
+    // no figure changes. If it finds any, replace its last sentence with how
+    // many items are split and the header's before and after figures, and
+    // send Allied the same before/after as a heads-up before the deploy.
+    date: "2026-10-14",
+    stage: "Stage 4: Order list total for split items",
+    changes: [
+      "The total at the top of the Order list now counts a split item in full. When you split an item between suppliers, for example 142 from one and 142 from another, the total used to count only one of the two parts, and showed a range as if a choice were still to be made. It now adds the parts together, as the order sheets always have.",
+      "The top of the Order list now shows a single figure, \"$X to order\", the same as the order sheets add up to.",
+      "The note about kits now counts kits, not lines: \"2 kits are on order together with their own parts, or with a kit they go into\". A kit split between two suppliers used to count as two. The exported order sheet is unchanged and still says how many rows to check.",
+    ],
+    numbers: "Only the total at the top of the Order list, and only if you have split an item between suppliers; the kit count changes only where a kit marked as ordered with its parts has been split. Every line, every quantity, each supplier's subtotal, the suggestions and the exported sheet are unchanged. Example: an item split 142 / 142 at $1.00 each used to add $142 to each end of the total; it now adds $284. On your data there are no split items, so no figure changes; only the wording of the kit note does.",
+    check: "Open Purchasing. If you have split an item, the figure at the top now equals the sum of the supplier totals below it. If the kit note shows, its number matches the kits marked in the list, each counted once.",
+  },
   {
     version: "1.3.0",
     // Set to the ship date, and re-derive the live example from that
@@ -4633,7 +4650,9 @@ function cartExportUrl() {
  * worst case, and unreachable by any set of decisions.
  *
  * The range collapses to a single figure once every item has one supplier,
- * which is exactly when a single figure becomes true.
+ * or one deliberate split, which is exactly when a single figure becomes true.
+ * From 1.4 the server counts a split's parts added together; before that a
+ * split showed as a range, one part at each end.
  */
 function cartRequirementLabel(d) {
   const low = d.requirementLow;
@@ -4686,8 +4705,8 @@ function drawCart() {
              ${d.kit.buildPlans ? `<strong>${qty(d.kit.buildPlans)} product${d.kit.buildPlans === 1 ? " has" : "s have"} never been bought complete</strong>,
                so they are not in this cart — there is no purchase price to put on them. They show on
                <a href="#/products">Products &amp; BOM</a> as a quantity to build. ` : ""}
-             ${d.kit.doubleOrders ? `<strong>${qty(d.kit.doubleOrders)} line${d.kit.doubleOrders === 1 ? "" : "s"}</strong> below show a kit and
-               something it is made of both being ordered — worth a look before exporting. ` : ""}
+             ${d.kit.doubleOrders ? `<strong>${qty(d.kit.doubleOrders)} kit${d.kit.doubleOrders === 1 ? " is" : "s are"}</strong> on order
+               together with ${d.kit.doubleOrders === 1 ? "its" : "their"} own parts, or with a kit ${d.kit.doubleOrders === 1 ? "it goes" : "they go"} into — worth a look before exporting. ` : ""}
            </div>`
         : ""
     }
