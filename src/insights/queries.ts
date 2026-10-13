@@ -1097,8 +1097,13 @@ const SORT_VALUES: Record<string, (i: ItemComputed) => number | string | null> =
   used_in: (i) => Math.max(i.parentCountDeep, i.parentCount),
 };
 
-/** Direction that is most useful when a column is first chosen. */
-const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
+/**
+ * Direction that is most useful when a column is first chosen; any key not
+ * listed starts highest first. Exported (1.7) so a test can hold Purchasing's
+ * sortable headers to the same first click as Inventory's for the columns the
+ * two share (public/order-list.js, PURCHASING_SORTS).
+ */
+export const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
   number: "asc",
   name: "asc",
   cover: "asc",

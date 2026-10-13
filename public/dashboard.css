@@ -919,7 +919,17 @@ tr.ledger-anchor td { background: var(--paper); font-weight: 600; }
 .obi-table > thead th { white-space: normal; vertical-align: bottom; }
 .obi-table > thead th:not(:first-child):not(:last-child) { min-width: 3.5rem; }
 .obi-table td .badge { white-space: normal; text-align: center; }
-.obi-table td { padding-left: 0.45rem; padding-right: 0.45rem; }
+/* Sortable headers (1.7) look like Inventory's, but take no width until a
+   column is sorted. Inventory's flex gap reserves the arrow's space on every
+   heading, and its hover ↕ widens the heading it appears in: here those cost
+   12 px of the table's narrowest width (1,072 -> 1,084 px) and 21 px more on
+   hover, so on a narrower laptop a scrollbar came and went as the pointer
+   crossed the headings. At 1440 px the panel is 1,152 px, so it fits either
+   way. Only the sorted column's ▲/▼ takes space (about 10 px). */
+.obi-table th.sortable .th-inner { gap: 0; }
+.obi-table th.sortable.sorted .sort-arrow { margin-left: 0.25rem; }
+.obi-table th.sortable:not(.sorted):hover .sort-arrow::after { position: absolute; margin-left: 0.1rem; }
+.obi-table td, .obi-table > thead th { padding-left: 0.45rem; padding-right: 0.45rem; }
 .obi-supplier .btn.small { margin-top: 0.2rem; }
 td.obi-caret { cursor: pointer; }
 tr.obi-row.expanded { background: var(--brand-soft); }

@@ -1,0 +1,13 @@
+{
+  "version": "1.7.0",
+  "stage": "Stage 7: Purchasing sorting",
+  "note": "1.7 sorts the By item view in the browser, over the /cart already loaded. The only server change is that SORT_DEFAULT_DIR in src/insights/queries.ts is exported (a keyword and a comment), so no API response or CSV can change. Every capture (items, cart.json, cart.csv, suppliers, overview, divergence, item and kit pages) must be identical apart from the release block /sync/status reports; anything else changing is a failure.",
+  "reviewed": "Written by hand: `git diff 7ba55f7 -- src/` is the `export` keyword on SORT_DEFAULT_DIR and its comment. On the 26 Aug local copy (allied_dev), in process: listItems for every Inventory sort key (15) x asc/desc/default x filter all/suggested, 90 responses, hash-identical between 1.6 (7ba55f7) and 1.7. /cart: 133 rows, Σ qty 37,041, Σ est. 29,814.29; every PURCHASING_SORTS key (14) both ways keeps those 133 rows and both totals, with empty values last (46 rows with no known supplier, and so no lead time, go last on Supplier and Lead time). The nine shared keys order the 133 rows exactly as listItems({ filter: 'suggested', sort, dir, all: true }) does (the same 133 items), with the same value at every position, so they differ only within ties (the server keeps its own tie order; By item breaks ties by item number). No database writes.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.6.0 -> 1.7.0) and commit"
+    }
+  ]
+}

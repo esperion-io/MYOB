@@ -91,23 +91,24 @@ export function groupLinesByItem(cart) {
  * The columns, in order. Labels shared with Inventory are Inventory's, with
  * its glossary entry (`term`, a TERMS key) for the hover text; the rest carry
  * their own one-line tip. The drill-down panel spans exactly this many
- * columns, so a column added here can never leave it one short.
+ * columns, so a column added here can never leave it one short. `sort` (1.7)
+ * is the PURCHASING_SORTS key a click on the header sorts by.
  */
 export const BY_ITEM_COLUMNS = [
   { key: "caret", label: "", cls: "caret-h" },
-  { key: "item", label: "Item" },
-  { key: "supplier", label: "Supplier", term: "supplier_source" },
-  { key: "suggested", label: "Suggested", cls: "num", tip: "What the dashboard suggests ordering: enough for the target cover plus the minimum stock (or the lead time), less free stock and on order." },
-  { key: "order_qty", label: "Order qty", cls: "num", tip: "What goes on the order sheet: the suggestion, unless you have typed a quantity." },
-  { key: "on_hand", label: "On hand", cls: "num" },
-  { key: "committed", label: "Committed", term: "committed", cls: "num" },
-  { key: "free_stock", label: "Free stock", term: "free_stock", cls: "num" },
-  { key: "on_order", label: "On order", term: "incoming", cls: "num" },
-  { key: "weekly", label: "Weekly demand", term: "weekly_demand", cls: "num" },
-  { key: "cover", label: "Cover excl. on order", term: "cover" },
-  { key: "cover_incl", label: "Cover incl. on order", term: "cover_incl" },
-  { key: "lead_time", label: "Lead time", cls: "num", tip: "Order to delivery for the supplier this item is ordered from: Allied's figure on the item, else on the supplier, else measured from their orders." },
-  { key: "est_cost", label: "Est. cost", cls: "num", tip: "Order qty × what this supplier last charged (average cost where they have never billed it). Split parts are added together." },
+  { key: "item", label: "Item", sort: "number" },
+  { key: "supplier", label: "Supplier", term: "supplier_source", sort: "supplier" },
+  { key: "suggested", label: "Suggested", cls: "num", sort: "suggested", tip: "What the dashboard suggests ordering: enough for the target cover plus the minimum stock (or the lead time), less free stock and on order." },
+  { key: "order_qty", label: "Order qty", cls: "num", sort: "order_qty", tip: "What goes on the order sheet: the suggestion, unless you have typed a quantity." },
+  { key: "on_hand", label: "On hand", cls: "num", sort: "on_hand" },
+  { key: "committed", label: "Committed", term: "committed", cls: "num", sort: "committed" },
+  { key: "free_stock", label: "Free stock", term: "free_stock", cls: "num", sort: "available" },
+  { key: "on_order", label: "On order", term: "incoming", cls: "num", sort: "incoming" },
+  { key: "weekly", label: "Weekly demand", term: "weekly_demand", cls: "num", sort: "weekly" },
+  { key: "cover", label: "Cover excl. on order", term: "cover", sort: "cover" },
+  { key: "cover_incl", label: "Cover incl. on order", term: "cover_incl", sort: "cover_incl" },
+  { key: "lead_time", label: "Lead time", cls: "num", sort: "lead_time", tip: "Order to delivery for the supplier this item is ordered from: Allied's figure on the item, else on the supplier, else measured from their orders." },
+  { key: "est_cost", label: "Est. cost", cls: "num", sort: "est_cost", tip: "Order qty × what this supplier last charged (average cost where they have never billed it). Split parts are added together." },
   { key: "remove", label: "" },
 ];
 
@@ -273,4 +274,137 @@ export function rowLeadTimes(row) {
       seen.set(days, { days, setByAllied: !!l.leadTimeSetByAllied, orders: l.leadTimeOrders ?? 0 });
   }
   return [...seen.values()];
+}
+
+/*
+ * Sorting By item (1.7): Allied asked for "the sorting functionality from
+ * the Inventory tab" on Purchasing. So a header sorts as Inventory's does:
+ * click to sort, click again to flip, empty values last whichever way.
+ *
+ * Columns the two lists share use Inventory's key, and start in Inventory's
+ * direction (SORT_DEFAULT_DIR in src/insights/queries.ts; a test holds them
+ * together), so `available` is free stock here too and a key in a link means
+ * the same on both tabs. Inventory sorts on the server, a page at a time;
+ * this list is one cart already in the browser, so it is sorted here, from
+ * the same figures the row shows. Ties go by item number, lowest first,
+ * whichever the direction, so a redraw after a write never shuffles them.
+ *
+ *   dir    the first click's direction: lowest or A first for Item,
+ *          Supplier, On hand, Free stock and both covers; highest first for
+ *          risk, the quantities, cost, lead time, weekly demand and committed
+ *   text   compared as words (localeCompare, as the server compares item
+ *          numbers), not as numbers
+ *   value  null where the cell is empty: "no demand" covers, no known
+ *          supplier, no lead time. Those go last both ways, so "lowest first"
+ *          never opens on items with nothing to compare.
+ *
+ * There is no Risk column (Allied's fifteen columns fill a laptop), so
+ * `risk` is reached as the default, or from a link; the line above the table
+ * says so.
+ */
+const num = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+
+export const PURCHASING_SORTS = {
+  risk: { label: "Risk", dir: "desc", value: (r) => num(r.riskScore) },
+  number: { label: "Item number", dir: "asc", text: true, value: (r) => r.number || null },
+  // The name the Supplier cell leads with: the one supplier, or a split's
+  // first part. An item with no supplier on file has nothing to compare.
+  supplier: {
+    label: "Supplier",
+    dir: "asc",
+    text: true,
+    value: (r) => {
+      const m = supplierCell(r);
+      if (m.kind === "unknown") return null;
+      return (m.parts ? m.parts[0]?.name : m.name) || null;
+    },
+  },
+  suggested: { label: "Suggested", dir: "desc", value: (r) => num(r.suggestedQty) },
+  order_qty: { label: "Order qty", dir: "desc", value: (r) => num(r.qty) },
+  on_hand: { label: "On hand", dir: "asc", value: (r) => num(r.onHand) },
+  committed: { label: "Committed", dir: "desc", value: (r) => num(r.qtyCommitted) },
+  available: { label: "Free stock", dir: "asc", value: (r) => num(r.freeStock) },
+  incoming: { label: "On order", dir: "desc", value: (r) => num(r.incomingQty) },
+  weekly: { label: "Weekly demand", dir: "desc", value: (r) => num(r.weeklyDemand) },
+  cover: { label: "Cover excl. on order", dir: "asc", value: (r) => num(r.coverWeeks) },
+  cover_incl: { label: "Cover incl. on order", dir: "asc", value: (r) => num(r.coverWeeksInclOnOrder) },
+  // A split between a 120-day and a 30-day supplier is complete when the
+  // slower part lands, so the row sorts on its longest known lead.
+  lead_time: {
+    label: "Lead time",
+    dir: "desc",
+    value: (r) => {
+      const days = rowLeadTimes(r).map((t) => num(t.days)).filter((d) => d != null);
+      return days.length ? Math.max(...days) : null;
+    },
+  },
+  est_cost: { label: "Est. cost", dir: "desc", value: (r) => num(r.estCost) },
+};
+
+export const ORDER_SORT_DEFAULT = { sort: "risk", dir: "desc" };
+
+/** The direction actually in force: the one asked for, else the key's first-click direction. */
+export function sortDirection(key, dir) {
+  if (dir === "asc" || dir === "desc") return dir;
+  return (PURCHASING_SORTS[key] ?? PURCHASING_SORTS.risk).dir;
+}
+
+const byNumber = (a, b) => String(a?.number ?? "").localeCompare(String(b?.number ?? ""));
+
+/**
+ * The rows in a new array, sorted by `key` (a PURCHASING_SORTS key; anything
+ * else sorts by risk), `dir` "asc" or "desc" (anything else: the key's own
+ * direction). Empty values last both ways; ties by item number. The rows
+ * themselves are not touched, so the count and every total stay as they were.
+ */
+export function sortRows(rows, key, dir) {
+  const s = PURCHASING_SORTS[key] ?? PURCHASING_SORTS.risk;
+  const d = sortDirection(PURCHASING_SORTS[key] ? key : "risk", dir);
+  const values = new Map((rows ?? []).map((r) => [r, s.value(r)]));
+  return [...(rows ?? [])].sort((a, b) => {
+    const va = values.get(a);
+    const vb = values.get(b);
+    if (va == null || vb == null) {
+      if (va == null && vb == null) return byNumber(a, b);
+      return va == null ? 1 : -1;
+    }
+    const c = s.text ? String(va).localeCompare(String(vb)) : va - vb;
+    if (c !== 0) return d === "asc" ? c : -c;
+    return byNumber(a, b);
+  });
+}
+
+/*
+ * The sort lives in the address (#/purchasing?sort=cover_incl&dir=asc), so
+ * reload, a bookmark and back/forward all open the list as it was. A key
+ * this version doesn't know, from a later version's link or a typo, opens
+ * the default order rather than an error; a direction other than asc/desc
+ * means the key's own. The default writes nothing, so #/purchasing stays
+ * the plain address. The same rules as Inventory's address.
+ */
+export function parseOrderSort(query) {
+  const p = new URLSearchParams(query ?? "");
+  const sort = p.get("sort");
+  if (!sort || !Object.prototype.hasOwnProperty.call(PURCHASING_SORTS, sort)) return { sort: "risk", dir: "" };
+  const dir = p.get("dir");
+  return { sort, dir: dir === "asc" || dir === "desc" ? dir : "" };
+}
+
+export function orderSortQuery(state) {
+  const p = new URLSearchParams();
+  const sort = state?.sort && Object.prototype.hasOwnProperty.call(PURCHASING_SORTS, state.sort) ? state.sort : "risk";
+  const dir = sortDirection(sort, state?.dir);
+  if (sort === ORDER_SORT_DEFAULT.sort && dir === ORDER_SORT_DEFAULT.dir) return "";
+  p.set("sort", sort);
+  p.set("dir", dir);
+  return p.toString();
+}
+
+/** "sorted by cover incl. on order, lowest first", for the line above the table. */
+export function orderSortSummary(state) {
+  const key = state?.sort && Object.prototype.hasOwnProperty.call(PURCHASING_SORTS, state.sort) ? state.sort : "risk";
+  const s = PURCHASING_SORTS[key];
+  const d = sortDirection(key, state?.dir);
+  const word = s.text ? (d === "asc" ? "A to Z" : "Z to A") : d === "asc" ? "lowest first" : "highest first";
+  return `sorted by ${s.label.toLowerCase()}, ${word}`;
 }

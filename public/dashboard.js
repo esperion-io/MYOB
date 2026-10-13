@@ -5,8 +5,14 @@ import {
   BY_ITEM_COLUMNS,
   orderByItemRows,
   orderListSummary,
+  orderSortQuery,
+  orderSortSummary,
+  parseOrderSort,
+  PURCHASING_SORTS,
   qtyCell,
   rowLeadTimes,
+  sortDirection,
+  sortRows,
   supplierCell,
   supplierRole,
 } from "./order-list.js";
@@ -27,9 +33,25 @@ import {
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.6.0";
+const UI_VERSION = "1.7.0";
 
 const RELEASES = [
+  {
+    version: "1.7.0",
+    // Set to the ship date. Nothing here depends on live figures: the check
+    // below names no item, so there is nothing to re-derive.
+    date: "2026-10-14",
+    stage: "Stage 7: Purchasing sorting",
+    changes: [
+      "On Purchasing, the By item list now sorts the way Inventory does, as you asked. Click a column heading to sort by it; click it again to reverse. The column in use shows ▲ (lowest first) or ▼ (highest first), and a faint ↕ appears when you point at any other heading. Items with nothing to compare in that column, such as no demand (so no cover), no supplier or no lead time, always go to the bottom, whichever way you sort.",
+      "The first click goes the most useful way. Item, Supplier, On hand, Free stock and both covers start lowest first (A first for Item and Supplier). Suggested, Order qty, Committed, On order, Weekly demand, Lead time and Est. cost start highest first. Every column that is also on Inventory starts the same way there. Items that tie are listed by item number.",
+      "The line above the table says how the list is sorted, for example \"sorted by cover incl. on order, lowest first\". The list still opens highest risk first (the same risk score as Inventory), then by item number. There is no Risk column, so to go back to that order click \"back to highest risk first\" on that line.",
+      "The sort is kept in the page address, for example …#/purchasing?sort=cover_incl&dir=asc. Reloading the page, a bookmark, or coming back to Purchasing with the Back button opens the list sorted the same way. Changing a quantity, taking an item off, or opening an item's detail keeps the sort too; only an item whose own figure changed moves, for example after a new quantity when sorted by Order qty or Est. cost.",
+      "By supplier, the order sheet export and Inventory's sorting are unchanged. Inventory's filters and search are not on Purchasing yet; tell us if you want them.",
+    ],
+    numbers: "None. Sorting changes only the order of the rows: the same items, quantities and estimated total as before.",
+    check: "Open Purchasing (By item). Click Cover incl. on order: the heading shows ▲, the line above the table reads \"sorted by cover incl. on order, lowest first\" and the shortest cover is at the top. Click it again: ▼, highest first. Click Supplier: A to Z, and the \"No known supplier\" items are at the bottom; click it again for Z to A, and they are still at the bottom. Reload the page: the same order. Click \"back to highest risk first\": the list is back as it opens. Sorting, reloading and going back never change the count or the total at the top.",
+  },
   {
     version: "1.6.0",
     // Set to the ship date, and re-derive the BN1665G row in `check` from
@@ -421,8 +443,12 @@ const MIN_STATUS_OPTIONS = [
  *   orderItemDetails  /items/:uid for a drill-down, by its URL, which carries
  *                  the as-at date and window, so changing either never shows
  *                  another date's figures.
+ *   orderSort      By item's sort (1.7): a PURCHASING_SORTS key, and "asc",
+ *                  "desc" or "" for that column's own first-click direction.
+ *                  Read from the address by route(), as Inventory's is.
  */
 let orderListView = "items";
+const orderSort = { sort: "risk", dir: "" };
 const orderItemOpen = new Set();
 let orderItemRows = new Map();
 const orderItemDetails = new Map();
@@ -987,11 +1013,41 @@ function syncInventoryUrl() {
   setTimeout(() => (suppressRoute = false), 0);
 }
 
+/*
+ * By item's sort in the address (1.7), on Inventory's rules: an address with
+ * a query sets it (an unknown key gives the default order), one without keeps
+ * the sort already on screen, as Inventory's nav link does, and every redraw
+ * writes it back with replaceState so the history entry, a reload and a
+ * bookmark all carry it. By supplier and the minimum stock review have no
+ * sort here and are untouched.
+ */
+function isOrderByItemRoute(view, arg) {
+  return view === "purchasing" && arg !== "suppliers" && arg !== "minimums";
+}
+
+function applyOrderSortQuery(queryString) {
+  if (!queryString) return;
+  Object.assign(orderSort, parseOrderSort(queryString));
+}
+
+function syncOrderSortUrl() {
+  const [path] = location.hash.replace(/^#\//, "").split("?");
+  const [view, arg] = path.split("/");
+  if (!isOrderByItemRoute(view, arg)) return;
+  const qs = orderSortQuery(orderSort);
+  const next = `#/purchasing${qs ? `?${qs}` : ""}`;
+  if (location.hash === next) return;
+  suppressRoute = true;
+  history.replaceState({}, "", next);
+  setTimeout(() => (suppressRoute = false), 0);
+}
+
 function route() {
   const raw = location.hash.replace(/^#\//, "") || "overview";
   const [path, query] = raw.split("?");
   const [view, arg] = path.split("/");
   if (view === "inventory") applyInventoryQuery(query);
+  if (isOrderByItemRoute(view, arg)) applyOrderSortQuery(query);
   for (const a of nav.querySelectorAll("a")) {
     a.classList.toggle("active", a.dataset.route === view);
   }
@@ -4909,7 +4965,10 @@ function wireOrderListCommon() {
  */
 function drawOrderByItem() {
   const d = cartData;
-  const rows = orderByItemRows(d);
+  // Sorted here, over the cart already loaded (1.7): a header click redraws
+  // from cartData without a fetch, and a redraw after a write keeps the order.
+  const rows = sortRows(orderByItemRows(d), orderSort.sort, orderSort.dir);
+  const sortIsDefault = orderSortQuery(orderSort) === "";
   const sum = orderListSummary(d, rows);
   orderItemRows = new Map(rows.map((r) => [r.itemUid, r]));
   const cols = BY_ITEM_COLUMNS.length;
@@ -4936,8 +4995,12 @@ function drawOrderByItem() {
     ${cartDecisionsMade(d)}
     ${cartRemovedItems(d)}
 
-    <p class="view-summary">${qty(rows.length)} item${rows.length === 1 ? "" : "s"} · highest risk first ·
-      click an item or ▸ for its detail · To raise a purchase order, use By supplier: one card is one order.</p>
+    <p class="view-summary">${qty(rows.length)} item${rows.length === 1 ? "" : "s"} · ${esc(orderSortSummary(orderSort))}${
+      sortIsDefault
+        ? " (Inventory's risk score), then item number"
+        : ' · <button class="linkish" id="obi-sort-reset" type="button">back to highest risk first</button>'
+    } ·
+      click a column heading to sort, an item or ▸ for its detail · To raise a purchase order, use By supplier: one card is one order.</p>
     <div class="table-wrap obi-wrap"><table class="obi-table">
       <thead><tr>${BY_ITEM_COLUMNS.map(byItemTh).join("")}</tr></thead>
       <tbody>
@@ -4953,10 +5016,56 @@ function drawOrderByItem() {
 
   wireOrderListCommon();
   wireOrderByItem(cols);
+  wireOrderSort();
+  syncOrderSortUrl();
+}
+
+/*
+ * Click a heading to sort by it; click the one in use to flip it (1.7), as on
+ * Inventory. Only the rows are redrawn from the cart in hand; open drill-downs
+ * re-open under their own rows.
+ */
+function wireOrderSort() {
+  main.querySelectorAll(".obi-table th.sortable").forEach((header) =>
+    header.addEventListener("click", () => {
+      const key = header.dataset.sort;
+      if (orderSort.sort === key) {
+        orderSort.dir = sortDirection(key, orderSort.dir) === "desc" ? "asc" : "desc";
+      } else {
+        orderSort.sort = key;
+        orderSort.dir = ""; // start in this column's most useful direction
+      }
+      drawOrderByItem();
+    }),
+  );
+  main.querySelector("#obi-sort-reset")?.addEventListener("click", () => {
+    Object.assign(orderSort, { sort: "risk", dir: "" });
+    drawOrderByItem();
+  });
+}
+
+/*
+ * A sortable Purchasing header (1.7). It draws exactly what Inventory's
+ * sortTh draws (th.sortable, ▲/▼, the hover ↕, the same tip), but reads the
+ * state it is given rather than Inventory's, so sorting Purchasing can never
+ * touch Inventory. `tip` is the column's glossary or own hover text.
+ */
+function sortableHeader(state, key, label, tip, cls = "") {
+  const active = state.sort === key;
+  const dir = active ? sortDirection(key, state.dir) : null;
+  const arrow = active ? (dir === "asc" ? "▲" : "▼") : "";
+  const text = PURCHASING_SORTS[key]?.text;
+  const flip = dir === "asc" ? (text ? " Z to A" : " highest first") : text ? " A to Z" : " lowest first";
+  const title = `${tip ? `${tip} · ` : ""}Click to sort${active ? flip : ""}`;
+  return `<th class="${cls} sortable${active ? " sorted" : ""}"
+    data-sort="${esc(key)}" title="${esc(title)}"
+    aria-sort="${active ? (dir === "asc" ? "ascending" : "descending") : "none"}"
+    ><span class="th-inner">${esc(label)}<span class="sort-arrow">${arrow}</span></span></th>`;
 }
 
 /** A By item header: Inventory's label and glossary hover where it has one, else its own tip. */
 function byItemTh(c) {
+  if (c.sort) return sortableHeader(orderSort, c.sort, c.label, c.term ? TERMS[c.term]?.short : c.tip, c.cls ?? "");
   if (c.term) return th(c.term, c.label, c.cls ?? "");
   if (!c.tip) return `<th class="${c.cls ?? ""}">${esc(c.label)}</th>`;
   return `<th class="${c.cls ?? ""}"><span class="term" title="${esc(c.tip)}">${esc(c.label)}</span></th>`;

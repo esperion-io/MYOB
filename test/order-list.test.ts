@@ -17,7 +17,12 @@
  * And the By item view (1.6) drawn from it, further down: its columns, its
  * order, what each Supplier and Order qty cell says, and that it lists the
  * same (item, supplier, qty) set as By supplier.
- * No database: public/order-list.js is a plain browser module, imported as is.
+ * And its sorting (1.7), at the foot: every key both ways with empty values
+ * last, a sort that only reorders, Inventory's first-click direction for the
+ * keys the two share, the address it is kept in, and Inventory's own header
+ * left alone.
+ * No database: public/order-list.js is a plain browser module, imported as is,
+ * and queries.ts only for a constant (its pool is created on first use).
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -27,13 +32,21 @@ import {
   BY_ITEM_COLUMNS,
   byRiskThenNumber,
   groupLinesByItem,
+  ORDER_SORT_DEFAULT,
   orderByItemRows,
   orderListSummary,
+  orderSortQuery,
+  orderSortSummary,
+  parseOrderSort,
+  PURCHASING_SORTS,
   qtyCell,
   rowLeadTimes,
+  sortDirection,
+  sortRows,
   supplierCell,
   supplierRole,
 } from "../public/order-list.js";
+import { SORT_DEFAULT_DIR } from "../src/insights/queries.js";
 
 interface Line {
   itemUid: string;
@@ -465,8 +478,189 @@ test("dashboard.js: the Order list's view state is declared before the first rou
   const src = read("../public/dashboard.js");
   const boot = src.search(/^route\(\);$/m);
   assert.ok(boot > 0);
-  for (const name of ["orderListView", "orderItemOpen", "orderItemRows", "orderItemDetails"]) {
+  for (const name of ["orderListView", "orderItemOpen", "orderItemRows", "orderItemDetails", "orderSort"]) {
     const at = src.search(new RegExp(`^(?:let|const) ${name}\\b`, "m"));
     assert.ok(at >= 0 && at < boot, `${name} must be declared before the first route() call`);
   }
+});
+
+/* ---------- sorting By item (1.7) ---------- */
+
+/*
+ * A cart with an empty value for every key somewhere: no demand (null covers
+ * and weekly), no known supplier, no lead time, a 1.4 line with no risk or
+ * committed, a split under two leads, and ties on every figure.
+ */
+const SORTABLE = [
+  line("BN1665G", "HANOVA", "suggested", 1779, 0.21, { supplierName: "Hanova", riskScore: 95, leadTimeDays: 120, weeklyDemand: 166.4, coverWeeks: 1.9, coverWeeksInclOnOrder: 14, onHand: 333, qtyCommitted: 10, freeStock: 323, incomingQty: 2000, suggestedQty: 1779 }),
+  line("SPW12G", "HANOVA", "edited", 3600, 0.05, { supplierName: "Hanova", riskScore: 95, leadTimeDays: 120, weeklyDemand: 300, coverWeeks: 4, coverWeeksInclOnOrder: 50, onHand: 1200, qtyCommitted: 0, freeStock: 1200, incomingQty: 15000, suggestedQty: 3004 }),
+  line("FG250P", "SKELLERUP", "split", 142, 1.5, { supplierName: "Skellerup", riskScore: 40, leadTimeDays: 30, weeklyDemand: 0, coverWeeks: null, coverWeeksInclOnOrder: null, onHand: 0, qtyCommitted: 0, freeStock: 0, incomingQty: 0, suggestedQty: 284 }),
+  line("FG250P", "BREMICK", "split", 142, 1.25, { supplierName: "Bremick", riskScore: 40, leadTimeDays: 90, weeklyDemand: 0, coverWeeks: null, coverWeeksInclOnOrder: null, onHand: 0, qtyCommitted: 0, freeStock: 0, incomingQty: 0, suggestedQty: 284 }),
+  line("NOSUP", "none", "suggested", 50, 0, { supplierName: null, riskScore: 60, leadTimeDays: null, weeklyDemand: 2, coverWeeks: 0.5, coverWeeksInclOnOrder: 0.5, onHand: 1, qtyCommitted: 0, freeStock: 1, incomingQty: 0, suggestedQty: 50 }),
+  line("OLD14", "TONG MING", "suggested", 500, 0.7, { supplierName: "Tong Ming", riskScore: undefined, qtyCommitted: undefined, coverWeeksInclOnOrder: undefined, leadTimeDays: 42, weeklyDemand: 20, coverWeeks: 4, onHand: 80, freeStock: 80, incomingQty: 0, suggestedQty: 500 }),
+  line("A1", "JIAXING", "suggested", 1779, 0.3, { supplierName: "Jiaxing", riskScore: 40, leadTimeDays: 120, weeklyDemand: 166.4, coverWeeks: 1.9, coverWeeksInclOnOrder: 14, onHand: 333, qtyCommitted: 10, freeStock: 323, incomingQty: 2000, suggestedQty: 1779 }),
+];
+
+test("Purchasing sorts: every sortable column has a key, and every key but risk has a column", () => {
+  const onColumns = BY_ITEM_COLUMNS.filter((c: { sort?: string }) => c.sort).map((c: { sort: string }) => c.sort);
+  for (const k of onColumns) assert.ok(PURCHASING_SORTS[k], `column sorts by unknown key ${k}`);
+  assert.deepEqual([...onColumns, "risk"].sort(), Object.keys(PURCHASING_SORTS).sort());
+  // Caret and × are not sortable; everything Allied read is.
+  assert.deepEqual(BY_ITEM_COLUMNS.filter((c: { sort?: string }) => !c.sort).map((c: { key: string }) => c.key), ["caret", "remove"]);
+  assert.deepEqual(ORDER_SORT_DEFAULT, { sort: "risk", dir: "desc" });
+});
+
+test("Purchasing sorts: shared keys start in Inventory's direction (SORT_DEFAULT_DIR), the rest as the plan says", () => {
+  const shared = ["risk", "number", "on_hand", "committed", "available", "incoming", "weekly", "cover", "cover_incl"];
+  for (const k of shared) {
+    assert.ok(PURCHASING_SORTS[k], `${k} is Inventory's key and must be Purchasing's too`);
+    assert.equal(PURCHASING_SORTS[k].dir, SORT_DEFAULT_DIR[k] ?? "desc", `${k} starts the other way from Inventory`);
+  }
+  // Lowest or A first: Item, Supplier, On hand, Free stock, both covers.
+  // Highest first: risk, the quantities, cost, lead time, weekly demand, committed.
+  const firstClick = Object.fromEntries(Object.entries(PURCHASING_SORTS).map(([k, v]) => [k, (v as { dir: string }).dir]));
+  assert.deepEqual(firstClick, {
+    risk: "desc", number: "asc", supplier: "asc", suggested: "desc", order_qty: "desc", on_hand: "asc",
+    committed: "desc", available: "asc", incoming: "desc", weekly: "desc", cover: "asc", cover_incl: "asc",
+    lead_time: "desc", est_cost: "desc",
+  });
+});
+
+test("sortRows: every key, both ways, is ordered with empty values last and ties by item number", () => {
+  const rows = groupLinesByItem(cart(SORTABLE));
+  for (const [key, s] of Object.entries(PURCHASING_SORTS) as [string, { text?: boolean; value: (r: Row) => unknown }][]) {
+    for (const dir of ["asc", "desc"]) {
+      const out = sortRows(rows, key, dir);
+      const vals = out.map((r: Row) => s.value(r));
+      const firstEmpty = vals.findIndex((v: unknown) => v == null);
+      if (firstEmpty >= 0)
+        assert.ok(vals.slice(firstEmpty).every((v: unknown) => v == null), `${key} ${dir}: an empty value before a filled one`);
+      for (let i = 1; i < out.length; i++) {
+        const [a, b] = [vals[i - 1], vals[i]];
+        if (a == null || b == null) {
+          if (a == null && b == null) assert.ok(String(out[i - 1].number).localeCompare(String(out[i].number)) < 0);
+          continue;
+        }
+        const c = s.text ? String(a).localeCompare(String(b)) : Number(a) - Number(b);
+        assert.ok(dir === "asc" ? c <= 0 : c >= 0, `${key} ${dir}: ${out[i - 1].number} before ${out[i].number}`);
+        if (c === 0) assert.ok(String(out[i - 1].number).localeCompare(String(out[i].number)) < 0, `${key} ${dir}: tie not by item number`);
+      }
+    }
+  }
+});
+
+test("sortRows: a sort only reorders: same rows, same count and totals, input untouched", () => {
+  const rows = groupLinesByItem(cart(SORTABLE));
+  const before = rows.map((r: Row) => r.itemUid);
+  const qtySum = (rs: Row[]) => rs.reduce((a, r) => a + r.qty, 0);
+  const costSum = (rs: Row[]) => rs.reduce((a, r) => a + r.estCost, 0);
+  for (const key of [...Object.keys(PURCHASING_SORTS), "nonsense"]) {
+    for (const dir of ["asc", "desc", ""]) {
+      const out = sortRows(rows, key, dir);
+      assert.notEqual(out, rows);
+      assert.equal(out.length, rows.length);
+      assert.deepEqual(out.map((r: Row) => r.itemUid).sort(), [...before].sort());
+      assert.equal(qtySum(out), qtySum(rows));
+      close(costSum(out), costSum(rows));
+    }
+  }
+  assert.deepEqual(rows.map((r: Row) => r.itemUid), before, "the rows passed in keep their order");
+  assert.deepEqual(sortRows([], "cover", "asc"), []);
+  assert.deepEqual(sortRows(undefined, "cover", "asc"), []);
+});
+
+test("sortRows: the default is the 1.6 order, and anything unknown falls back to it", () => {
+  const c = cart(SORTABLE);
+  const ids = (rs: Row[]) => rs.map((r) => r.number);
+  const risk = ids(orderByItemRows(c));
+  assert.deepEqual(risk, ["BN1665G", "SPW12G", "NOSUP", "A1", "FG250P", "OLD14"]);
+  assert.deepEqual(ids(sortRows(groupLinesByItem(c), "risk", "desc")), risk);
+  assert.deepEqual(ids(sortRows(groupLinesByItem(c), "risk", "")), risk);
+  assert.deepEqual(ids(sortRows(groupLinesByItem(c), "gap", "asc")), ids(sortRows(groupLinesByItem(c), "risk", "asc")), "an unknown key sorts by risk in the direction asked");
+  assert.deepEqual(ids(sortRows(groupLinesByItem(c), "nonsense", "")), risk);
+  // risk lowest first still puts the 1.4 line with no score last.
+  assert.deepEqual(ids(sortRows(groupLinesByItem(c), "risk", "asc")), ["A1", "FG250P", "NOSUP", "BN1665G", "SPW12G", "OLD14"]);
+  assert.equal(sortDirection("cover", ""), "asc");
+  assert.equal(sortDirection("cover", "desc"), "desc");
+  assert.equal(sortDirection("nonsense", "sideways"), "desc");
+});
+
+test("sortRows: what each column sorts on", () => {
+  const c = cart(SORTABLE);
+  const ids = (key: string, dir: string) => sortRows(groupLinesByItem(c), key, dir).map((r: Row) => r.number);
+  // Covers: no demand last both ways; equal covers by item number.
+  assert.deepEqual(ids("cover", "asc"), ["NOSUP", "A1", "BN1665G", "OLD14", "SPW12G", "FG250P"]);
+  assert.deepEqual(ids("cover", "desc"), ["OLD14", "SPW12G", "A1", "BN1665G", "NOSUP", "FG250P"]);
+  // Cover incl.: a 1.4 server sends none, so that row has nothing to compare.
+  assert.deepEqual(ids("cover_incl", "asc"), ["NOSUP", "A1", "BN1665G", "SPW12G", "FG250P", "OLD14"]);
+  // Supplier: the name the cell leads with (a split's first part); no supplier last.
+  assert.deepEqual(ids("supplier", "asc"), ["BN1665G", "SPW12G", "A1", "FG250P", "OLD14", "NOSUP"]);
+  assert.deepEqual(ids("supplier", "desc"), ["OLD14", "FG250P", "A1", "BN1665G", "SPW12G", "NOSUP"]);
+  // Lead time: a split sorts on its slower part (Skellerup 30, Bremick 90 -> 90); unknown last.
+  assert.deepEqual(ids("lead_time", "desc"), ["A1", "BN1665G", "SPW12G", "FG250P", "OLD14", "NOSUP"]);
+  // Order qty and est. cost are the row's sums: the split counts 284, not 142.
+  assert.deepEqual(ids("order_qty", "desc"), ["SPW12G", "A1", "BN1665G", "OLD14", "FG250P", "NOSUP"]);
+  assert.deepEqual(ids("est_cost", "desc"), ["A1", "FG250P", "BN1665G", "OLD14", "SPW12G", "NOSUP"]);
+  // Committed: the 1.4 line without the field goes last, not first as a zero.
+  assert.deepEqual(ids("committed", "desc"), ["A1", "BN1665G", "FG250P", "NOSUP", "SPW12G", "OLD14"]);
+  assert.deepEqual(ids("number", "asc"), ["A1", "BN1665G", "FG250P", "NOSUP", "OLD14", "SPW12G"]);
+  assert.deepEqual(ids("number", "desc"), ["SPW12G", "OLD14", "NOSUP", "FG250P", "BN1665G", "A1"]);
+});
+
+test("The sort in the address: round trip, the default writes nothing, unknown keys give the default", () => {
+  for (const key of Object.keys(PURCHASING_SORTS)) {
+    for (const dir of ["asc", "desc"]) {
+      const q = orderSortQuery({ sort: key, dir });
+      const back = parseOrderSort(q);
+      assert.equal(back.sort, q ? key : "risk");
+      assert.equal(sortDirection(back.sort, back.dir), dir, `${key} ${dir} did not survive ${q}`);
+    }
+  }
+  assert.equal(orderSortQuery({ sort: "risk", dir: "" }), "");
+  assert.equal(orderSortQuery({ sort: "risk", dir: "desc" }), "");
+  assert.equal(orderSortQuery({ sort: "cover_incl", dir: "asc" }), "sort=cover_incl&dir=asc");
+  assert.equal(orderSortQuery({ sort: "cover_incl", dir: "" }), "sort=cover_incl&dir=asc", "the direction on screen is written out");
+  assert.deepEqual(parseOrderSort("sort=cover_incl&dir=asc"), { sort: "cover_incl", dir: "asc" });
+  assert.deepEqual(parseOrderSort("sort=gap&dir=asc"), { sort: "risk", dir: "" }, "a later version's key opens the default");
+  assert.deepEqual(parseOrderSort("sort=constructor"), { sort: "risk", dir: "" });
+  assert.deepEqual(parseOrderSort("sort=weekly&dir=up"), { sort: "weekly", dir: "" });
+  assert.deepEqual(parseOrderSort(""), { sort: "risk", dir: "" });
+  assert.deepEqual(parseOrderSort(undefined), { sort: "risk", dir: "" });
+});
+
+test("The Sorted by line says what is on screen", () => {
+  assert.equal(orderSortSummary({ sort: "risk", dir: "" }), "sorted by risk, highest first");
+  assert.equal(orderSortSummary({ sort: "cover_incl", dir: "asc" }), "sorted by cover incl. on order, lowest first");
+  assert.equal(orderSortSummary({ sort: "available", dir: "" }), "sorted by free stock, lowest first");
+  assert.equal(orderSortSummary({ sort: "supplier", dir: "desc" }), "sorted by supplier, Z to A");
+  assert.equal(orderSortSummary({ sort: "number", dir: "" }), "sorted by item number, A to Z");
+  assert.equal(orderSortSummary({ sort: "gap", dir: "asc" }), "sorted by risk, lowest first", "as sortRows: risk, in the direction asked");
+});
+
+test("dashboard.js: Purchasing sorts with its own header and state; Inventory's sortTh is untouched", () => {
+  const src = read("../public/dashboard.js");
+  // Inventory's header still reads Inventory's state and nothing else.
+  const sortTh = fnBody(src, "sortTh");
+  assert.match(sortTh, /const active = invState\.sort === sortKey;/);
+  assert.doesNotMatch(sortTh, /orderSort/);
+  // Purchasing's reads only the state it is given, and draws Inventory's classes.
+  const header = fnBody(src, "sortableHeader");
+  assert.match(src, /^function sortableHeader\(state, key, label, tip, cls = ""\)/m);
+  assert.doesNotMatch(header, /\binv(State|LastDir)\b|currentDir\(/);
+  for (const cls of ["sortable", "sorted", "th-inner", "sort-arrow"]) assert.match(header, new RegExp(cls));
+  assert.match(fnBody(src, "byItemTh"), /sortableHeader\(orderSort, c\.sort,/);
+  // Sorted in the browser, over the cart already loaded; header clicks redraw without a fetch.
+  assert.match(fnBody(src, "drawOrderByItem"), /sortRows\(orderByItemRows\(d\), orderSort\.sort, orderSort\.dir\)/);
+  const wire = fnBody(src, "wireOrderSort");
+  assert.doesNotMatch(wire, /fetchJson|reloadOrderList/);
+  assert.match(wire, /drawOrderByItem\(\)/);
+  // The address: route() reads it for By item only; the redraw writes it back.
+  const route = fnBody(src, "route");
+  assert.match(route, /if \(view === "inventory"\) applyInventoryQuery\(query\);/);
+  assert.match(route, /if \(isOrderByItemRoute\(view, arg\)\) applyOrderSortQuery\(query\);/);
+  assert.match(fnBody(src, "isOrderByItemRoute"), /view === "purchasing" && arg !== "suppliers" && arg !== "minimums"/);
+  assert.match(fnBody(src, "syncOrderSortUrl"), /history\.replaceState/);
+  assert.match(fnBody(src, "drawOrderByItem"), /syncOrderSortUrl\(\)/);
+  // By supplier's cards are not sorted by it.
+  assert.doesNotMatch(fnBody(src, "drawCart"), /orderSort|sortRows/);
 });
