@@ -51,6 +51,11 @@ export function groupLinesByItem(cart) {
           coverWeeksInclOnOrder: line.coverWeeksInclOnOrder ?? null,
           coverBelowLeadTime: line.coverBelowLeadTime ?? null,
           riskScore: line.riskScore ?? null,
+          // The item's stock gap (1.11), as the server worked it out, for
+          // the Gap before delivery column. `hasGap` tells a server before
+          // 1.11 (no field: "—") from a past date (null: "today only").
+          gap: line.gap ?? null,
+          hasGap: "gap" in line,
           suggestedQty: line.suggestedQty ?? null,
           averageCost: line.averageCost ?? null,
           // Sourcing context, also per item: every supplier on file (for the
@@ -107,6 +112,7 @@ export const BY_ITEM_COLUMNS = [
   { key: "weekly", label: "Weekly demand", term: "weekly_demand", cls: "num", sort: "weekly" },
   { key: "cover", label: "Cover excl. on order", term: "cover", sort: "cover" },
   { key: "cover_incl", label: "Cover incl. on order", term: "cover_incl", sort: "cover_incl" },
+  { key: "gap", label: "Gap before delivery", term: "gap", sort: "gap" },
   { key: "lead_time", label: "Lead time", cls: "num", sort: "lead_time", tip: "Order to delivery for the supplier this item is ordered from: Allied's figure on the item, else on the supplier, else measured from their orders." },
   { key: "est_cost", label: "Est. cost", cls: "num", sort: "est_cost", tip: "Order qty × what this supplier last charged (average cost where they have never billed it). Split parts are added together." },
   { key: "remove", label: "" },
@@ -298,7 +304,7 @@ export function rowLeadTimes(row) {
  *          supplier, no lead time. Those go last both ways, so "lowest first"
  *          never opens on items with nothing to compare.
  *
- * There is no Risk column (Allied's fifteen columns fill a laptop), so
+ * There is no Risk column (the sixteen columns fill a laptop), so
  * `risk` is reached as the default, or from a link; the line above the table
  * says so.
  */
@@ -328,6 +334,18 @@ export const PURCHASING_SORTS = {
   weekly: { label: "Weekly demand", dir: "desc", value: (r) => num(r.weeklyDemand) },
   cover: { label: "Cover excl. on order", dir: "asc", value: (r) => num(r.coverWeeks) },
   cover_incl: { label: "Cover incl. on order", dir: "asc", value: (r) => num(r.coverWeeksInclOnOrder) },
+  // Gap before delivery (1.11): the day free stock runs out before a counted
+  // delivery, soonest first, as Inventory's server sort `gap` orders it
+  // (SORT_VALUES in queries.ts): gap and gap_open only, everything else
+  // (covered, nothing on order, no demand, a past date) has no gap and goes
+  // last. ISO dates, so they compare as words; `words` says so as dates.
+  gap: {
+    label: "Gap before delivery",
+    dir: "asc",
+    text: true,
+    words: ["soonest first", "latest first"],
+    value: (r) => (r.gap && (r.gap.status === "gap" || r.gap.status === "gap_open") ? r.gap.start || null : null),
+  },
   // A split between a 120-day and a 30-day supplier is complete when the
   // slower part lands, so the row sorts on its longest known lead.
   lead_time: {
@@ -405,8 +423,16 @@ export function orderSortSummary(state) {
   const key = state?.sort && Object.prototype.hasOwnProperty.call(PURCHASING_SORTS, state.sort) ? state.sort : "risk";
   const s = PURCHASING_SORTS[key];
   const d = sortDirection(key, state?.dir);
-  const word = s.text ? (d === "asc" ? "A to Z" : "Z to A") : d === "asc" ? "lowest first" : "highest first";
-  return `sorted by ${s.label.toLowerCase()}, ${word}`;
+  return `sorted by ${s.label.toLowerCase()}, ${sortWord(key, d)}`;
+}
+
+/** How a direction reads for a key: "lowest first", "A to Z", or its own words ("soonest first"). */
+export function sortWord(key, dir) {
+  const s = PURCHASING_SORTS[key] ?? PURCHASING_SORTS.risk;
+  const asc = dir === "asc";
+  if (s.words) return asc ? s.words[0] : s.words[1];
+  if (s.text) return asc ? "A to Z" : "Z to A";
+  return asc ? "lowest first" : "highest first";
 }
 
 /*

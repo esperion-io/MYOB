@@ -105,6 +105,13 @@ export interface Gap {
   freeRunOut: string | null;
   /** The last day projected; null when no projection was run (built here, no demand). */
   horizon: string | null;
+  /**
+   * The item page's "Stock outlook" strip (1.11): the same projection, one
+   * entry a week from today to the horizon, so the browser draws the series
+   * this function walked rather than replaying it. Null when no projection
+   * was run.
+   */
+  weeks: GapWeek[] | null;
   /** Units on the timeline (dated, still to come) and off it (overdue, late, undated). */
   countedQty: number;
   offTimelineQty: number;
@@ -112,6 +119,28 @@ export interface Gap {
   freeStock: number;
   weekly: number;
   minLevel: number | null;
+}
+
+/**
+ * One week of the outlook (1.11). Units are whole, rounded down, as units
+ * short is rounded up: a week reading −1,056 at its lowest is the gap's
+ * ~1,056 short. Inside a gap the lowest point is taken before that day's
+ * delivery lands (the depth units short measures); elsewhere after it, so a
+ * delivery that lands on the day stock would run out shows no dip, exactly
+ * as it counts as no gap. BN1665G (13 Oct): nine weeks, the lowest −1,056 in
+ * the week of 8 Dec, when 00023070 lands.
+ */
+export interface GapWeek {
+  /** Its first day: today, then every 7 days. */
+  start: string;
+  /** Days of it inside the projection: 7, or fewer for the last week. */
+  days: number;
+  /** The lowest projected free stock that week. */
+  low: number;
+  /** Projected free stock at the end of its last day. */
+  close: number;
+  /** The counted deliveries landing that week, day by day, the largest PO first. */
+  arrivals: GapPo[];
 }
 
 export interface NextDelivery {
@@ -232,6 +261,54 @@ function posOn(lines: ProjectionLine[]): GapPo[] {
   );
 }
 
+/**
+ * The outlook strip (1.11): P(d) walked again, day by day to the horizon,
+ * and reported a week at a time. It is the walk projectItem has just made,
+ * carried on past the gap's end so the strip shows the recovery too. Inside
+ * the gap (start to end, or to the horizon when the end is unknown) a day's
+ * low is taken before its delivery lands, the depth units short measures.
+ */
+function weekSeries(p: {
+  today: string;
+  free: number;
+  daily: number;
+  due: Map<number, ProjectionLine[]>;
+  horizon: number;
+  start: number | null;
+  end: number | null;
+}): GapWeek[] {
+  const whole = (v: number) => Math.floor(v + EPS);
+  const weeks: GapWeek[] = [];
+  let cumBefore = 0;
+  for (let w = 0; w * 7 <= p.horizon; w++) {
+    let low = Infinity;
+    let close = 0;
+    const landing: ProjectionLine[] = [];
+    const last = Math.min(w * 7 + 6, p.horizon);
+    for (let d = w * 7; d <= last; d++) {
+      const lands = p.due.get(d) ?? [];
+      const pre = p.free + cumBefore - p.daily * d;
+      cumBefore += lands.reduce((s, l) => s + l.outstanding, 0);
+      const bal = p.free + cumBefore - p.daily * d;
+      const inGap = p.start != null && d >= p.start && (p.end == null || d <= p.end);
+      low = Math.min(low, inGap ? pre : bal);
+      close = bal;
+      landing.push(...lands);
+    }
+    // One entry per PO per day, the largest first, days in order.
+    const byDay = new Map<string, ProjectionLine[]>();
+    for (const l of landing) byDay.set(l.eta as string, [...(byDay.get(l.eta as string) ?? []), l]);
+    weeks.push({
+      start: addDays(p.today, w * 7),
+      days: last - w * 7 + 1,
+      low: whole(low),
+      close: whole(close),
+      arrivals: [...byDay.keys()].sort().flatMap((eta) => posOn(byDay.get(eta)!)),
+    });
+  }
+  return weeks;
+}
+
 /** The projection for one item (pure). */
 export function projectItem(input: ProjectionInput): GapFields {
   const { today, freeStock: free, minLevel, lines } = input;
@@ -289,6 +366,7 @@ export function projectItem(input: ProjectionInput): GapFields {
     tight: false,
     freeRunOut: null,
     horizon: null,
+    weeks: null,
     countedQty,
     offTimelineQty,
     freeStock: free,
@@ -352,6 +430,7 @@ export function projectItem(input: ProjectionInput): GapFields {
     ...base,
     freeRunOut: freeOut <= GAP_HORIZON_DAYS ? addDays(today, freeOut) : null,
     horizon: addDays(today, horizon),
+    weeks: weekSeries({ today, free, daily, due, horizon, start, end }),
   };
 
   if (start == null) {

@@ -4,6 +4,7 @@ import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { cartStateAll, cartStateOf, inTransaction, logChange } from "./changeLog.js";
 import { supplierLeadTimes } from "./leadTimes.js";
+import type { Gap } from "./projection.js";
 import { computedItems, resolveWindow, snapshotState, type DemandWindow, type ItemComputed } from "./queries.js";
 
 /**
@@ -408,6 +409,13 @@ async function planFor(db: Pick<PoolClient, "query">, itemUid: string) {
   };
 }
 
+/** A line's copy of its item's gap (1.11): all of it but the weekly series. */
+function lineGap(gap: Gap | null): Omit<Gap, "weeks"> | null {
+  if (!gap) return null;
+  const { weeks: _series, ...line } = gap;
+  return line;
+}
+
 export interface CartLine {
   itemUid: string;
   number: string | null;
@@ -465,6 +473,17 @@ export interface CartLine {
   coverWeeksInclOnOrder: number | null;
   coverBelowLeadTime: boolean;
   riskScore: number;
+  /*
+   * The item's stock gap (1.11), for By item's "Gap before delivery" column
+   * and sort. Read off the computed item, never worked out here: nothing in
+   * the cart calculates from it, and the quantity, the supplier and the
+   * order sheets are exactly as they were. Null at a past date, and absent
+   * from a server before 1.11 (By item reads "—"). It leaves out the item
+   * page's weekly series, which no line draws: on the 26 Aug copy it would
+   * add 125 KB to the 133 lines' /cart (495 KB with the rest of the gap,
+   * 422 KB before 1.11).
+   */
+  gap?: Omit<Gap, "weeks"> | null;
   suggestedQty: number;
   /** Allied's number when they have set one, otherwise the suggestion. */
   qty: number;
@@ -718,6 +737,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         coverWeeksInclOnOrder: item.coverWeeksInclOnOrder,
         coverBelowLeadTime: item.coverBelowLeadTime,
         riskScore: item.risk.score,
+        gap: lineGap((item as { gap?: Gap | null }).gap ?? null),
         suggestedQty: suggested,
         qty,
         state: s?.state ?? (carried ? "edited" : "suggested"),

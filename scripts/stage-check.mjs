@@ -17,6 +17,7 @@
  *   node scripts/stage-check.mjs splits <after> [--before <before>]   (1.4: the Order list total for splits)
  *   node scripts/stage-check.mjs schedule <after> [--base …]   (1.9: incoming POs add up to On order)
  *   npx tsx scripts/stage-check.mjs gap <after> [--base …]    (1.10: stock gaps, recomputed with the server's projection)
+ *   node scripts/stage-check.mjs screen <after> [--before <before>] [--base …]   (1.11: gaps on screen: CSV, cart, Purchasing sort)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -1083,6 +1084,126 @@ export async function gapCheck(dir, { get = null, projection }) {
   return gapChecks({ items, details, projection, overview, lists });
 }
 
+/* ---------- 1.11: stock gaps on screen ---------- */
+
+/*
+ * `stage-check screen`: what 1.11 adds around the 1.10 gap fields, checked
+ * from a capture (and, with --base, the live lists):
+ *   - items.csv ends with the eight gap columns, each cell the items list's
+ *     own field (blank where it is null), and with --before every earlier
+ *     column is byte-identical: each line is the earlier line, a comma, and
+ *     seven more commas' worth of plain cells;
+ *   - cart.csv is byte-identical to --before (D20: the order sheets are
+ *     unchanged);
+ *   - every /cart line carries its item's gap, less the weekly series;
+ *   - with --base: Purchasing's By item gap sort (order-list.js, the browser's
+ *     own code) orders the cart's items exactly as /items?filter=suggested&
+ *     sort=gap does, apart from ties, and the Overview tile's count is the
+ *     gap filter's total.
+ */
+export const GAP_CSV = ["Next delivery date", "Next delivery qty", "ETA basis", "Gap start", "Gap end", "Gap days", "Units short", "Overdue qty"];
+
+const csvCell = (v) => (v == null ? "" : typeof v === "number" ? String(Number(v.toFixed(4))) : String(v));
+
+export function screenChecks({ items, csv = null, beforeCsv = null, cartCsv = null, beforeCartCsv = null, cart = null, suggested = null, overview = null, gapTotal = null, orderList = null }) {
+  const out = [];
+  const add = (check, bad, detail) =>
+    out.push({ check, ok: bad.length === 0, detail: bad.length ? `${bad.length}: ${bad.slice(0, 5).join("; ")}` : detail });
+  const name = (i) => i.number ?? i.uid;
+  const byNumber = new Map(items.map((i) => [i.number, i]));
+  const byUid = new Map(items.map((i) => [i.uid, i]));
+  const runs = (i) => i.gapStatus === "gap" || i.gapStatus === "gap_open";
+
+  if (csv != null) {
+    const table = parseCsv(csv);
+    const header = table[0] ?? [];
+    add("items.csv ends with the eight gap columns", header.slice(-8).join("|") === GAP_CSV.join("|") ? [] : [header.slice(-8).join("|")], GAP_CSV.join(", "));
+    const { rows } = csvRecords(csv);
+    const cells = [];
+    for (const r of Object.values(rows)) {
+      const i = byNumber.get(r["Item number"]);
+      if (!i) continue;
+      const g = runs(i) ? i.gap : null;
+      const want = [i.nextDelivery?.eta, i.nextDelivery?.qty, i.nextDelivery?.etaBasis, g?.start, g?.end, g?.days, g?.unitsShort, i.incomingOverdueQty].map(csvCell);
+      const got = GAP_CSV.map((c) => r[c]);
+      if (want.join("|") !== got.join("|")) cells.push(`${r["Item number"]}: ${got.join(",")} vs ${want.join(",")}`);
+    }
+    add("items.csv gap cells = the items list's fields", cells, `${Object.keys(rows).length} rows`);
+  }
+  if (beforeCsv != null && csv != null) {
+    const a = beforeCsv.split("\r\n");
+    const b = csv.split("\r\n");
+    const bad = a.length === b.length ? [] : [`${a.length} lines before, ${b.length} after`];
+    if (!bad.length)
+      a.forEach((line, k) => {
+        if (line === "" && b[k] === "") return;
+        const rest = b[k].startsWith(`${line},`) ? b[k].slice(line.length + 1) : null;
+        if (rest == null || /"/.test(rest) || rest.split(",").length !== 8) bad.push(`line ${k + 1}`);
+      });
+    add("every existing items.csv column byte-identical, eight cells appended", bad, `${a.length - 2} rows`);
+  }
+  if (beforeCartCsv != null && cartCsv != null)
+    add("cart.csv byte-identical", cartCsv === beforeCartCsv ? [] : ["cart.csv differs"], `${cartCsv.length} bytes`);
+
+  if (cart) {
+    const bad = [];
+    let lines = 0;
+    for (const g of cart.suppliers ?? [])
+      for (const l of g.lines ?? []) {
+        lines += 1;
+        const it = byUid.get(l.itemUid);
+        if (!it) continue;
+        const want = it.gap ? Object.fromEntries(Object.entries(it.gap).filter(([k]) => k !== "weeks")) : null;
+        if (!("gap" in l) || !sameJson(l.gap, want)) bad.push(`${name(it)} under ${l.supplierName ?? l.supplierUid}`);
+      }
+    add("every /cart line carries its item's gap, less the weekly series", bad, `${lines} lines`);
+  }
+
+  if (cart && suggested && orderList) {
+    const rows = orderList.sortRows(orderList.groupLinesByItem(cart), "gap", "");
+    const at = new Map(suggested.rows.map((r, k) => [r.uid, k]));
+    const common = rows.filter((r) => at.has(r.itemUid));
+    const value = (r) => orderList.PURCHASING_SORTS.gap.value(r);
+    const bad = [];
+    for (let a = 0; a < common.length; a++)
+      for (let b = a + 1; b < common.length; b++)
+        if (at.get(common[a].itemUid) > at.get(common[b].itemUid) && value(common[a]) !== value(common[b]))
+          bad.push(`${common[a].number} before ${common[b].number}`);
+    const missing = rows.filter((r) => !at.has(r.itemUid)).map((r) => r.number);
+    add("By item's gap sort = /items?filter=suggested&sort=gap, apart from ties", bad, `${common.length} items, ${rows.filter((r) => value(r) != null).length} with a gap${missing.length ? `; ${missing.length} not in filter=suggested` : ""}`);
+  }
+  if (overview && gapTotal != null) {
+    const k = overview.kpis?.runsOutBeforeNextDelivery ?? null;
+    add("Overview tile Runs out before next delivery = filter=gap total", k === gapTotal ? [] : [`${k} vs ${gapTotal}`], `${gapTotal} items`);
+  }
+  return out;
+}
+
+/** `screen <capture> [--before <capture>] [--base …]`. */
+export async function screenCheck(dir, { get = null, beforeDir = null, orderList = null }) {
+  const read = (d, f) => (d && existsSync(join(d, f)) ? readFileSync(join(d, f), "utf8") : null);
+  const items = JSON.parse(read(dir, "items.json")).items;
+  const cartJson = read(dir, "cart.json");
+  let suggested = null;
+  let gapTotal = null;
+  if (get) {
+    suggested = await servedList(get, "filter=suggested&sort=gap");
+    gapTotal = (await get("/items?filter=gap&pageSize=10")).total;
+  }
+  return screenChecks({
+    items,
+    csv: read(dir, "items.csv"),
+    beforeCsv: read(beforeDir, "items.csv"),
+    cartCsv: read(dir, "cart.csv"),
+    beforeCartCsv: read(beforeDir, "cart.csv"),
+    cart: cartJson ? JSON.parse(cartJson) : null,
+    suggested,
+    overview: read(dir, "overview.json") ? JSON.parse(read(dir, "overview.json")) : null,
+    gapTotal,
+    orderList,
+  });
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -1166,6 +1287,19 @@ async function main() {
     process.exit(checks.every((c) => c.ok) ? 0 : 1);
   }
 
+  if (command === "screen" && args.length === 1 && !options.allow) {
+    // GET only, like capture. The Purchasing sort is order-list.js's own.
+    const get = options.base
+      ? makeGetter({ base: resolveBase(options.base), key: process.env.DASHBOARD_KEY?.trim() ?? "" })
+      : null;
+    const orderList = await import("../public/order-list.js");
+    const checks = await screenCheck(args[0], { get, beforeDir: options.before ?? null, orderList });
+    for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
+    if (!options.before) console.log("note: existing items.csv columns and cart.csv not compared; pass --before <the 1.10 capture>.");
+    if (!get) console.log("note: the Purchasing sort and the Overview count not checked; pass --base to fetch the lists (GET only).");
+    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  }
+
   if (command === "splits" && args.length === 1 && !options.allow && !options.base) {
     const checks = splitCheck(args[0], { beforeDir: options.before ?? null });
     for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
@@ -1215,7 +1349,8 @@ async function main() {
       "  node scripts/stage-check.mjs cover <after> [--before <before>] [--base local|prod|URL]\n" +
       "  node scripts/stage-check.mjs splits <after> [--before <before>]\n" +
       "  node scripts/stage-check.mjs schedule <after> [--base local|prod|URL]\n" +
-      "  npx tsx scripts/stage-check.mjs gap <after> [--base local|prod|URL]",
+      "  npx tsx scripts/stage-check.mjs gap <after> [--base local|prod|URL]\n" +
+      "  node scripts/stage-check.mjs screen <after> [--before <before>] [--base local|prod|URL]",
   );
 }
 

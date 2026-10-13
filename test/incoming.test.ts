@@ -331,20 +331,25 @@ test("no ETA feeds a calculation: only the item page, Data & Sync and the gap pr
  * 1.10: the gap projection READS the schedule (projection.ts, through
  * queries.ts attachGaps), and that is the one door it may come through. The
  * gap fields it writes are read by nothing that calculates: not computeItem
- * (the suggestion, flags, risk, both covers), not the cart, minimums, kits,
- * the sync, or ledger.ts (On order and the daily snapshot rows). In
- * queries.ts they may appear only where they are declared, attached, sorted,
- * filtered and counted for the Overview: no CSV column yet (Stage 12).
+ * (the suggestion, flags, risk, both covers), not the cart's planning,
+ * minimums, kits, the sync, or ledger.ts (On order and the daily snapshot
+ * rows). In queries.ts they may appear only where they are declared,
+ * attached, sorted, filtered and counted for the Overview, and (1.11) in the
+ * items.csv gap columns. 1.11 lets exactly one other file in, deliberately:
+ * cart.ts copies the item's gap onto each line for By item's column, in
+ * three places (the type import, the CartLine field, the copy) and nowhere
+ * that plans a quantity or a supplier.
  */
 const GAP_WORDS = /projection\.js|projectItem|projectionInput|attachGaps|gapStatus|\.gap\b|\bgap\?:|nextDelivery|incomingOverdueQty|runsOutBeforeNextDelivery|GAP_ENABLED|NO_GAP_FIELDS/g;
 
-test("no gap feeds a calculation: only queries.ts reads projection.ts, in the places it attaches, sorts, filters and counts", () => {
-  // Every file under src/ but these two: the cart, minimums, kits, ledger.ts
-  // (On order and the daily snapshot rows), the sync, the routes, all of it.
+test("no gap feeds a calculation: only queries.ts reads projection.ts, in the places it attaches, sorts, filters, counts and exports", () => {
+  // Every file under src/ but these three: minimums, kits, ledger.ts (On
+  // order and the daily snapshot rows), the sync, the routes, all of it.
+  // cart.ts is checked on its own below.
   const files = (readdirSync(join(ROOT, "src"), { recursive: true }) as string[])
     .map((f) => `src/${String(f).split("\\").join("/")}`)
-    .filter((f) => f.endsWith(".ts") && f !== "src/insights/queries.ts" && f !== "src/insights/projection.ts");
-  for (const f of ["src/insights/cart.ts", "src/insights/minStock.ts", "src/insights/kits.ts", "src/insights/ledger.ts", "src/sync/engine.ts"])
+    .filter((f) => f.endsWith(".ts") && !["src/insights/queries.ts", "src/insights/projection.ts", "src/insights/cart.ts"].includes(f));
+  for (const f of ["src/insights/minStock.ts", "src/insights/kits.ts", "src/insights/ledger.ts", "src/sync/engine.ts", "src/routes/insights.ts"])
     assert.ok(files.includes(f), `${f} not scanned`);
   for (const f of files) {
     const src = readFileSync(join(ROOT, f), "utf8");
@@ -375,27 +380,51 @@ test("no gap feeds a calculation: only queries.ts reads projection.ts, in the pl
     region('    case "gap":', '    case "incoming_overdue":'),
     region('    case "incoming_overdue":', "  const sortKey ="),
     region("  // 1.10: null, not 0, when there is no projection", "    relationships: relationships.rows,"), // Overview count
+    region("export const GAP_CSV_COLUMNS", "export async function itemsCsv("), // 1.11: the items.csv columns
   ];
   for (const m of q.matchAll(GAP_WORDS)) {
     const at = m.index!;
     const ok = allowed.some(([a, b]) => at >= a && at < b + 80);
-    assert.ok(ok, `queries.ts mentions ${m[0]} outside the gap attachment, sort, filters and Overview count (offset ${at})`);
+    assert.ok(ok, `queries.ts mentions ${m[0]} outside the gap attachment, sort, filters, Overview count and CSV columns (offset ${at})`);
   }
-  const csv = q.slice(q.indexOf("export async function itemsCsv("));
-  assert.equal(csv.match(GAP_WORDS), null, "items.csv gains no gap column in 1.10");
+  // items.csv (1.11) reads the gap only through gapCsvCells, appended last.
+  const csv = q.slice(q.indexOf("export async function itemsCsv("), q.indexOf("export async function suppliersCsv("));
+  assert.equal(csv.match(GAP_WORDS), null, "items.csv reads a gap field directly");
+  assert.match(csv, /"Cover incl\. on order \(weeks\)",[\s\S]*?\.\.\.GAP_CSV_COLUMNS,\n  \];/);
+  assert.match(csv, /esc\(i\.coverWeeksInclOnOrder\),\n      \.\.\.gapCsvCells\(i\)\.map\(esc\),\n    \]\.join/);
+
+  // cart.ts (1.11): the type import, the CartLine field and the one copy.
+  const c = readFileSync(join(ROOT, "src/insights/cart.ts"), "utf8");
+  const hits = [...c.matchAll(GAP_WORDS)].map((m) => {
+    const lineStart = c.lastIndexOf("\n", m.index!) + 1;
+    return c.slice(lineStart, c.indexOf("\n", m.index!)).trim();
+  });
+  assert.deepEqual([...new Set(hits)], [
+    'import type { Gap } from "./projection.js";',
+    'gap?: Omit<Gap, "weeks"> | null;',
+    "gap: lineGap((item as { gap?: Gap | null }).gap ?? null),",
+  ]);
+  // The copy sits in the line built for /cart, beside the risk score, not
+  // in the planning (planItemLines, suggestOrderQty, the lead times), and
+  // lineGap only drops the weekly series.
+  assert.match(c, /riskScore: item\.risk\.score,\n        gap: lineGap\(\(item as \{ gap\?: Gap \| null \}\)\.gap \?\? null\),/);
+  const lineGap = c.slice(c.indexOf("function lineGap("), c.indexOf("export interface CartLine {"));
+  assert.match(lineGap, /const \{ weeks: _series, \.\.\.line \} = gap;\n  return line;/);
 });
 
-test("the Inventory screen offers no gap filter or sort yet (Stage 12)", () => {
+test("1.11: Inventory offers the gap filters and sort, Purchasing the gap sort; the keys are the server's", () => {
   const dash = readFileSync(join(ROOT, "public/dashboard.js"), "utf8");
   const keysOf = (name: string) => {
     const start = dash.indexOf(`const ${name} = [`);
     assert.ok(start >= 0, name);
     return [...dash.slice(start, dash.indexOf("\n];", start)).matchAll(/^\s*\["([a-z_]+)",/gm)].map((m) => m[1]);
   };
-  for (const k of ["gap", "incoming_overdue"]) assert.ok(!keysOf("INVENTORY_FILTERS").includes(k), `filter ${k}`);
-  assert.ok(!keysOf("INVENTORY_SORTS").includes("gap"));
+  for (const k of ["gap", "incoming_overdue"]) assert.ok(keysOf("INVENTORY_FILTERS").includes(k), `filter ${k}`);
+  assert.ok(keysOf("INVENTORY_SORTS").includes("gap"));
+  const q = readFileSync(join(ROOT, "src/insights/queries.ts"), "utf8");
+  for (const k of ['case "gap":', 'case "incoming_overdue":', "  gap: (i) =>", '  gap: "asc",']) assert.ok(q.includes(k), `server lacks ${k}`);
   const orderList = readFileSync(join(ROOT, "public/order-list.js"), "utf8");
-  assert.doesNotMatch(orderList.slice(orderList.indexOf("PURCHASING_SORTS")), /^\s*gap:/m);
+  assert.match(orderList.slice(orderList.indexOf("export const PURCHASING_SORTS")), /^  gap: \{/m);
 });
 
 test("the supplier lead query lives in leadTimes.ts; the cart imports it and keeps no copy", () => {

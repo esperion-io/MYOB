@@ -289,7 +289,7 @@ test("By item: the columns are exactly the ones Allied asked for, in order", () 
     BY_ITEM_COLUMNS.map((c: { label: string }) => c.label),
     [
       "", "Item", "Supplier", "Suggested", "Order qty", "On hand", "Committed", "Free stock", "On order",
-      "Weekly demand", "Cover excl. on order", "Cover incl. on order", "Lead time", "Est. cost", "",
+      "Weekly demand", "Cover excl. on order", "Cover incl. on order", "Gap before delivery", "Lead time", "Est. cost", "",
     ],
   );
   // Labels shared with Inventory use Inventory's glossary entry, and its label.
@@ -502,13 +502,13 @@ test("dashboard.js: the Order list's view state is declared before the first rou
  * committed, a split under two leads, and ties on every figure.
  */
 const SORTABLE = [
-  line("BN1665G", "HANOVA", "suggested", 1779, 0.21, { supplierName: "Hanova", riskScore: 95, leadTimeDays: 120, weeklyDemand: 166.4, coverWeeks: 1.9, coverWeeksInclOnOrder: 14, onHand: 333, qtyCommitted: 10, freeStock: 323, incomingQty: 2000, suggestedQty: 1779 }),
-  line("SPW12G", "HANOVA", "edited", 3600, 0.05, { supplierName: "Hanova", riskScore: 95, leadTimeDays: 120, weeklyDemand: 300, coverWeeks: 4, coverWeeksInclOnOrder: 50, onHand: 1200, qtyCommitted: 0, freeStock: 1200, incomingQty: 15000, suggestedQty: 3004 }),
-  line("FG250P", "SKELLERUP", "split", 142, 1.5, { supplierName: "Skellerup", riskScore: 40, leadTimeDays: 30, weeklyDemand: 0, coverWeeks: null, coverWeeksInclOnOrder: null, onHand: 0, qtyCommitted: 0, freeStock: 0, incomingQty: 0, suggestedQty: 284 }),
-  line("FG250P", "BREMICK", "split", 142, 1.25, { supplierName: "Bremick", riskScore: 40, leadTimeDays: 90, weeklyDemand: 0, coverWeeks: null, coverWeeksInclOnOrder: null, onHand: 0, qtyCommitted: 0, freeStock: 0, incomingQty: 0, suggestedQty: 284 }),
-  line("NOSUP", "none", "suggested", 50, 0, { supplierName: null, riskScore: 60, leadTimeDays: null, weeklyDemand: 2, coverWeeks: 0.5, coverWeeksInclOnOrder: 0.5, onHand: 1, qtyCommitted: 0, freeStock: 1, incomingQty: 0, suggestedQty: 50 }),
+  line("BN1665G", "HANOVA", "suggested", 1779, 0.21, { supplierName: "Hanova", riskScore: 95, leadTimeDays: 120, weeklyDemand: 166.4, coverWeeks: 1.9, coverWeeksInclOnOrder: 14, onHand: 333, qtyCommitted: 10, freeStock: 323, incomingQty: 2000, suggestedQty: 1779, gap: { status: "gap", start: "2026-10-27" } }),
+  line("SPW12G", "HANOVA", "edited", 3600, 0.05, { supplierName: "Hanova", riskScore: 95, leadTimeDays: 120, weeklyDemand: 300, coverWeeks: 4, coverWeeksInclOnOrder: 50, onHand: 1200, qtyCommitted: 0, freeStock: 1200, incomingQty: 15000, suggestedQty: 3004, gap: { status: "gap_open", start: "2026-10-27" } }),
+  line("FG250P", "SKELLERUP", "split", 142, 1.5, { supplierName: "Skellerup", riskScore: 40, leadTimeDays: 30, weeklyDemand: 0, coverWeeks: null, coverWeeksInclOnOrder: null, onHand: 0, qtyCommitted: 0, freeStock: 0, incomingQty: 0, suggestedQty: 284, gap: { status: "gap_open", start: "2026-10-14" } }),
+  line("FG250P", "BREMICK", "split", 142, 1.25, { supplierName: "Bremick", riskScore: 40, leadTimeDays: 90, weeklyDemand: 0, coverWeeks: null, coverWeeksInclOnOrder: null, onHand: 0, qtyCommitted: 0, freeStock: 0, incomingQty: 0, suggestedQty: 284, gap: { status: "gap_open", start: "2026-10-14" } }),
+  line("NOSUP", "none", "suggested", 50, 0, { supplierName: null, riskScore: 60, leadTimeDays: null, weeklyDemand: 2, coverWeeks: 0.5, coverWeeksInclOnOrder: 0.5, onHand: 1, qtyCommitted: 0, freeStock: 1, incomingQty: 0, suggestedQty: 50, gap: null }),
   line("OLD14", "TONG MING", "suggested", 500, 0.7, { supplierName: "Tong Ming", riskScore: undefined, qtyCommitted: undefined, coverWeeksInclOnOrder: undefined, leadTimeDays: 42, weeklyDemand: 20, coverWeeks: 4, onHand: 80, freeStock: 80, incomingQty: 0, suggestedQty: 500 }),
-  line("A1", "JIAXING", "suggested", 1779, 0.3, { supplierName: "Jiaxing", riskScore: 40, leadTimeDays: 120, weeklyDemand: 166.4, coverWeeks: 1.9, coverWeeksInclOnOrder: 14, onHand: 333, qtyCommitted: 10, freeStock: 323, incomingQty: 2000, suggestedQty: 1779 }),
+  line("A1", "JIAXING", "suggested", 1779, 0.3, { supplierName: "Jiaxing", riskScore: 40, leadTimeDays: 120, weeklyDemand: 166.4, coverWeeks: 1.9, coverWeeksInclOnOrder: 14, onHand: 333, qtyCommitted: 10, freeStock: 323, incomingQty: 2000, suggestedQty: 1779, gap: { status: "covered", start: null, tight: true } }),
 ];
 
 test("Purchasing sorts: every sortable column has a key, and every key but risk has a column", () => {
@@ -521,7 +521,7 @@ test("Purchasing sorts: every sortable column has a key, and every key but risk 
 });
 
 test("Purchasing sorts: shared keys start in Inventory's direction (SORT_DEFAULT_DIR), the rest as the plan says", () => {
-  const shared = ["risk", "number", "on_hand", "committed", "available", "incoming", "weekly", "cover", "cover_incl"];
+  const shared = ["risk", "number", "on_hand", "committed", "available", "incoming", "weekly", "cover", "cover_incl", "gap"];
   for (const k of shared) {
     assert.ok(PURCHASING_SORTS[k], `${k} is Inventory's key and must be Purchasing's too`);
     assert.equal(PURCHASING_SORTS[k].dir, SORT_DEFAULT_DIR[k] ?? "desc", `${k} starts the other way from Inventory`);
@@ -532,7 +532,7 @@ test("Purchasing sorts: shared keys start in Inventory's direction (SORT_DEFAULT
   assert.deepEqual(firstClick, {
     risk: "desc", number: "asc", supplier: "asc", suggested: "desc", order_qty: "desc", on_hand: "asc",
     committed: "desc", available: "asc", incoming: "desc", weekly: "desc", cover: "asc", cover_incl: "asc",
-    lead_time: "desc", est_cost: "desc",
+    gap: "asc", lead_time: "desc", est_cost: "desc",
   });
 });
 
@@ -586,7 +586,7 @@ test("sortRows: the default is the 1.6 order, and anything unknown falls back to
   assert.deepEqual(risk, ["BN1665G", "SPW12G", "NOSUP", "A1", "FG250P", "OLD14"]);
   assert.deepEqual(ids(sortRows(groupLinesByItem(c), "risk", "desc")), risk);
   assert.deepEqual(ids(sortRows(groupLinesByItem(c), "risk", "")), risk);
-  assert.deepEqual(ids(sortRows(groupLinesByItem(c), "gap", "asc")), ids(sortRows(groupLinesByItem(c), "risk", "asc")), "an unknown key sorts by risk in the direction asked");
+  assert.deepEqual(ids(sortRows(groupLinesByItem(c), "later_key", "asc")), ids(sortRows(groupLinesByItem(c), "risk", "asc")), "an unknown key sorts by risk in the direction asked");
   assert.deepEqual(ids(sortRows(groupLinesByItem(c), "nonsense", "")), risk);
   // risk lowest first still puts the 1.4 line with no score last.
   assert.deepEqual(ids(sortRows(groupLinesByItem(c), "risk", "asc")), ["A1", "FG250P", "NOSUP", "BN1665G", "SPW12G", "OLD14"]);
@@ -613,6 +613,11 @@ test("sortRows: what each column sorts on", () => {
   assert.deepEqual(ids("est_cost", "desc"), ["A1", "FG250P", "BN1665G", "OLD14", "SPW12G", "NOSUP"]);
   // Committed: the 1.4 line without the field goes last, not first as a zero.
   assert.deepEqual(ids("committed", "desc"), ["A1", "BN1665G", "FG250P", "NOSUP", "SPW12G", "OLD14"]);
+  // Gap before delivery (1.11): the run-out day of gap and gap_open, soonest
+  // first; covered (A1, even tight), none (NOSUP, a past date) and a line
+  // from a server before 1.11 (OLD14) have no gap and go last both ways.
+  assert.deepEqual(ids("gap", "asc"), ["FG250P", "BN1665G", "SPW12G", "A1", "NOSUP", "OLD14"]);
+  assert.deepEqual(ids("gap", "desc"), ["BN1665G", "SPW12G", "FG250P", "A1", "NOSUP", "OLD14"]);
   assert.deepEqual(ids("number", "asc"), ["A1", "BN1665G", "FG250P", "NOSUP", "OLD14", "SPW12G"]);
   assert.deepEqual(ids("number", "desc"), ["SPW12G", "OLD14", "NOSUP", "FG250P", "BN1665G", "A1"]);
 });
@@ -631,7 +636,8 @@ test("The sort in the address: round trip, the default writes nothing, unknown k
   assert.equal(orderSortQuery({ sort: "cover_incl", dir: "asc" }), "sort=cover_incl&dir=asc");
   assert.equal(orderSortQuery({ sort: "cover_incl", dir: "" }), "sort=cover_incl&dir=asc", "the direction on screen is written out");
   assert.deepEqual(parseOrderSort("sort=cover_incl&dir=asc"), { sort: "cover_incl", dir: "asc" });
-  assert.deepEqual(parseOrderSort("sort=gap&dir=asc"), { sort: "risk", dir: "" }, "a later version's key opens the default");
+  assert.deepEqual(parseOrderSort("sort=later_key&dir=asc"), { sort: "risk", dir: "" }, "a later version's key opens the default");
+  assert.deepEqual(parseOrderSort("sort=gap&dir=asc"), { sort: "gap", dir: "asc" }, "1.11's key");
   assert.deepEqual(parseOrderSort("sort=constructor"), { sort: "risk", dir: "" });
   assert.deepEqual(parseOrderSort("sort=weekly&dir=up"), { sort: "weekly", dir: "" });
   assert.deepEqual(parseOrderSort(""), { sort: "risk", dir: "" });
@@ -644,7 +650,9 @@ test("The Sorted by line says what is on screen", () => {
   assert.equal(orderSortSummary({ sort: "available", dir: "" }), "sorted by free stock, lowest first");
   assert.equal(orderSortSummary({ sort: "supplier", dir: "desc" }), "sorted by supplier, Z to A");
   assert.equal(orderSortSummary({ sort: "number", dir: "" }), "sorted by item number, A to Z");
-  assert.equal(orderSortSummary({ sort: "gap", dir: "asc" }), "sorted by risk, lowest first", "as sortRows: risk, in the direction asked");
+  assert.equal(orderSortSummary({ sort: "later_key", dir: "asc" }), "sorted by risk, lowest first", "as sortRows: risk, in the direction asked");
+  assert.equal(orderSortSummary({ sort: "gap", dir: "" }), "sorted by gap before delivery, soonest first");
+  assert.equal(orderSortSummary({ sort: "gap", dir: "desc" }), "sorted by gap before delivery, latest first");
 });
 
 test("dashboard.js: Purchasing sorts with its own header and state; Inventory's sortTh is untouched", () => {

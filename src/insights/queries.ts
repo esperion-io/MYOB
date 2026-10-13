@@ -3317,6 +3317,29 @@ export function minStockBasisLabel(m: ItemComputed["minStock"]): string {
   return m.basis === "manual" ? "Set by hand" : `${m.windowMonths}-month consumption x lead time`;
 }
 
+/*
+ * The items.csv stock-gap columns (1.11). One list and one function, so the
+ * header and the cells can never fall out of step, and the guard in
+ * test/incoming.test.ts can see that the export reads the gap fields here
+ * and nowhere else in it.
+ */
+export const GAP_CSV_COLUMNS = [
+  "Next delivery date", "Next delivery qty", "ETA basis",
+  "Gap start", "Gap end", "Gap days", "Units short", "Overdue qty",
+] as const;
+
+export function gapCsvCells(i: Pick<ItemComputed, "gap" | "gapStatus" | "nextDelivery" | "incomingOverdueQty">): (string | number | null)[] {
+  const next = i.nextDelivery ?? null;
+  // Only an item that runs out before its next counted delivery has a gap
+  // to report; nothing_on_order carries a run-out but no delivery to end it.
+  const g = runsOutBeforeNextDelivery(i.gapStatus) ? (i.gap ?? null) : null;
+  return [
+    next?.eta ?? null, next?.qty ?? null, next?.etaBasis ?? null,
+    g?.start ?? null, g?.end ?? null, g?.days ?? null, g?.unitsShort ?? null,
+    i.incomingOverdueQty ?? null,
+  ];
+}
+
 /**
  * The inventory list as a spreadsheet, honouring whatever filters are applied.
  *
@@ -3345,6 +3368,14 @@ export async function itemsCsv(params: ListParams): Promise<string> {
     // ever added at the end, so a sheet built on an earlier export still
     // lines up column for column.
     "Cover incl. on order (weeks)",
+    // Stock gaps (1.11), appended likewise: the next counted delivery, the
+    // gap before it and what is overdue, exactly as the item page reads
+    // them. Today only, so every one is blank at a past date (FEEDBACK-PLAN
+    // §4.7), and blank where the item has no gap. An open gap (gap_open) has
+    // its run-out day as Gap start but no Gap end or Gap days, and Units
+    // short is blank too when it starts after today: its depth is not known
+    // (projection.ts).
+    ...GAP_CSV_COLUMNS,
   ];
   const lines = [header.join(",")];
   for (const i of data.items) {
@@ -3361,6 +3392,7 @@ export async function itemsCsv(params: ListParams): Promise<string> {
       esc(i.flags.join(" ")),
       esc(i.anchorSource), esc(i.anchorDate), esc(i.myobOnHand), esc(i.divergence),
       esc(i.coverWeeksInclOnOrder),
+      ...gapCsvCells(i).map(esc),
     ].join(","));
   }
   return `﻿${lines.join("\r\n")}\r\n`;

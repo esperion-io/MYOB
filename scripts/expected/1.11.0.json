@@ -1,0 +1,73 @@
+{
+  "version": "1.11.0",
+  "stage": "Stage 12: Stock gaps on screen",
+  "note": "1.11 moves no figure. It puts 1.10's gap fields on screen, and adds only: gap.weeks (the outlook series) wherever a whole computed item is served (the items list, item pages, the Overview's attention list); gap on every /cart line (without weeks); and eight columns appended to items.csv. cart.csv, suppliers, divergence and kits must be unchanged, and every existing field and CSV cell must be byte-identical; anything else changing is a failure.",
+  "reviewed": "Written by hand from two in-process captures (stage-check capture through the real router, GET only) on the 26 Aug local copy (allied_dev), the 1.10 tree (98c46f4) then this tree, on the same data, 13 Oct: 28,051 differences, every one an addition apart from release.version 1.10.0 -> 1.11.0: gap.weeks on the 3,064 items in items.json that carry a gap (the 39 with no position have none; no_demand and built_here carry weeks null), on the 14 watched item pages and on the Overview's 15 attention rows; gap on all 133 /cart lines; and 8 new items.csv cells on each of 3,103 rows. Every existing items.csv column is byte-identical (each line is the 1.10 line, a comma and eight cells); cart.csv, suppliers.json, divergence.json, kits-availability.json and every kit page are byte-identical. The entries name only the new fields and columns, so an existing figure moving anywhere still fails.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.10.0 -> 1.11.0) and commit"
+    },
+    {
+      "file": "items.json",
+      "path": "items[*].gap.weeks",
+      "why": "1.11 adds the outlook series to the gap (projection.ts): projected free stock a week at a time to the horizon (start, days, lowest, close, the counted deliveries landing that week), drawn by the item page's Stock outlook; null where no projection is run"
+    },
+    {
+      "file": "*",
+      "path": "item.gap.weeks",
+      "why": "1.11 adds the outlook series to the gap (projection.ts): projected free stock a week at a time to the horizon (start, days, lowest, close, the counted deliveries landing that week), drawn by the item page's Stock outlook; null where no projection is run (item pages: the same item record)"
+    },
+    {
+      "file": "overview.json",
+      "path": "attention[*].gap.weeks",
+      "why": "1.11 adds the outlook series to the gap (projection.ts): projected free stock a week at a time to the horizon (start, days, lowest, close, the counted deliveries landing that week), drawn by the item page's Stock outlook; null where no projection is run (the Overview's attention list carries whole item records)"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].gap",
+      "why": "1.11 adds the item's gap to each /cart line (CartLine.gap, optional), less the weekly series, for By item's Gap before delivery column and sort; null at a past date. Quantities, suppliers and states are unchanged, and cart.csv is byte-identical"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Next delivery date",
+      "why": "1.11 appends the column Next delivery date after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Next delivery qty",
+      "why": "1.11 appends the column Next delivery qty after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].ETA basis",
+      "why": "1.11 appends the column ETA basis after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Gap start",
+      "why": "1.11 appends the column Gap start after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Gap end",
+      "why": "1.11 appends the column Gap end after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Gap days",
+      "why": "1.11 appends the column Gap days after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Units short",
+      "why": "1.11 appends the column Units short after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Overdue qty",
+      "why": "1.11 appends the column Overdue qty after Cover incl. on order (weeks), one of eight gap columns in this order: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short, Overdue qty; blank at a past date"
+    }
+  ]
+}

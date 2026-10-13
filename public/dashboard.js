@@ -16,6 +16,7 @@ import {
   leadOwner,
   quantityStaysMessage,
   sortRows,
+  sortWord,
   supplierChangedMessage,
   supplierChangeRequest,
   supplierOptionLabel,
@@ -33,6 +34,7 @@ import {
   shortDate,
   statusModel,
 } from "./incoming.js";
+import { gapCell, gapSentence, gapTile, hasGapFields, outlookModel } from "./gaps.js";
 
 /*
  * Which version this tab is running, and what each version changed (1.0).
@@ -50,9 +52,33 @@ import {
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.10.0";
+const UI_VERSION = "1.11.0";
 
 const RELEASES = [
+  {
+    version: "1.11.0",
+    // Set to the ship date, and re-derive every item and figure named here
+    // (BN1665G's and KITST1230S's gaps, the Overview count) from that
+    // evening's capture with `stage-check gap`: run-outs move every day,
+    // BN1665G's has probably passed, and Allied are entering Promised Dates.
+    // (Stage 10 has not shipped; versions follow ship order, so Stage 12 is
+    // 1.11.)
+    date: "2026-10-14",
+    stage: "Stage 12: Stock gaps on screen",
+    changes: [
+      "You asked us to \"show what gaps might exist between current stock levels, current demand, and incoming stock\". This version does. A gap is the stretch of time between free stock running out and the next delivery that brings it back: the days you would be short, and by about how much.",
+      "How it is worked out: free stock today, used up at the weekly demand rate cover already uses, plus each purchase order on its expected date. That date is the Promised Date you enter on the PO in MYOB. A PO without one is placed on an estimate (the PO date plus that supplier's lead time), labelled as an estimate wherever it shows, so enter Promised Dates to replace them. A PO that is overdue, or late against its estimate, is not counted as arriving at all: we don't know when it will come, so a gap that is waiting on one shows its start and an end of \"unknown\".",
+      "On an item page, a new Stock gap tile: for example \"27 Oct → 10 Dec\" in red with \"~1,056 short · estimate\", or \"From today\" with \"end unknown (PO 00022886 overdue)\". Otherwise it reads \"None before next delivery\" (with \"tight\" when the delivery lands less than two weeks before stock would run out), \"Nothing on order\", \"No demand\", or, for a kit made here, \"Follows its components\".",
+      "Above Purchasing suggestion, a Stock outlook (today) panel draws free stock week by week to the next deliveries: the gap in red, each delivery as a marker (solid when promised, hollow when estimated). Overdue and late POs are listed beside it, not placed on it. Under it, one sentence in plain words, for example: \"Free stock (323) runs out about 27 Oct at 166.4 a week. The next delivery, 2,000 on PO 00023070 (HANOVA INTERNATIONAL LTD), is estimated for 10 Dec (raised 12 Aug + 120 days), about 6.3 weeks and ~1,056 units short.\" It also says when the measured lead time would bring that PO, that Cover incl. on order counts it as already here, and when an order placed today would land.",
+      "On Inventory, a Gap before delivery column after Cover incl. on order (\"6.3w from 27 Oct\", \"from today, end unknown\", \"tight\", or — when there is none). Click it to sort, soonest first. Two new filters: Runs out before next delivery, and Incoming overdue or late. Opening an item's detail shows the same sentence.",
+      "The Overview gains a tile, Runs out before next delivery, with the count; click it for the list.",
+      "On Purchasing (By item), the same Gap before delivery column, sortable, and the sentence in each item's detail.",
+      "Export this list (Inventory) gains eight columns at the end: Next delivery date, Next delivery qty, ETA basis, Gap start, Gap end, Gap days, Units short and Overdue qty. The existing columns are unchanged and in the same order. The order sheets are unchanged.",
+      "Today only: at a past date these show \"—\" or \"today only\", because MYOB keeps no history of POs or their dates.",
+    ],
+    numbers: "None. A gap is a new reading of figures that already exist: suggested quantities, risk, cover, minimums, the Order list and the order sheets are exactly as before, and a gap adds no risk points.",
+    check: "Open BN1665G: the Stock gap tile reads 27 Oct → 10 Dec, ~1,056 short · estimate, and the Stock outlook sentence matches it. Open KITST1230S: From today, end unknown (PO 00022886 overdue). On the Overview, click Runs out before next delivery: Inventory opens filtered to the same number of items. On Purchasing (By item), click Gap before delivery: the soonest run-outs come first.",
+  },
   {
     version: "1.10.0",
     // Set to the ship date. Nothing here names a live figure, so there is
@@ -309,6 +335,11 @@ const TERMS = {
     short: "How long free stock plus everything on order lasts at the current demand rate. Red when it is below the lead time.",
     long: "Available (free stock + on order) ÷ weekly demand. Cover incl. on order counts everything on order as if it were already here; it says nothing about when it arrives, so a PO due in four months counts the same as one due tomorrow. That is why it is only ever compared with the lead time: below it, even counting everything on order, stock runs out before a new order could arrive, and the item is tagged Below lead time, which adds 30 points to its risk score. Nothing else is decided on it. The weeks / months toggle applies to it as to Cover excl. on order. Blank means no demand was recorded.",
   },
+  gap: {
+    label: "Gap before delivery",
+    short: "When free stock runs out before the next delivery that brings it back, and for how long. Today only.",
+    long: "Free stock today, used up at the weekly demand rate cover uses, plus each purchase order on its expected date: the Promised Date in MYOB, or where a PO has none an estimate (its PO date plus that supplier's lead time), always labelled as an estimate. The gap starts the day free stock would run out and ends on the delivery that brings it back above zero; it shows how long (in weeks), from when, and about how many units short at the worst point. A PO that is overdue, or late against its estimate, is never counted as arriving, so a gap waiting on one has an unknown end. Tight: no gap, but the next delivery lands less than two weeks before free stock would run out. Nothing is calculated from it: risk, suggested orders and both cover figures are as they would be without it. Cover incl. on order, by contrast, counts every PO as if it were already here, however far off. Today only: MYOB keeps no history of POs or their dates.",
+  },
   risk: {
     label: "Risk score",
     short: "0–100 priority score. Click any item to see exactly which factors produced it.",
@@ -424,6 +455,8 @@ const INVENTORY_FILTERS = [
   ["below_min", "Below min stock"],
   ["low_cover", "Cover under 4 weeks (about a month)"],
   ["below_lead", "Below lead time (even with on order)"],
+  ["gap", "Runs out before next delivery"],
+  ["incoming_overdue", "Incoming overdue or late"],
   ["excess", "Excess stock"],
   ["slow_mover", "Slow movers (still selling, just slowly)"],
   ["dead_stock", "Dead stock (nothing in 12 months or more)"],
@@ -439,10 +472,14 @@ const INVENTORY_FILTERS = [
   ["inactive_stock", "Inactive with stock"],
 ];
 
+/** The filters that read today's PO schedule (1.11): empty at a past date. */
+const GAP_FILTERS = new Set(["gap", "incoming_overdue"]);
+
 const INVENTORY_SORTS = [
   ["risk", "Risk"],
   ["cover", "Cover excl. on order"],
   ["cover_incl", "Cover incl. on order"],
+  ["gap", "Gap before delivery"],
   ["weekly", "Weekly demand"],
   ["committed", "Committed"],
   ["on_hand", "On hand"],
@@ -632,9 +669,9 @@ function sortTh(sortKey, termKey, label, cls = "") {
   const active = invState.sort === sortKey;
   const dir = active ? currentDir() : null;
   const arrow = active ? (dir === "asc" ? "▲" : "▼") : "";
-  const tip = `${t ? `${t.short} · ` : ""}Click to sort${
-    active ? (dir === "asc" ? " highest first" : " lowest first") : ""
-  }`;
+  // A gap sorts by the day it starts (1.11), so its directions read as dates.
+  const [low, high] = sortKey === "gap" ? ["soonest first", "latest first"] : ["lowest first", "highest first"];
+  const tip = `${t ? `${t.short} · ` : ""}Click to sort${active ? (dir === "asc" ? ` ${high}` : ` ${low}`) : ""}`;
   return `<th class="${cls} sortable${active ? " sorted" : ""}"
     data-sort="${sortKey}" title="${esc(tip)}"
     aria-sort="${active ? (dir === "asc" ? "ascending" : "descending") : "none"}"
@@ -676,6 +713,29 @@ function coverInclFmt(i) {
   if (!i.coverBelowLeadTime) return coverLabel(weeks);
   const lead = i.leadTimeWeeks != null ? ` ${coverLabel(i.leadTimeWeeks)}` : "";
   return `<span class="badge fail" title="${esc(`Below the${lead} lead time, even counting everything on order`)}">${coverLabel(weeks)}</span>`;
+}
+
+/*
+ * The Gap before delivery cell (1.11), Inventory's and By item's alike:
+ * gapCell (gaps.js) words the server's gap, this only draws it. Red for a
+ * gap (its length and start, then about how many short), amber "tight",
+ * and "—" for everything else with what it is on hover. `present` is false
+ * against a server before 1.10, which sends no gap fields; at a past date
+ * the server sends them null and the hover says "today only".
+ */
+function gapCellHtml(gap, status, present = true, position = false) {
+  const c = gapCell(gap, status, {
+    historical: isHistorical(),
+    present,
+    position,
+    qty,
+    weeks: coverLabel,
+    today: windowState.asAt,
+  });
+  const title = c.title ? ` title="${esc(c.title)}"` : "";
+  if (c.tone === "warn") return `<span class="badge warn"${title}>${esc(c.text)}</span>`;
+  if (c.tone !== "fail") return `<span class="muted"${title}>${esc(c.text)}</span>`;
+  return `<span class="gap-text"${title}>${esc(c.text)}</span>${c.sub ? `<span class="gap-sub">${esc(c.sub)}</span>` : ""}`;
 }
 
 /*
@@ -1466,6 +1526,16 @@ async function renderOverview() {
       </div>
       <div class="kpi link ${k.coverUnder2w ? "warn" : ""}" data-filter="low_cover"><span class="k-label">Cover &lt; ${coverWords(2)}</span><span class="k-value">${qty(k.coverUnder2w)}</span></div>
       <div class="kpi link" data-filter="suggested"><span class="k-label">Suggested orders</span><span class="k-value">${qty(k.suggestedOrders)}</span></div>
+      ${
+        // 1.11. Null (a past date, gaps switched off) or missing (a server
+        // before 1.10): no tile, rather than a 0 that reads "none run out".
+        k.runsOutBeforeNextDelivery == null
+          ? ""
+          : `<div class="kpi link ${k.runsOutBeforeNextDelivery ? "alert" : ""}" data-filter="gap"
+               title="${esc(TERMS.gap.short)} Click for the list.">
+               <span class="k-label">Runs out before next delivery</span><span class="k-value">${qty(k.runsOutBeforeNextDelivery)}</span>
+             </div>`
+      }
       <div class="kpi link ${k.negativeStock ? "alert" : ""}" data-filter="negative"><span class="k-label">Negative stock</span><span class="k-value">${qty(k.negativeStock)}</span></div>
       <div class="kpi link" data-filter="parents"><span class="k-label">Assembled products</span><span class="k-value">${qty(k.trackedParents)}</span></div>
       <div class="kpi link" data-filter="excess" title="Stock beyond ${coverWords(data.excessCoverWeeks)} of cover, where it is worth something"><span class="k-label">Excess stock value</span><span class="k-value">${money(k.excessValue)}</span></div>
@@ -1712,7 +1782,11 @@ function activeViewSummary(total, filterIgnored = false) {
     bits.push(invState.region === "none" ? "unlabelled region" : `from ${invState.region}`);
   if (invState.q) bits.push(`matching “${invState.q}”`);
   const sortLabel = INVENTORY_SORTS.find(([v]) => v === invState.sort)?.[1] ?? "risk";
-  const dirWord = currentDir() === "asc" ? "lowest first" : "highest first";
+  // A gap sorts by the day it starts (1.11), so it reads as dates do.
+  const dirWord =
+    invState.sort === "gap"
+      ? currentDir() === "asc" ? "soonest first" : "latest first"
+      : currentDir() === "asc" ? "lowest first" : "highest first";
   return `${qty(total)} ${bits.length ? bits.join(", ") : "items"} · sorted by ${sortLabel.toLowerCase()}, ${dirWord}`;
 }
 
@@ -1745,9 +1819,11 @@ async function loadInventoryTable() {
   // Likewise a filter it does not know (below_lead on 1.2) lists everything.
   // No echo of the filter comes back, so the tell is a 1.2 item shape.
   const filterIgnored =
-    invState.filter === "below_lead" &&
-    data.items.length > 0 &&
-    !("coverWeeksInclOnOrder" in data.items[0]);
+    (invState.filter === "below_lead" &&
+      data.items.length > 0 &&
+      !("coverWeeksInclOnOrder" in data.items[0])) ||
+    // The gap filters (1.11) on a server before 1.10, which has no gap fields.
+    (GAP_FILTERS.has(invState.filter) && data.items.length > 0 && !hasGapFields(data.items[0]));
 
   syncInventoryUrl();
   // Built once in renderInventory, so it went stale on every filter, sort or
@@ -1768,9 +1844,10 @@ async function loadInventoryTable() {
     sortTh("available", "free_stock", "Free stock", "num"),
     sortTh("min_level", "min_stock", "Min stock", "num"),
     sortTh("incoming", "incoming", "On order", "num"),
-    sortTh("weekly", "weekly_demand", "Weekly demand", "num"),
-    sortTh("cover", "cover", "Cover excl. on order"),
-    sortTh("cover_incl", "cover_incl", "Cover incl. on order"),
+    sortTh("weekly", "weekly_demand", "Weekly demand", "num wrap-h"),
+    sortTh("cover", "cover", "Cover excl. on order", "wrap-h"),
+    sortTh("cover_incl", "cover_incl", "Cover incl. on order", "wrap-h"),
+    sortTh("gap", "gap", "Gap before delivery", "wrap-h"),
     sortTh("value", null, "Stock value", "num"),
     sortTh("used_in", "used_in", "Used in", "num"),
     "<th>Tags</th>",
@@ -1797,13 +1874,18 @@ async function loadInventoryTable() {
                     <td class="num">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "—"}</td>
                     <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
                     <td>${coverInclFmt(i)}</td>
+                    <td class="gap-cell">${gapCellHtml(i.gap ?? null, i.gapStatus ?? null, hasGapFields(i), i.qtyFreeStock != null)}</td>
                     <td class="num">${money(i.currentValue)}</td>
                     <td class="num">${i.parentCount || "—"}</td>
                     <td>${flagChips(i.flags)}</td>
                   </tr>`,
                 )
                 .join("")
-            : `<tr><td colspan="${headers.length}" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
+            : `<tr><td colspan="${headers.length}" class="muted">No items match this view.${
+                GAP_FILTERS.has(invState.filter) && isHistorical()
+                  ? " Gaps and overdue POs are worked out for today only: MYOB keeps no history of open POs or their dates."
+                  : ""
+              } <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
         }
       </tbody>
     </table></div>
@@ -1886,9 +1968,9 @@ function leadStockLine(r) {
  * count, so the panel is always full width) and the context the panel quotes
  * (the target cover). It used to read Inventory's own globals for all three,
  * so no other list could use it; the Order list's by-item view (1.6) will
- * pass its own. Inventory passes invItems, its header count (14) and its
+ * pass its own. Inventory passes invItems, its header count (15 from 1.11) and its
  * target cover, which is what this read before, so it opens exactly as it did.
- * By item (1.6) passes the one item it fetched, its own header count (15),
+ * By item (1.6) passes the one item it fetched, its own header count (16 from 1.11),
  * the "Why this quantity" and suppliers section (ctx.extraHtml) and the item
  * detail it already holds (ctx.detail), so the demand chart isn't fetched twice.
  */
@@ -2233,6 +2315,7 @@ async function loadExpandExtras(uid, el, known = null) {
           }
         </div>
       </div>
+      ${expandGapHtml(detail)}
       ${incomingCompactHtml(detail)}`;
   } catch (err) {
     el.innerHTML = `<p class="muted">Could not load activity: ${esc(err.message)}</p>`;
@@ -2536,6 +2619,21 @@ function nextDeliveryHtml(d, cls = "f-note") {
 }
 
 /*
+ * The gap sentence (1.11) in the expand panel, Inventory's and Purchasing's
+ * drill-down alike, from the item detail it already loads: the same words
+ * as the item page's Stock outlook. Nothing at a past date or against a
+ * server before 1.10.
+ */
+function expandGapHtml(d) {
+  const i = d?.item;
+  if (!i || isHistorical() || !hasGapFields(i)) return "";
+  const sentence = gapSentence(i, d, { qty, weeks: coverLabel, words: coverWords });
+  if (!sentence) return "";
+  const tone = i.gapStatus === "gap" || i.gapStatus === "gap_open" ? " gap-text" : "";
+  return `<p class="expand-gap"><strong class="${tone.trim()}">Stock gap:</strong> ${esc(sentence)}</p>`;
+}
+
+/*
  * The compact list the expand panel adds under its demand chart and
  * movements (Inventory, and Purchasing's drill-down), from the item detail
  * it already loads: PO, supplier, outstanding, expected and status, with the
@@ -2607,6 +2705,133 @@ function coverTilesHtml(i) {
       </div>`;
 }
 
+/*
+ * The item page's Stock gap tile (1.11), beside the two covers it answers:
+ * Cover incl. on order counts every PO as if it were here, this says
+ * whether free stock lasts until one actually lands. gapTile (gaps.js)
+ * words it; red for a gap, amber note for tight. A server before 1.10 draws
+ * no tile at all; at a past date it reads "—", today only.
+ */
+function gapTileHtml(i, d) {
+  if (!hasGapFields(i)) return "";
+  const t = gapTile(i, {
+    historical: isHistorical(),
+    rows: d?.incomingSchedule ?? null,
+    qty,
+    weeks: coverLabel,
+    today: d?.incomingScheduleDate ?? null,
+  });
+  return `
+      <div class="fact src-platform" title="${esc(`${TERMS.gap.short}${t.title ? ` ${t.title}` : ""}`)}">
+        <span class="f-label">Stock gap</span>
+        <span class="f-value${t.tone === "fail" ? " gap-value" : ""}">${esc(t.value)}</span>
+        ${t.note ? `<span class="f-note${t.tone === "warn" ? " warn" : t.tone === "fail" ? " fail" : ""}">${esc(t.note)}</span>` : ""}
+      </div>`;
+}
+
+/*
+ * "Stock outlook (today)" (1.11), above Purchasing suggestion: free stock
+ * week by week to the projection's horizon, drawn from the server's own
+ * series (gap.weeks, projection.ts), never re-projected here. Bars in the
+ * demand chart's idiom: above the line while there is stock, below it, red,
+ * when short; the gap is a red band behind its weeks. A delivery is a
+ * marker over its week, solid when promised, hollow when estimated. Overdue,
+ * late and undated POs are listed beside the strip, not placed on it: we
+ * don't know when they will come. The sentence underneath (gapSentence)
+ * says the same in words. At a past date the panel says it is today only;
+ * a server before 1.10 gets no panel.
+ */
+function outlookPanelHtml(i, d) {
+  if (!hasGapFields(i)) return "";
+  if (isHistorical())
+    return `<section class="panel" id="item-outlook">
+        <h2>Stock outlook (today)</h2>
+        <p class="muted">Today only: the outlook is worked out from today's purchase orders and their dates, and MYOB keeps no history of either.</p>
+      </section>`;
+  const fmt = { qty, weeks: coverLabel, words: coverWords };
+  const sentence = gapSentence(i, d, fmt);
+  const m = outlookModel(i, d, fmt);
+  if (!sentence && !m) return "";
+  // One column says nothing a sentence doesn't: an open gap whose POs are all
+  // off the timeline ends its series on the run-out day (B16100S16, 13 Oct:
+  // three days, one week). The POs beside it are still listed.
+  const strip = m && m.weeks.length > 1 ? outlookStripHtml(m) : "";
+  const off = m?.off?.length
+    ? `<div class="outlook-off">
+        <h3>Not on the timeline</h3>
+        <ul>${m.off
+          .map(
+            (p) => `<li><strong>${esc(p.number ?? "—")}</strong> ${qty(p.qty)}
+              <span class="${p.status === "overdue" ? "gap-text" : "muted"}">${esc(p.text)}</span>
+              ${p.supplier ? `<br /><span class="muted">${esc(p.supplier)}</span>` : ""}</li>`,
+          )
+          .join("")}</ul>
+        <p class="hint">Not counted as arriving until it has a date again.</p>
+      </div>`
+    : "";
+  return `
+        <section class="panel" id="item-outlook">
+          <h2>Stock outlook (today)</h2>
+          ${strip || off ? `<div class="outlook${strip && off ? " with-off" : ""}">${strip ? `<div class="outlook-main">${strip}</div>` : ""}${off}</div>` : ""}
+          ${sentence ? `<p class="outlook-sentence">${esc(sentence)}</p>` : ""}
+          ${
+            strip
+              ? `<p class="hint">Projected free stock, a week per bar (its lowest point; in a week a delivery lands, also what is
+            there after it), at the weekly demand rate cover uses, with each PO on its Promised Date in MYOB (or its
+            labelled estimate where it has none).${m.gapScale ? " Drawn to the scale of today's free stock, so a delivery's bar may be cut off at the top." : ""}
+            The dashed line, where it fits, is the minimum, for reference.
+            <span class="outlook-key"><span class="mk solid"></span>promised <span class="mk hollow"></span>estimate
+            <span class="sw-gap"></span>gap</span></p>`
+              : ""
+          }
+        </section>`;
+}
+
+/** The strip itself, from outlookModel: one column per week, the zero line between above and below. */
+function outlookStripHtml(m) {
+  const H = 90;
+  // The minimum is a reference line only (the gap's threshold is zero), but
+  // it is drawn to scale, so the scale reaches it.
+  // With a gap the scale stays on free stock (outlookModel), so a minimum
+  // above it is left off rather than squashing the shortfall again.
+  const min = m.minLevel != null && m.minLevel > 0 && (!m.gapScale || m.minLevel <= m.top) ? m.minLevel : null;
+  const top = Math.max(m.top, min ?? 0);
+  const span = top - m.bottom || 1;
+  const up = Math.round((top / span) * H);
+  const down = H - up;
+  const px = (v) => Math.max(Math.round((Math.abs(v) / span) * H), v === 0 ? 0 : 1);
+  // A label every week up to six weeks, then every second or fourth, so 26
+  // weeks of "13 Oct" don't overprint each other.
+  const every = m.weeks.length > 13 ? 4 : m.weeks.length > 6 ? 2 : 1;
+  const minLine = min
+    ? `<div class="ol-min" style="top:${14 + up - px(min)}px" title="${esc(`Minimum stock ${qty(min)} (a reference only: a gap is free stock below zero)`)}"></div>`
+    : "";
+  return `
+    <div class="outlook-strip" style="--up:${up}px;--down:${down}px">
+      ${minLine}
+      ${m.weeks
+        .map((w, k) => {
+          // Below the line, the week's lowest point when it is short. Above
+          // it, the lowest point too, or in a week a delivery lands, what is
+          // there once it has: so the week 00023070 lands shows both the
+          // shortfall before it and the stock after.
+          const down = Math.min(w.low, 0);
+          const raw = Math.max(w.arrivals.length ? w.close : w.low, 0);
+          const upv = Math.min(raw, top);
+          const marks = w.arrivals
+            .map((a) => `<span class="mk ${a.solid ? "solid" : "hollow"}" title="${esc(`${qty(a.qty)} on ${a.number ?? "a PO"}${a.supplier ? ` (${a.supplier})` : ""}, ${a.solid ? "promised" : "estimated"} ${shortDate(a.eta, windowState.asAt)}`)}"></span>`)
+            .join("");
+          return `<div class="ol-col${w.inGap ? " in-gap" : ""}" title="${esc(w.title)}">
+            <div class="ol-marks">${marks}</div>
+            <div class="ol-up">${upv > 0 ? `<div class="ol-bar${raw > top ? " clipped" : ""}" style="height:${px(upv)}px"></div>` : ""}</div>
+            <div class="ol-down">${down < 0 ? `<div class="ol-bar short" style="height:${px(down)}px"></div>` : ""}</div>
+            <div class="bar-label">${k % every === 0 ? esc(w.label) : "&nbsp;"}</div>
+          </div>`;
+        })
+        .join("")}
+    </div>`;
+}
+
 async function renderItem(uid) {
   main.innerHTML = '<p class="loading">Loading item…</p>';
   const d = await fetchJson(withWindow(`/api/insights/items/${encodeURIComponent(uid)}`));
@@ -2646,6 +2871,7 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
       ${coverTilesHtml(i)}
+      ${gapTileHtml(i, d)}
       <div class="fact src-platform" title="${esc(i.minLevel == null ? "No minimum stock level set" : minStockBasis(i.minStock))}">
         <span class="f-label">Min stock</span>
         <span class="f-value">${i.minLevel == null ? '<span class="muted">—</span>' : qty(i.minLevel)}</span>
@@ -2740,6 +2966,8 @@ async function renderItem(uid) {
       </div>
 
       <div>
+        ${outlookPanelHtml(i, d)}
+
         ${
           s
             ? `<section class="panel">
@@ -5346,8 +5574,7 @@ function sortableHeader(state, key, label, tip, cls = "") {
   const active = state.sort === key;
   const dir = active ? sortDirection(key, state.dir) : null;
   const arrow = active ? (dir === "asc" ? "▲" : "▼") : "";
-  const text = PURCHASING_SORTS[key]?.text;
-  const flip = dir === "asc" ? (text ? " Z to A" : " highest first") : text ? " A to Z" : " lowest first";
+  const flip = ` ${sortWord(key, dir === "asc" ? "desc" : "asc")}`;
   const title = `${tip ? `${tip} · ` : ""}Click to sort${active ? flip : ""}`;
   return `<th class="${cls} sortable${active ? " sorted" : ""}"
     data-sort="${esc(key)}" title="${esc(title)}"
@@ -5468,7 +5695,7 @@ function orderItemRowHtml(r) {
         data-supplier="${esc(r.lines.length === 1 ? first.supplierUid : "")}" data-state="${esc(r.lines.length === 1 ? first.state : "")}">
       <td class="caret obi-caret" title="Show this item's detail">▸</td>
       <td><button class="linkish obi-toggle" type="button" title="Show this item's detail"><strong>${esc(r.number ?? "—")}</strong></button>${kitBadge}
-        <br /><span class="muted">${esc((r.name ?? "").slice(0, 60))}${r.productFinish ? ` · ${esc(r.productFinish)}` : ""}</span></td>
+        <br /><span class="muted obi-name">${esc((r.name ?? "").slice(0, 60))}${r.productFinish ? ` · ${esc(r.productFinish)}` : ""}</span></td>
       <td class="obi-supplier">${byItemSupplierHtml(r)}</td>
       <td class="num">${qty(r.suggestedQty)}</td>
       <td class="num obi-qty">${byItemQtyHtml(r)}</td>
@@ -5479,6 +5706,7 @@ function orderItemRowHtml(r) {
       <td class="num">${r.weeklyDemand ? Number(r.weeklyDemand).toFixed(1) : "—"}</td>
       <td>${coverFmt(r.coverWeeks, first.rationale?.demandBasis)}</td>
       <td>${coverInclFmt(incl)}</td>
+      <td class="gap-cell">${gapCellHtml(r.gap, r.gap?.status ?? null, r.hasGap)}</td>
       <td class="num">${byItemLeadHtml(r)}</td>
       <td class="num">${money(r.estCost)}</td>
       <td class="num"><button class="tag-x obi-remove" type="button" title="Take this item off this order">×</button></td>

@@ -907,7 +907,7 @@ tr.ledger-anchor td { background: var(--paper); font-weight: 600; }
 .cart-why { max-width: 30rem; }
 
 /* ---------- Order list by item (1.6) ----------
-   One row per item, fifteen columns: small type, so the stock figures sit
+   One row per item, sixteen columns (fifteen before 1.11): small type, so the stock figures sit
    beside the order without a sideways scroll on a laptop. */
 .obi-table { font-size: 0.8rem; }
 .obi-table .cart-qty { width: 5rem; }
@@ -926,10 +926,15 @@ tr.ledger-anchor td { background: var(--paper); font-weight: 600; }
    hover, so on a narrower laptop a scrollbar came and went as the pointer
    crossed the headings. At 1440 px the panel is 1,152 px, so it fits either
    way. Only the sorted column's ▲/▼ takes space (about 10 px). */
-.obi-table th.sortable .th-inner { gap: 0; }
+.obi-table th.sortable .th-inner { gap: 0; flex-wrap: wrap; }
 .obi-table th.sortable.sorted .sort-arrow { margin-left: 0.25rem; }
 .obi-table th.sortable:not(.sorted):hover .sort-arrow::after { position: absolute; margin-left: 0.1rem; }
-.obi-table td, .obi-table > thead th { padding-left: 0.45rem; padding-right: 0.45rem; }
+/* Sixteen columns from 1.11 (Gap before delivery): the padding and the
+   headings' letter-spacing give back the new column's width. At 0.45rem and
+   0.08em the narrowest table was 1,129 px against the 1,078 px panel at
+   1366 px; at these it is under 1,078 with room for a sorted heading's arrow. */
+.obi-table td, .obi-table > thead th { padding-left: 0.35rem; padding-right: 0.35rem; }
+.obi-table > thead th { letter-spacing: 0.03em; }
 .obi-supplier .btn.small { margin-top: 0.2rem; }
 /* The supplier dropdown (1.8). A native select is as wide as its longest
    option ("SHANDONG TENGDA — preferred · 131 d · $0.9627 last" is about
@@ -1447,3 +1452,53 @@ ul.plain { margin: 0.3rem 0 0.8rem; padding-left: 1rem; display: grid; gap: 0.2r
    badges wrap so the list fits the panel at 1366 px instead of scrolling. */
 #open-docs-table th { white-space: normal; }
 #open-docs-table td .badge { white-space: normal; }
+
+/* Stock gaps on screen (1.11). The Gap before delivery cell is red text, not
+   a badge: a badge's padding and nowrap cost By item a column's width. Its
+   two parts ("6.3w from 27 Oct", "~1,056 short") may wrap at their spaces,
+   so the column is as narrow as "~1,056 short". */
+.gap-text { color: var(--fail); font-weight: 600; }
+.gap-sub { display: block; font-size: 0.66rem; color: var(--muted); white-space: nowrap; }
+td.gap-cell { min-width: 5rem; max-width: 7.5rem; line-height: 1.25; }
+.obi-table td.gap-cell { min-width: 0; font-size: 0.72rem; }
+.obi-table td.gap-cell .gap-sub { white-space: normal; }
+/* The item's name under its number, a size down: at 0.8rem a long word
+   ("INFRASTRUCTURE") held the Item column wider than its number needs. */
+.obi-name { font-size: 0.72rem; }
+/* Inventory's headings stay on one line, but this one may take two, so the
+   column is as wide as its cells rather than its heading. */
+th.wrap-h { white-space: normal; min-width: 5rem; }
+.fact .f-value.gap-value { color: var(--fail); }
+
+/* Stock outlook (today): free stock a week per column, in the demand bars'
+   idiom. Above the zero line while there is stock, below it in red when
+   short; the gap's weeks carry a red band; a delivery is a marker over its
+   week, solid when promised, hollow when estimated. */
+.outlook { display: block; }
+.outlook.with-off { display: grid; grid-template-columns: minmax(0, 1fr) 11rem; gap: 0.9rem; align-items: start; }
+.outlook-strip { position: relative; display: flex; gap: 2px; padding-top: 0.2rem; }
+.ol-col { flex: 1; min-width: 6px; display: flex; flex-direction: column; }
+.ol-marks { height: 14px; display: flex; justify-content: center; align-items: flex-end; gap: 1px; }
+.ol-up { height: var(--up); display: flex; flex-direction: column; justify-content: flex-end; border-bottom: 1px solid var(--ink); }
+.ol-down { height: var(--down); display: flex; flex-direction: column; justify-content: flex-start; }
+.ol-bar { background: var(--ink-deep); }
+.ol-bar.short { background: var(--fail); }
+/* Cut off at the top of the scale (a delivery far above today's free stock). */
+.ol-bar.clipped { border-top: 3px double var(--panel); }
+.ol-col.in-gap .ol-up, .ol-col.in-gap .ol-down { background: var(--fail-bg); }
+.ol-min { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--brand); pointer-events: none; }
+.ol-col .bar-label { white-space: nowrap; overflow: visible; text-align: left; }
+.mk { display: inline-block; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--ok); box-sizing: border-box; }
+.mk.solid { background: var(--ok); }
+.mk.hollow { background: var(--panel); }
+.outlook-key { white-space: nowrap; margin-left: 0.3rem; }
+.outlook-key .mk { vertical-align: middle; margin: 0 0.15rem 0 0.5rem; }
+.sw-gap { display: inline-block; width: 0.8rem; height: 0.6rem; background: var(--fail-bg); border: 1px solid var(--fail); vertical-align: middle; margin: 0 0.2rem 0 0.5rem; }
+.outlook-off h3 { margin: 0 0 0.3rem; font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.outlook-off ul { margin: 0; padding-left: 1rem; font-size: 0.75rem; }
+.outlook-off li { margin-bottom: 0.3rem; }
+.outlook-sentence { margin: 0.8rem 0 0.4rem; line-height: 1.5; }
+.expand-gap { margin: 0.9rem 0 0; font-size: 0.78rem; line-height: 1.5; }
+@media (max-width: 720px) {
+  .outlook.with-off { grid-template-columns: 1fr; }
+}
