@@ -569,6 +569,155 @@ export interface ItemComputed {
   incomingOverdueQty?: GapFields["incomingOverdueQty"];
 }
 
+/*
+ * Weekly demand, unrounded, and the look-back it came from. Weeks per month
+ * are averaged over a year, so a 6-month window is 26.09 weeks rather than a
+ * rough 26: the rate feeds cover and order quantities. Nothing sold inside
+ * the chosen window falls back to the wider look-back rather than reporting
+ * a slow mover as having no demand at all.
+ *
+ * Shared (1.13) by computeItem and suggestionInputs. demand.weekly is served
+ * to 3 dp (SPW12G 546.5845… a week on the 26 Aug copy, served as 546.585),
+ * so the cart rebuilds a suggestion from the exact rate computeItem used,
+ * not the served one, and its round trip is exact rather than nearly so.
+ */
+export function demandRate(d: {
+  directWindow: number;
+  componentWindow: number;
+  directLong: number;
+  componentLong: number;
+  windowMonths: number;
+  longMonths: number;
+}): { weekly: number; basis: "window" | "long" | "none" } {
+  const weeksIn = (months: number) => (months * 365.25) / 12 / 7;
+  const totalWindow = d.directWindow + d.componentWindow;
+  const totalLong = d.directLong + d.componentLong;
+  if (totalWindow > 0) return { weekly: totalWindow / weeksIn(d.windowMonths), basis: "window" };
+  if (totalLong > 0) return { weekly: totalLong / weeksIn(d.longMonths), basis: "long" };
+  return { weekly: 0, basis: "none" };
+}
+
+/** Where a lead time came from, in precedence order: the item, the supplier, measured. */
+function leadSourceOf(
+  leadDays: number | null,
+  itemLeadDays: number | null,
+  supplierLeadDays: number | null,
+): ItemComputed["leadTimeSource"] {
+  if (leadDays == null) return null;
+  if (itemLeadDays != null) return "item";
+  if (supplierLeadDays != null) return "supplier";
+  return "measured";
+}
+
+/** How a suggestion's rationale names where its lead time came from. */
+export function leadSourceLabel(source: ItemComputed["leadTimeSource"], orders: number): string {
+  if (source == null) return "not measured";
+  if (source === "item") return "set by Allied on this item";
+  if (source === "supplier") return "set by Allied on the supplier";
+  return `measured over ${orders} orders`;
+}
+
+/** Everything one purchase suggestion is built from (suggestOrderQty). */
+export interface SuggestionInputs {
+  /** Weekly demand, unrounded (demandRate). */
+  weekly: number;
+  basis: "window" | "long" | "none";
+  /** On hand − committed; null where the position isn't known, and then nothing is suggested. */
+  freeStock: number | null;
+  incoming: number;
+  /** Free stock is below the applied minimum (the below_min flag). */
+  belowMin: boolean;
+  /** Allied's applied minimum as stored; null where none is applied. */
+  minLevel: number | null;
+  /**
+   * The lead-time stock that minimum stands for, where it is not minLevel
+   * itself: a window minimum re-derived at another supplier's lead (1.13,
+   * cart.ts supplierSuggestion). Absent, the minimum is the lead-time stock.
+   */
+  minLeadStock?: number | null;
+  /** The lead time the suggestion is built on; null where none is known. */
+  leadDays: number | null;
+  /** The rationale's words for where leadDays came from (leadSourceLabel). */
+  leadSource: string;
+  /** MYOB's reorder multiple; the quantity is rounded up to it. */
+  reorderMultiple: number | null;
+  targetCoverWeeks: number;
+}
+
+/**
+ * The purchase suggestion: weekly × target cover + lead-time stock − free
+ * stock − on order, rounded up to the reorder multiple. The lead-time stock
+ * is the applied minimum where one is applied, else weekly × lead weeks (see
+ * computeItem for why it is one or the other, never both).
+ *
+ * Pure, and the only place the arithmetic lives (1.13). computeItem calls it
+ * on the item's effective supplier's lead; the cart calls it again on a
+ * chosen supplier's own lead for a line under anyone else (cart.ts
+ * supplierSuggestion). On the 26 Aug copy it gives every one of the 3,103
+ * items exactly the suggestion computeItem gave before it was moved here.
+ *
+ * Null where nothing can be suggested: the position is unknown, or there is
+ * no demand and the item is not below its minimum. Otherwise the working,
+ * with qty 0 when free stock and on order already cover it (computeItem
+ * then has no suggestion, as before; the cart shows 0).
+ */
+export function suggestOrderQty(i: SuggestionInputs): ItemComputed["suggestion"] {
+  if (i.freeStock == null || !(i.weekly > 0 || i.belowMin)) return null;
+  const leadWeeks = i.leadDays != null && i.leadDays > 0 ? i.leadDays / 7 : 0;
+  const target = i.targetCoverWeeks;
+  const leadStock =
+    i.minLevel != null ? Math.max(i.minLeadStock ?? i.minLevel, 0) : i.weekly * leadWeeks;
+  const raw = i.weekly * target + leadStock - i.freeStock - i.incoming;
+  const multiple = i.reorderMultiple;
+  const qty =
+    raw <= 0 ? 0 : multiple && multiple > 0 ? Math.ceil(raw / multiple) * multiple : Math.ceil(raw);
+  return {
+    qty,
+    rationale: {
+      weeklyDemand: Number(i.weekly.toFixed(2)),
+      demandBasis: i.basis,
+      targetCoverWeeks: target,
+      leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : 0,
+      leadTimeDays: i.leadDays,
+      leadTimeSource: i.leadSource,
+      minLevel: i.minLevel ?? 0,
+      /*
+       * The lead-time stock the order is built around, and where it came
+       * from: Allied's applied minimum, or the live rate × lead time
+       * where none has been applied. One or the other, never both.
+       */
+      leadStock: Number(leadStock.toFixed(1)),
+      leadStockSource: i.minLevel != null ? "minimum" : "lead time",
+      freeStock: i.freeStock,
+      incoming: i.incoming,
+      rawNeed: Number(raw.toFixed(1)),
+      reorderMultiple: multiple ?? null,
+    },
+  };
+}
+
+/**
+ * The inputs computeItem gave suggestOrderQty for this item, read back off
+ * the computed item (1.13), so the cart can change only the lead time.
+ * suggestOrderQty(suggestionInputs(item)) is the item's own suggestion,
+ * qty 0 included; test/suggest-qty.test.ts holds it to that.
+ */
+export function suggestionInputs(item: ItemComputed): SuggestionInputs {
+  const { weekly, basis } = demandRate(item.demand);
+  return {
+    weekly,
+    basis,
+    freeStock: item.qtyFreeStock,
+    incoming: item.incomingQty,
+    belowMin: item.flags.includes("below_min"),
+    minLevel: item.minLevel,
+    leadDays: item.leadTimeDays,
+    leadSource: leadSourceLabel(item.leadTimeSource, item.leadTimeOrders),
+    reorderMultiple: item.reorderQty,
+    targetCoverWeeks: config.insights.targetCoverWeeks,
+  };
+}
+
 /** Exported for test/cover-incl.test.ts (1.3); the screens reach it through computedItems. */
 export function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemComputed {
   const n = (v: unknown): number | null =>
@@ -580,20 +729,14 @@ export function computeItem(row: Record<string, unknown>, win: DemandWindow): It
 
   const totalWindow = directWindow + compWindow;
   const totalLong = directLong + compLong;
-  // Weeks per month averaged over a year, so a 6-month window is 26.09 weeks
-  // rather than a rough 26 — the rate feeds cover and order quantities.
-  const weeksIn = (months: number) => (months * 365.25) / 12 / 7;
-  let weekly = 0;
-  let basis: "window" | "long" | "none" = "none";
-  if (totalWindow > 0) {
-    weekly = totalWindow / weeksIn(win.windowMonths);
-    basis = "window";
-  } else if (totalLong > 0) {
-    // Nothing sold inside the chosen window, so fall back to the wider
-    // look-back rather than reporting a slow mover as having no demand at all.
-    weekly = totalLong / weeksIn(win.longMonths);
-    basis = "long";
-  }
+  const { weekly, basis } = demandRate({
+    directWindow,
+    componentWindow: compWindow,
+    directLong,
+    componentLong: compLong,
+    windowMonths: win.windowMonths,
+    longMonths: win.longMonths,
+  });
 
   // Every downstream figure — cover, below-minimum, suggestions, risk, sorting,
   // filters — hangs off these three. They come from the platform ledger; MYOB's
@@ -810,48 +953,26 @@ export function computeItem(row: Record<string, unknown>, win: DemandWindow): It
    * 14.3-week lead would have been told to order 10,980 instead of 6,690.
    * Where no minimum has been applied the live term stands in, computed from
    * the demand window on screen, and the rationale says which applied.
+   *
+   * The arithmetic itself is suggestOrderQty (1.13), so the cart can rebuild
+   * it on another supplier's lead with exactly this code. Nothing to order
+   * (a raw need of zero or less) is no suggestion here, as it always was.
    */
-  let suggestion: ItemComputed["suggestion"] = null;
-  if (positionKnown && (weekly > 0 || flags.includes("below_min"))) {
-    const target = config.insights.targetCoverWeeks;
-    const leadStock = minLevel != null ? Math.max(minLevel, 0) : weekly * leadWeeks;
-    const raw = weekly * target + leadStock - freeStock - incomingQty;
-    if (raw > 0) {
-      const multiple = n(row.reorder_qty);
-      const qty =
-        multiple && multiple > 0 ? Math.ceil(raw / multiple) * multiple : Math.ceil(raw);
-      suggestion = {
-        qty,
-        rationale: {
-          weeklyDemand: Number(weekly.toFixed(2)),
-          demandBasis: basis,
-          targetCoverWeeks: target,
-          leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : 0,
-          leadTimeDays: leadDays,
-          leadTimeSource:
-            leadDays == null
-              ? "not measured"
-              : n(row.item_lead_days) != null
-                ? "set by Allied on this item"
-                : n(row.supplier_lead_days) != null
-                  ? "set by Allied on the supplier"
-                  : `measured over ${n(row.lead_time_orders) ?? 0} orders`,
-          minLevel: minLevel ?? 0,
-          /*
-           * The lead-time stock the order is built around, and where it came
-           * from: Allied's applied minimum, or the live rate × lead time
-           * where none has been applied. One or the other, never both.
-           */
-          leadStock: Number(leadStock.toFixed(1)),
-          leadStockSource: minLevel != null ? "minimum" : "lead time",
-          freeStock: freeStock ?? 0,
-          incoming: incomingQty,
-          rawNeed: Number(raw.toFixed(1)),
-          reorderMultiple: multiple ?? null,
-        },
-      };
-    }
-  }
+  const leadSource = leadSourceOf(leadDays, n(row.item_lead_days), n(row.supplier_lead_days));
+  const leadOrders = n(row.lead_time_orders) ?? 0;
+  const worked = suggestOrderQty({
+    weekly,
+    basis,
+    freeStock,
+    incoming: incomingQty,
+    belowMin: flags.includes("below_min"),
+    minLevel,
+    leadDays,
+    leadSource: leadSourceLabel(leadSource, leadOrders),
+    reorderMultiple: n(row.reorder_qty),
+    targetCoverWeeks: config.insights.targetCoverWeeks,
+  });
+  const suggestion: ItemComputed["suggestion"] = worked && worked.qty > 0 ? worked : null;
 
   // Excess (demand-based) and a suggestion (driven by the minimum stock level)
   // can both be true when the minimum is far above what current demand
@@ -971,15 +1092,8 @@ export function computeItem(row: Record<string, unknown>, win: DemandWindow): It
       coverIncludingIncoming == null ? null : Number(coverIncludingIncoming.toFixed(1)),
     leadTimeDays: leadDays,
     leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : null,
-    leadTimeSource:
-      leadDays == null
-        ? null
-        : n(row.item_lead_days) != null
-          ? "item"
-          : n(row.supplier_lead_days) != null
-            ? "supplier"
-            : "measured",
-    leadTimeOrders: n(row.lead_time_orders) ?? 0,
+    leadTimeSource: leadSource,
+    leadTimeOrders: leadOrders,
     leadTimeItemDays: n(row.item_lead_days),
     leadTimeSupplierDays: n(row.supplier_lead_days),
     leadTimeMeasuredDays: n(row.measured_lead_days),

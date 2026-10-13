@@ -83,6 +83,19 @@ export function groupLinesByItem(cart) {
       row.lines.push(line);
     }
   }
+  /*
+   * From 1.13 each line's suggestion is its own supplier's (cart.ts
+   * supplierSuggestion), so the parts of a split, or two lines kept by a
+   * saved qty, can each suggest a different amount. Their sum would be
+   * ordering the item twice, and the first line's depends on which supplier
+   * /cart lists first, so such a row's Suggested is the item's own: its
+   * usual supplier's (rationale.suggestionFor.usualQty). A server before
+   * 1.13 sends the item's own on every line, so the first line's is it.
+   */
+  for (const row of rows.values()) {
+    const usual = row.lines[0]?.rationale?.suggestionFor?.usualQty;
+    if (row.lineCount > 1 && usual != null) row.suggestedQty = usual;
+  }
   return [...rows.values()];
 }
 
@@ -103,7 +116,7 @@ export const BY_ITEM_COLUMNS = [
   { key: "caret", label: "", cls: "caret-h" },
   { key: "item", label: "Item", sort: "number" },
   { key: "supplier", label: "Supplier", term: "supplier_source", sort: "supplier" },
-  { key: "suggested", label: "Suggested", cls: "num", sort: "suggested", tip: "What the dashboard suggests ordering: enough for the target cover plus the minimum stock (or the lead time), less free stock and on order." },
+  { key: "suggested", label: "Suggested", cls: "num", sort: "suggested", tip: "What the dashboard suggests ordering: enough for the target cover plus the minimum stock (or the lead time), less free stock and on order. Built on the lead time of the supplier the item is ordered from." },
   { key: "order_qty", label: "Order qty", cls: "num", sort: "order_qty", tip: "What goes on the order sheet: the suggestion, unless you have typed a quantity." },
   { key: "on_hand", label: "On hand", cls: "num", sort: "on_hand" },
   { key: "committed", label: "Committed", term: "committed", cls: "num", sort: "committed" },
@@ -264,6 +277,21 @@ export function qtyCell(row) {
     carriedFrom: l.qtyCarriedFrom ?? null,
     coveredByOnOrder: covered && Number(l.qty) === 0,
   };
+}
+
+/*
+ * The "covered by on order" label's title. Before 1.13 only an item listed
+ * for being below its minimum (D19) could show a 0; from 1.13 a line rebuilt
+ * on a shorter lead can come to 0 too, minimum or not (B20140S16 with Hobson
+ * on the 26 Aug copy, Stage 14 test decisions: 174 -> 0 with 600 on order).
+ */
+export function coveredByOnOrderTitle(row) {
+  const l = row?.lines?.length === 1 ? row.lines[0] : null;
+  if (l?.rationale?.suggestionFor?.basis === "rebuilt")
+    return "Free stock plus what is already on order covers this supplier's lead time and the target, so nothing more is suggested";
+  if (!row?.minLevel)
+    return "Free stock plus what is already on order meets the target, so nothing more is suggested";
+  return "Below its minimum, but free stock plus what is already on order meets the target, so nothing more is suggested";
 }
 
 /*
@@ -584,6 +612,33 @@ export function leadOwner(r, days = r?.leadTimeDaysUsed) {
 }
 
 /*
+ * A rebuilt line's rationale as the item's own suggestion would carry it
+ * (1.13). On a line rebuilt on another supplier's lead, leadTimeDaysUsed,
+ * leadTimeUsedFor and leadTimeUsedSource name that supplier (cart.ts), so
+ * anything that says where the item's own suggestion or its minimum came
+ * from reads them back from suggestionFor. For a window minimum that is the
+ * lead it was set from; set from a lead that is no longer the item's, the
+ * server leaves its source null, and so it is credited to no supplier.
+ */
+export function asUsual(r) {
+  const sf = r?.suggestionFor;
+  if (sf?.basis !== "rebuilt") return r;
+  return {
+    ...r,
+    leadTimeDaysUsed: sf.usualLeadDays,
+    leadTimeUsedFor: sf.usualLeadSource || sf.usualLeadDays == null ? sf.usualSupplierName : null,
+    leadTimeUsedSource: sf.usualLeadSource,
+    suggestionFor: { ...sf, basis: "usual" },
+  };
+}
+
+/* Whose lead a window minimum was set from: "this item's own", "X's", or null. */
+export function minLeadOwner(r) {
+  const u = asUsual(r);
+  return leadOwner(u, u?.minLeadTimeDays);
+}
+
+/*
  * Whether this line's own lead is its supplier's (1.12). From 1.12 a lead
  * set on the item is shown only on its usual supplier's line, and every line
  * says where its lead came from (leadTimeSource); a pick of Tong Ming for
@@ -603,6 +658,9 @@ const leadIsPerSupplier = (line) => line != null && "leadTimeSource" in line;
 function typedQty(row) {
   const l = row?.lines?.[0];
   if (!l) return false;
+  // From 1.13 the server says so (qtyTyped), which also catches a typed
+  // number that happens to equal the suggestion.
+  if (typeof l.qtyTyped === "boolean") return l.qtyTyped;
   if (l.state === "edited" || l.qtyCarriedFrom) return true;
   return row.suggestedQty != null && Number(row.qty) !== Number(row.suggestedQty);
 }
@@ -654,8 +712,14 @@ export function quantityStaysMessage(row, qty = (v) => Number(v).toLocaleString(
  *   "Built on this item's own 107-day lead time (set on the item page). TONG MING's is 45 days."
  */
 export function leadBasisSentence(line, options = [], qty = (v) => Number(v).toLocaleString(), compare = true) {
-  const r = line?.rationale ?? {};
+  let r = line?.rationale ?? {};
   if (!("leadStockBasis" in r)) return null;
+  // A split row's Suggested is the item's own (groupLinesByItem), whichever
+  // part /cart lists first, so it says what that is built on.
+  if (r.suggestionFor?.basis === "rebuilt") {
+    if (compare) return rebuiltSentence(line, qty);
+    r = asUsual(r);
+  }
   const who = r.leadTimeUsedFor ?? null;
   const used = r.leadTimeDaysUsed ?? null;
   const itemLead = r.leadTimeUsedSource === "item";
@@ -700,4 +764,145 @@ export function supplierChangedMessage(row, endpoint) {
   if (row?.preferredSupplierName && !l?.isPreferred)
     return `${number} is now ordered from ${name}, for this order only. Its preferred supplier is still ${row.preferredSupplierName}; change that on the item page.`;
   return `${number} is now ordered from ${name}, for this order only.`;
+}
+
+/*
+ * Suggested qty follows the chosen supplier (1.13). Allied answered Q5 on
+ * 13 Oct: "yes it should match with whatever supplier they pick". A line
+ * under any supplier but the item's usual one is rebuilt on that supplier's
+ * own lead (cart.ts supplierSuggestion), and rationale.suggestionFor says
+ * what each line's suggestion is built on:
+ *
+ *   usual      the item's own suggestion, its usual supplier's
+ *   rebuilt    rebuilt on this line's supplier's lead
+ *   same_lead  that lead is the one the item's own is built on
+ *   manual     a hand-set minimum, which no lead time changes
+ *   no_lead    no lead time is known for this supplier: the item's own stands
+ *   no_window  a window minimum stored without its burn or lead: the same
+ *
+ * A server before 1.13 sends none, and everything reads as 1.12 did.
+ */
+const daysWord = (qty, d) => `${qty(d)} ${Number(d) === 1 ? "day" : "days"}`;
+
+/* "HOBSON's 24-day lead time", "this item's own 107-day lead time", or null without a lead. */
+function leadPhrase(who, days, source, qty) {
+  if (days == null) return null;
+  if (source === "item") return `this item's own ${qty(days)}-day lead time`;
+  return who ? `${who}'s ${qty(days)}-day lead time` : `a ${qty(days)}-day lead time`;
+}
+
+/* "HOBSON's 24 days", "this item's own 107 days": the short form, after "was M on". */
+function leadDaysPhrase(who, days, source, qty) {
+  if (days == null) return who ? `${who}, with no lead time known` : "no lead time";
+  if (source === "item") return `this item's own ${daysWord(qty, days)}`;
+  return who ? `${who}'s ${daysWord(qty, days)}` : `a ${qty(days)}-day lead time`;
+}
+
+/*
+ * Who the usual supplier's lead is credited to. A window minimum set from a
+ * lead that is no longer the item's comes with no source (cart.ts
+ * supplierSuggestion), and then to no one: "a 120-day lead time", not the
+ * usual supplier's, whose own figure has since moved.
+ */
+const usualWho = (sf) => (sf.usualLeadSource || sf.usualLeadDays == null ? sf.usualSupplierName : null);
+
+/* The usual supplier's lead, as suggestionFor carries it. */
+const usualLeadOf = (sf, qty) => leadDaysPhrase(usualWho(sf), sf.usualLeadDays, sf.usualLeadSource, qty);
+
+/*
+ * Why this quantity on a rebuilt line: the line's own lead and what it made
+ * of the lead-time stock, then what the usual supplier's would be.
+ *
+ * On the 26 Aug copy with the Stage 14 test decisions:
+ *   window  N24S16M with Hobson: "Rebuilt on HOBSON ENGINEERING Co.
+ *           PTY.LTD's 24 days: your minimum (1,725, from this item's own 107
+ *           days) comes to 387 at that lead time, and that sets the lead-time
+ *           stock. On this item's own 107 days it would be 2,361."
+ *   lead    B24160S16 with Tong Ming: "Rebuilt on TONG MING ENTERPRISES CO
+ *           LTD's 42-day lead time, this order's supplier. On SHANDONG
+ *           TENGDA's 131 days it would be 1,158."
+ */
+function rebuiltSentence(line, qty) {
+  const r = line.rationale;
+  const sf = r.suggestionFor;
+  const name = sf.supplierName ?? line.supplierName ?? "this supplier";
+  const tail = ` On ${usualLeadOf(sf, qty)} it would be ${qty(sf.usualQty ?? 0)}.`;
+  if (minFromWindow(r)) {
+    const min = qty(line.minLevel ?? r.minLevel ?? 0);
+    const from = sf.usualLeadDays != null ? usualLeadOf(sf, qty) : "a lead time";
+    const stock = r.leadStock != null ? qty(r.leadStock) : "—";
+    return `Rebuilt on ${name}'s ${daysWord(qty, sf.leadDays)}: your minimum (${min}, from ${from}) comes to ${stock} at that lead time, and that sets the lead-time stock.${tail}`;
+  }
+  return `Rebuilt on ${leadPhrase(name, sf.leadDays, sf.leadSource, qty)}, this order's supplier.${tail}`;
+}
+
+/*
+ * The quantity sentence of the message after a choice in the dropdown
+ * (1.13), read from the redrawn row and, for "was", the row as it was
+ * before the choice (`prev`; without it, the item's own suggestion):
+ *
+ * On the 26 Aug copy with the Stage 14 test decisions (names shortened):
+ *   rebuilt, showing the suggestion (N24S16M to Hobson)
+ *     "Quantity is now 1,023, rebuilt on HOBSON's 24-day lead time (was
+ *     2,361 on this item's own 107 days)."
+ *   back with the usual supplier
+ *     "Quantity is now 2,361, built on this item's own 107-day lead time
+ *     (was 1,023 on HOBSON's 24 days)."
+ *   typed       WQ12503S16 to Hanova: "Quantity stays 600, the number you
+ *               typed. The suggestion for HANOVA is 1,872."
+ *   manual      ST20170G to Hanova: "Quantity stays 9,259 — your hand-set
+ *               minimum doesn't depend on lead time."
+ *   no_lead     NL20G to Shanghai Screw-Fast: "Quantity stays 4,215. No lead
+ *               time is known for SHANGHAI SCREW-FAST, so it keeps the
+ *               suggestion built on HANOVA's 83 days."
+ *
+ * A server before 1.13 sends no suggestionFor: 1.12's quantityStaysMessage.
+ */
+export function quantityChangedMessage(row, prev = null, qty = (v) => Number(v).toLocaleString()) {
+  const l = row?.lines?.[0];
+  const sf = l?.rationale?.suggestionFor;
+  if (!sf || (row?.lines?.length ?? 0) !== 1) return quantityStaysMessage(row, qty);
+  const n = qty(row.qty ?? 0);
+  const name = sf.supplierName ?? l.supplierName ?? "this supplier";
+  if (typedQty(row)) return `Quantity stays ${n}, the number you typed. The suggestion for ${name} is ${qty(row.suggestedQty ?? 0)}.`;
+
+  /*
+   * What the row showed before, if it showed a suggestion of one supplier.
+   * Worked out before any case, so that after two picks in a row (Hobson's
+   * rebuilt 1,023, then a supplier with no lead known) the message says the
+   * quantity moved back to the item's own rather than that it stayed.
+   */
+  const pl = prev?.lines?.length === 1 ? prev.lines[0] : null;
+  const psf = pl?.rationale?.suggestionFor ?? null;
+  const was = pl && !typedQty(prev)
+    ? {
+        qty: prev.qty,
+        lead: psf && psf.basis === "rebuilt"
+          ? leadDaysPhrase(psf.supplierName ?? pl.supplierName, psf.leadDays, psf.leadSource, qty)
+          : usualLeadOf(psf ?? sf, qty),
+      }
+    : { qty: sf.usualQty, lead: usualLeadOf(sf, qty) };
+  const moved = Number(was.qty) !== Number(row.qty);
+  const wasText = moved ? ` (was ${qty(was.qty ?? 0)} on ${was.lead})` : "";
+  const nowOrStays = moved ? `Quantity is now ${n}${wasText}.` : `Quantity stays ${n}.`;
+
+  // A hand-set minimum, whichever supplier, the usual one included.
+  if (sf.basis === "manual" || (sf.basis === "usual" && l.rationale.leadStockBasis === "manual"))
+    return moved
+      ? `Quantity is now ${n}, built from your hand-set minimum, which doesn't depend on lead time${wasText}.`
+      : `Quantity stays ${n} — your hand-set minimum doesn't depend on lead time.`;
+  if (sf.basis === "no_lead")
+    return `${nowOrStays} No lead time is known for ${name}, so it keeps the suggestion built on ${usualLeadOf(sf, qty)}.`;
+  if (sf.basis === "no_window")
+    return `${nowOrStays} Your minimum doesn't record the lead time it was set from, so it can't be rebuilt for ${name}.`;
+  if (sf.basis === "same_lead")
+    return `${moved ? `Quantity is now ${n}${wasText}` : `Quantity stays ${n}`}: ${name}'s lead time is ${daysWord(qty, sf.leadDays)}, the same as the one the suggestion is built on.`;
+  if (sf.basis === "rebuilt") {
+    const on = leadPhrase(name, sf.leadDays, sf.leadSource, qty);
+    return moved ? `Quantity is now ${n}, rebuilt on ${on}${wasText}.` : `Quantity stays ${n}, rebuilt on ${on}.`;
+  }
+  // usual: the item's own suggestion, back with its usual supplier.
+  const on = leadPhrase(usualWho(sf), sf.usualLeadDays, sf.usualLeadSource, qty);
+  const built = on ? `built on ${on}` : `built on cover alone (no lead time is known for ${sf.usualSupplierName ?? "the usual supplier"})`;
+  return moved ? `Quantity is now ${n}, ${built}${wasText}.` : `Quantity stays ${n}, ${built}.`;
 }

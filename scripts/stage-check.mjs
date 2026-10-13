@@ -19,6 +19,7 @@
  *   npx tsx scripts/stage-check.mjs gap <after> [--base …]    (1.10: stock gaps, recomputed with the server's projection)
  *   node scripts/stage-check.mjs screen <after> [--before <before>] [--base …]   (1.11: gaps on screen: CSV, cart, Purchasing sort)
  *   node scripts/stage-check.mjs leads <capture> [--base …] | leads <before> <after> [--base …]   (1.12: lead time per supplier, old -> new)
+ *   node scripts/stage-check.mjs qty <capture> | qty <before> <after>   (1.13: suggested qty follows the chosen supplier, old -> new)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -1477,6 +1478,343 @@ export function leadRowText(r) {
   return `${String(r.number).padEnd(16)} ${String(r.supplierName ?? r.supplierUid).slice(0, 40).padEnd(41)} ${where.padEnd(20)} ${d(r.old)}${how(r.old, true)} -> ${next}`;
 }
 
+/* ---------- 1.13: suggested qty follows the chosen supplier ---------- */
+
+/*
+ * `stage-check qty`: every Order list line whose suggested or order quantity
+ * moves under 1.13's rule, old -> new. Allied answered Q5 on 13 Oct: when
+ * they pick a different supplier, "yes it should match with whatever
+ * supplier they pick". From 1.13 a line under any supplier but the item's
+ * usual (effective) one is rebuilt on that supplier's own lead (cart.ts
+ * supplierSuggestion): a window minimum's lead-time stock becomes the stored
+ * monthly burn × that lead ÷ 30.44, rounded up; a hand-set minimum stays; no
+ * minimum, weekly × that lead ÷ 7. A typed quantity never moves, only the
+ * suggestion beside it.
+ *
+ *   qty <capture>          the PREDICTED list from one 1.12 capture: run on
+ *                          prod's before deploy, it is the list Allied get
+ *                          before the numbers move. Re-derived here from
+ *                          the capture alone (an independent copy of the
+ *                          arithmetic in queries.ts suggestOrderQty), on the
+ *                          lead each line and option already shows (1.12's
+ *                          leadForSupplier).
+ *   qty <before> <after>   the acceptance: every line and option moved to
+ *                          exactly the prediction from <before> and nothing
+ *                          else did; the usual supplier's line is the item's
+ *                          own suggestion; typed quantities stayed; the
+ *                          header, supplier subtotals and cart.csv agree
+ *                          with the lines; every other /cart field is
+ *                          identical.
+ *
+ * A Chosen line from a 1.12 capture whose quantity equals its suggestion is
+ * read as showing the suggestion: 1.12 doesn't say whether that number was
+ * typed (1.13 adds qtyTyped). If one was, the after check names it.
+ */
+const DAYS_PER_MONTH = 365.25 / 12;
+const QTY_KEYS = ["suggestedQty", "qty", "estCost"];
+
+/**
+ * The suggestion for `item` under `supplierUid`, whose lead is `lead`
+ * ({ days, source }, as the line or option shows it), and its basis: the
+ * same six cases as cart.ts SuggestionFor.
+ */
+export function predictSupplierSuggestion(item, supplierUid, lead, targetCoverWeeks = 8) {
+  const usualQty = item?.suggestion?.qty ?? 0;
+  const min = item?.minStock ?? null;
+  const usualLeadDays = min?.basis === "manual" ? null : min?.basis === "window" ? min.leadTimeDays : item?.leadTimeDays ?? null;
+  if (item?.supplierUid == null || supplierUid === item.supplierUid) return { qty: usualQty, basis: "usual" };
+  if (min?.basis === "manual") return { qty: usualQty, basis: "manual" };
+  const days = lead?.days ?? null;
+  if (days == null) return { qty: usualQty, basis: "no_lead" };
+  if (min && (min.monthlyBurn == null || min.leadTimeDays == null)) return { qty: usualQty, basis: "no_window" };
+  if (days === usualLeadDays) return { qty: usualQty, basis: "same_lead" };
+  const weekly = unroundedWeekly(item.demand);
+  const free = item.qtyFreeStock;
+  const belowMin = (item.flags ?? []).includes("below_min");
+  if (free == null || !(weekly > 0 || belowMin)) return { qty: 0, basis: "rebuilt" };
+  // The same operations, in the same order, as minStock.ts suggestedMinimum
+  // and queries.ts suggestOrderQty, so the floats agree to the last bit.
+  const windowMin = days > 0 && (min?.monthlyBurn ?? 0) > 0 ? Math.ceil(min.monthlyBurn * (days / DAYS_PER_MONTH)) : 0;
+  const leadWeeks = days > 0 ? days / 7 : 0;
+  const leadStock = item.minLevel != null ? Math.max(windowMin, 0) : weekly * leadWeeks;
+  const raw = weekly * targetCoverWeeks + leadStock - free - (item.incomingQty ?? 0);
+  const m = item.reorderQty;
+  const qty = raw <= 0 ? 0 : m && m > 0 ? Math.ceil(raw / m) * m : Math.ceil(raw);
+  return { qty, basis: "rebuilt", leadStock };
+}
+
+/*
+ * Whether a line's quantity is one Allied typed. 1.13 says (qtyTyped);
+ * from a 1.12 capture: an Edited line, a carried quantity, a split part
+ * (always typed in Compare), or a Chosen line not at its suggestion.
+ */
+function lineTyped(l) {
+  if (typeof l.qtyTyped === "boolean") return l.qtyTyped;
+  return l.state === "edited" || l.state === "split" || !!l.qtyCarriedFrom || Number(l.qty) !== Number(l.suggestedQty);
+}
+
+const unitCost = (l) => l.lastCost ?? l.averageCost ?? 0;
+const sameMoney = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) < 1e-6;
+
+/** Every line and option of one /cart with its predicted 1.13 suggestion: { lines, options }. */
+export function predictQty({ items, cart, targetCoverWeeks = 8 }) {
+  const byUid = new Map(items.map((i) => [i.uid, i]));
+  const lines = [];
+  const options = [];
+  const seen = new Set();
+  for (const g of cart?.suppliers ?? [])
+    for (const l of g.lines ?? []) {
+      const it = byUid.get(l.itemUid);
+      const lead = { days: l.leadTimeDays ?? null, source: l.leadTimeSource ?? null };
+      const p = it ? predictSupplierSuggestion(it, l.supplierUid, lead, targetCoverWeeks) : { qty: l.suggestedQty, basis: "usual" };
+      const typed = lineTyped(l);
+      const qty = typed ? l.qty : p.qty;
+      lines.push({
+        itemUid: l.itemUid,
+        number: l.number,
+        supplierUid: l.supplierUid,
+        supplierName: l.supplierName,
+        basis: p.basis,
+        minBasis: it?.minStock?.basis ?? "lead",
+        usualLead: it?.minStock?.basis === "window" ? it.minStock.leadTimeDays : it?.leadTimeDays ?? null,
+        lead: lead.days,
+        typed,
+        ambiguous: typeof l.qtyTyped !== "boolean" && l.state === "selected" && !typed,
+        old: { suggestedQty: l.suggestedQty, qty: l.qty, estCost: l.estCost },
+        new: { suggestedQty: p.qty, qty, estCost: qty * unitCost(l) },
+      });
+      if (seen.has(l.itemUid)) continue;
+      seen.add(l.itemUid);
+      for (const o of l.options ?? []) {
+        const q = it ? predictSupplierSuggestion(it, o.supplierUid, { days: o.leadTimeDays ?? null, source: o.leadTimeSource ?? null }, targetCoverWeeks) : null;
+        options.push({ itemUid: l.itemUid, number: l.number, supplierUid: o.supplierUid, supplierName: o.supplierName, basis: q?.basis ?? null, suggestedQty: q?.qty ?? null, suggestedEstCost: q ? q.qty * (o.lastCost ?? l.averageCost ?? 0) : null });
+      }
+    }
+  const moved = (r) => r.old.suggestedQty !== r.new.suggestedQty || r.old.qty !== r.new.qty || !sameMoney(r.old.estCost, r.new.estCost);
+  return { lines, options, changed: lines.filter(moved).sort(byNumberThenSupplier) };
+}
+
+/** The header ends exactly as cart.ts requirementRange adds them up, from the lines. */
+function requirementFromLines(cart) {
+  const perItem = new Map();
+  let est = 0;
+  for (const g of cart?.suppliers ?? [])
+    for (const l of g.lines ?? []) {
+      est += l.estCost;
+      const seen = perItem.get(l.itemUid) ?? { split: null, others: [] };
+      if (l.state === "split") seen.split = (seen.split ?? 0) + l.estCost;
+      else seen.others.push(l.estCost);
+      perItem.set(l.itemUid, seen);
+    }
+  let low = 0;
+  let high = 0;
+  for (const { split, others } of perItem.values()) {
+    const c = split == null ? others : [split, ...others];
+    low += Math.min(...c);
+    high += Math.max(...c);
+  }
+  const r2 = (v) => Number(v.toFixed(2));
+  return { requirementLow: r2(low), requirementHigh: r2(high), estimatedCost: r2(est) };
+}
+
+/*
+ * /cart without what 1.13 may move, for "nothing else moved": every line's
+ * quantities, qtyTyped and rationale.suggestionFor, the whole rationale of a
+ * line rebuilt on its own supplier's lead (`rebuiltLine`), the options' new
+ * fields and their qty, the subtotals and header ends, and the quantities
+ * the decisions and pick-conflict lists repeat. Each of those is checked
+ * against the prediction or the lines on its own.
+ */
+function cartWithoutQty(cart, rebuiltLine) {
+  const keys = new Set(["suggestedQty", "qty", "estCost", "qtyTyped"]);
+  const strip = (o, drop) => Object.fromEntries(Object.entries(o).filter(([k]) => !drop.has(k)));
+  const optionDrop = new Set(["qty", "suggestedQty", "suggestedEstCost", "suggestionBasis"]);
+  return {
+    ...strip(cart ?? {}, new Set(["generatedAt", "estimatedCost", "requirementLow", "requirementHigh"])),
+    suppliers: (cart?.suppliers ?? []).map((g) => ({
+      ...strip(g, new Set(["estimatedCost", "lines"])),
+      // Lines are sorted by cost within a supplier, so a moved cost can reorder
+      // them: paired by item + supplier in the diff, never by position.
+      lines: (g.lines ?? []).map((l) => {
+        const { suggestionFor: _sf, ...rest } = l.rationale ?? {};
+        return {
+          ...strip(l, keys),
+          rationale: rebuiltLine(l) ? null : rest,
+          options: (l.options ?? []).map((o) => strip(o, optionDrop)),
+        };
+      }),
+    })),
+    decisions: (cart?.decisions ?? []).map((d) => ({ ...d, suppliers: (d.suppliers ?? []).map((x) => strip(x, new Set(["qty"]))) })),
+    pickConflicts: (cart?.pickConflicts ?? []).map((c) => ({ ...c, keptSuppliers: (c.keptSuppliers ?? []).map((x) => strip(x, new Set(["qty"]))) })),
+  };
+}
+
+/** cart.csv's rows and notes, for the 1.13 checks. */
+function csvQtyChecks(beforeCsv, afterCsv, changed, afterCart) {
+  const a = csvRecords(beforeCsv);
+  const b = csvRecords(afterCsv);
+  const want = new Map(changed.map((r) => [`${r.number}|${r.supplierName}`, r]));
+  const bad = [];
+  let movedRows = 0;
+  for (const k of new Set([...Object.keys(a.rows), ...Object.keys(b.rows)])) {
+    const ra = a.rows[k];
+    const rb = b.rows[k];
+    if (!ra || !rb) {
+      bad.push(`${k}: row ${ra ? "gone" : "added"}`);
+      continue;
+    }
+    for (const h of Object.keys(ra))
+      if (h !== "Order qty" && h !== "Est cost" && ra[h] !== rb[h]) bad.push(`${k}: ${h} ${ra[h]} -> ${rb[h]}`);
+    const moved = ra["Order qty"] !== rb["Order qty"] || ra["Est cost"] !== rb["Est cost"];
+    const p = want.get(k);
+    if (moved) movedRows++;
+    if (moved && !p) bad.push(`${k}: Order qty / Est cost moved, not predicted`);
+    if (p && (rb["Order qty"] !== csvCell(p.new.qty) || rb["Est cost"] !== csvCell(p.new.estCost)))
+      bad.push(`${k}: ${rb["Order qty"]} / ${rb["Est cost"]} vs predicted ${csvCell(p.new.qty)} / ${csvCell(p.new.estCost)}`);
+  }
+  // Notes: only a moved supplier's block heading may change, to its new subtotal.
+  const movedSuppliers = new Set(changed.filter((r) => r.old.estCost !== r.new.estCost).map((r) => r.supplierName));
+  const heading = (n) => [...movedSuppliers].find((name) => n.startsWith(name));
+  const keptA = a.notes.filter((n) => !heading(n)).sort();
+  const keptB = b.notes.filter((n) => !heading(n)).sort();
+  if (JSON.stringify(keptA) !== JSON.stringify(keptB)) bad.push("a note or block heading other than a moved supplier's changed");
+  for (const g of afterCart?.suppliers ?? [])
+    if (movedSuppliers.has(g.supplierName) && !b.notes.some((n) => n.startsWith(g.supplierName) && n.endsWith(`estimated ${g.estimatedCost.toFixed(2)}`)))
+      bad.push(`${g.supplierName}: block heading doesn't carry its new subtotal ${g.estimatedCost.toFixed(2)}`);
+  return { bad, movedRows };
+}
+
+/** Every 1.13 check as { check, ok, detail }, and the rows to print. */
+export function qtyChecks({ before, after = null, items, afterItems = null, targetCoverWeeks = 8, cartCsv = null, beforeCartCsv = null }) {
+  const predicted = predictQty({ items, cart: before, targetCoverWeeks });
+  const out = [];
+  const add = (check, bad, detail) =>
+    out.push({ check, ok: bad.length === 0, detail: bad.length ? `${bad.length}: ${bad.slice(0, 5).join("; ")}` : detail });
+  const label = (r) => `${r.number} under ${r.supplierName ?? r.supplierUid}`;
+  const key = (r) => `${r.itemUid}|${r.supplierUid}`;
+  const ambiguous = predicted.changed.filter((r) => r.ambiguous);
+  if (!after) {
+    out.push({
+      check: "every Chosen line read as typed or not",
+      ok: true,
+      detail: ambiguous.length
+        ? `${ambiguous.length} Chosen at its suggestion, read as not typed (a 1.12 capture can't say): ${ambiguous.map(label).join("; ")}`
+        : "none ambiguous",
+    });
+    return { checks: out, rows: predicted.changed, mode: "predicted" };
+  }
+  const want = new Map(predicted.lines.map((r) => [key(r), r]));
+  const byUid = new Map((afterItems ?? items).map((i) => [i.uid, i]));
+  const afterLines = [];
+  for (const g of after?.suppliers ?? []) for (const l of g.lines ?? []) afterLines.push(l);
+  const actual = afterLines.filter((l) => {
+    const p = want.get(key(l));
+    return p && (p.old.suggestedQty !== l.suggestedQty || p.old.qty !== l.qty || !sameMoney(p.old.estCost, l.estCost));
+  });
+  add("the same lines before and after", afterLines.length === predicted.lines.length && afterLines.every((l) => want.has(key(l))) ? [] : ["lines differ"], `${afterLines.length} lines`);
+  add(
+    "each line's suggested, order qty and est. cost = the prediction",
+    afterLines
+      .filter((l) => want.has(key(l)))
+      .filter((l) => {
+        const p = want.get(key(l));
+        return l.suggestedQty !== p.new.suggestedQty || l.qty !== p.new.qty || !sameMoney(l.estCost, p.new.estCost);
+      })
+      .map((l) => {
+        const p = want.get(key(l));
+        return `${label(l)}: ${l.suggestedQty}/${l.qty} vs ${p.new.suggestedQty}/${p.new.qty}`;
+      }),
+    `${predicted.changed.length} predicted to move, ${actual.length} moved`,
+  );
+  add(
+    "the usual supplier's line is the item's own suggestion",
+    afterLines
+      .filter((l) => byUid.get(l.itemUid)?.supplierUid == null || byUid.get(l.itemUid).supplierUid === l.supplierUid)
+      .filter((l) => l.suggestedQty !== (byUid.get(l.itemUid)?.suggestion?.qty ?? 0))
+      .map(label),
+    `${afterLines.filter((l) => byUid.get(l.itemUid)?.supplierUid == null || byUid.get(l.itemUid).supplierUid === l.supplierUid).length} lines`,
+  );
+  add(
+    "typed quantities never move",
+    afterLines.filter((l) => want.get(key(l))?.typed && l.qty !== want.get(key(l)).old.qty).map(label),
+    `${predicted.lines.filter((r) => r.typed).length} typed lines`,
+  );
+  add(
+    "qtyTyped and rationale.suggestionFor on every line, its basis as predicted",
+    afterLines
+      .filter((l) => typeof l.qtyTyped !== "boolean" || l.rationale?.suggestionFor?.basis !== want.get(key(l))?.basis || l.qtyTyped !== want.get(key(l))?.typed)
+      .map((l) => `${label(l)}: ${l.rationale?.suggestionFor?.basis ?? "none"} vs ${want.get(key(l))?.basis}`),
+    `${afterLines.length} lines`,
+  );
+  const wantOpt = new Map(predicted.options.map((o) => [key(o), o]));
+  const optBad = [];
+  let optCount = 0;
+  for (const l of afterLines)
+    for (const o of l.options ?? []) {
+      optCount++;
+      const p = wantOpt.get(`${l.itemUid}|${o.supplierUid}`);
+      if (!p || o.suggestedQty !== p.suggestedQty || o.suggestionBasis !== p.basis || !sameMoney(o.suggestedEstCost, p.suggestedEstCost))
+        optBad.push(`${l.number} option ${o.supplierName}: ${o.suggestedQty} (${o.suggestionBasis}) vs ${p?.suggestedQty} (${p?.basis})`);
+      const listed = afterLines.find((x) => x.itemUid === l.itemUid && x.supplierUid === o.supplierUid);
+      if (listed && o.qty !== listed.qty) optBad.push(`${l.number} option ${o.supplierName}: qty ${o.qty} vs its line's ${listed.qty}`);
+    }
+  add("each compare option's own suggestion = the prediction; an option in the cart shows its line's qty", optBad, `${optCount} options (each line carries its item's)`);
+  const totalsBad = [];
+  for (const g of after?.suppliers ?? []) {
+    const sum = (g.lines ?? []).reduce((a, l) => a + l.estCost, 0);
+    if (!sameMoney(sum, g.estimatedCost)) totalsBad.push(`${g.supplierName}: subtotal ${g.estimatedCost} vs lines ${sum}`);
+  }
+  const ends = requirementFromLines(after);
+  for (const k of ["estimatedCost", "requirementLow", "requirementHigh"])
+    if (ends[k] !== after?.[k]) totalsBad.push(`${k} ${after?.[k]} vs ${ends[k]} from the lines`);
+  add("supplier subtotals and the header add up from the lines", totalsBad, `estimated ${before?.estimatedCost} -> ${after?.estimatedCost}, ${after?.suppliers?.length ?? 0} suppliers`);
+  if (afterItems) {
+    const itemsBad = items.filter((i) => JSON.stringify(i.suggestion) !== JSON.stringify(byUid.get(i.uid)?.suggestion)).map((i) => i.number);
+    add("every item's own suggestion identical (/items)", itemsBad, `${items.length} items`);
+  }
+  const rebuilt = (l) => want.get(key(l))?.basis === "rebuilt";
+  const diffs = [];
+  diffValue("cart.json", cartWithoutQty(before, rebuilt), cartWithoutQty(after, rebuilt), "", "", diffs);
+  add("every other /cart field identical", diffs.map((d) => d.path), "lead times, costs, states, stock, options, cards, conflicts");
+  if (cartCsv != null && beforeCartCsv != null) {
+    const { bad, movedRows } = csvQtyChecks(beforeCartCsv, cartCsv, predicted.changed, after);
+    add("cart.csv moves only on the predicted lines, to the predicted qty and cost", bad, `${movedRows} rows moved`);
+  }
+  // What the after capture shows, not the prediction: where the two differ
+  // the printed list says what happened, and the check above says it failed.
+  const shown = actual.map((l) => ({ ...want.get(key(l)), new: { suggestedQty: l.suggestedQty, qty: l.qty, estCost: l.estCost } }));
+  return { checks: out, rows: shown.sort(byNumberThenSupplier), mode: "actual" };
+}
+
+/** `qty <capture>` or `qty <before> <after>`. */
+export function qtyCheck(beforeDir, afterDir = null) {
+  const read = (d, f) => (d && existsSync(join(d, f)) ? readFileSync(join(d, f), "utf8") : null);
+  const json = (d, f) => (read(d, f) ? JSON.parse(read(d, f)) : null);
+  const itemsFile = json(beforeDir, "items.json");
+  return qtyChecks({
+    before: json(beforeDir, "cart.json"),
+    after: afterDir ? json(afterDir, "cart.json") : null,
+    // The before capture's items: the rule is decided on what was usual then.
+    items: itemsFile.items,
+    afterItems: afterDir ? json(afterDir, "items.json")?.items ?? null : null,
+    targetCoverWeeks: itemsFile.targetCoverWeeks ?? 8,
+    cartCsv: afterDir ? read(afterDir, "cart.csv") : null,
+    beforeCartCsv: read(beforeDir, "cart.csv"),
+  });
+}
+
+/** One printed row: "N24S16M  HOBSON …  window min, lead 107 -> 24 d  suggested 2,850 -> 1,160  qty 2,850 -> 1,160  $2,743.83 -> $1,116.78". */
+export function qtyRowText(r) {
+  const n = (v) => Number(v ?? 0).toLocaleString("en-NZ");
+  const $ = (v) => `$${Number(v ?? 0).toLocaleString("en-NZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const basis = r.minBasis === "window" ? "window min" : r.minBasis === "manual" ? "hand-set min" : "no min";
+  const qtyText =
+    r.typed && r.new.qty === r.old.qty
+      ? `qty ${n(r.old.qty)} (typed, stays)`
+      : `qty ${n(r.old.qty)} -> ${n(r.new.qty)}${r.typed ? " (typed: should not move)" : ""}`;
+  return `${String(r.number).padEnd(16)} ${String(r.supplierName ?? r.supplierUid).slice(0, 40).padEnd(41)} ${basis.padEnd(12)} lead ${r.usualLead ?? "none"} -> ${r.lead ?? "none"} d  suggested ${n(r.old.suggestedQty)} -> ${n(r.new.suggestedQty)}  ${qtyText}  ${$(r.old.estCost)} -> ${$(r.new.estCost)}${r.ambiguous ? "  [Chosen at its suggestion: read as not typed]" : ""}`;
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -1588,6 +1926,15 @@ async function main() {
     process.exit(checks.every((c) => c.ok) ? 0 : 1);
   }
 
+  if (command === "qty" && (args.length === 1 || args.length === 2) && !options.allow && !options.before && !options.base) {
+    // Read from the captures alone: no request is sent.
+    const { checks, rows, mode } = qtyCheck(args[0], args[1] ?? null);
+    console.log(`${rows.length} Order list line(s) whose suggested or order quantity ${mode === "predicted" ? "1.13 will move" : "moved"}:`);
+    for (const r of rows) console.log(`  ${qtyRowText(r)}`);
+    for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
+    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  }
+
   if (command === "splits" && args.length === 1 && !options.allow && !options.base) {
     const checks = splitCheck(args[0], { beforeDir: options.before ?? null });
     for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
@@ -1639,7 +1986,8 @@ async function main() {
       "  node scripts/stage-check.mjs schedule <after> [--base local|prod|URL]\n" +
       "  npx tsx scripts/stage-check.mjs gap <after> [--base local|prod|URL]\n" +
       "  node scripts/stage-check.mjs screen <after> [--before <before>] [--base local|prod|URL]\n" +
-      "  node scripts/stage-check.mjs leads <capture> [--base local|prod|URL]   |   leads <before> <after> [--base local|prod|URL]",
+      "  node scripts/stage-check.mjs leads <capture> [--base local|prod|URL]   |   leads <before> <after> [--base local|prod|URL]\n" +
+      "  node scripts/stage-check.mjs qty <capture>   |   qty <before> <after>",
   );
 }
 

@@ -61,7 +61,7 @@ test("leadForSupplier: an item with no usual supplier keeps its own lead on ever
   assert.equal(leadForSupplier(orphan, "HOBSON", SUPPLIER_LEAD)?.source, "item");
 });
 
-test("cart.ts: every line and option takes its lead from leadForSupplier; the quantity never reads it", async () => {
+test("cart.ts: every line and option takes its lead from leadForSupplier; the quantity reads it only through supplierSuggestion (1.13)", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/insights/cart.ts", import.meta.url), "utf8");
   const body = src.slice(src.indexOf("export async function purchaseCart"), src.indexOf("export function requirementRange"));
@@ -69,9 +69,12 @@ test("cart.ts: every line and option takes its lead from leadForSupplier; the qu
   assert.match(body, /const leadFor = \(item: ItemComputed, supplierUid: string\) => leadForSupplier\(item, supplierUid, supplierLead\);/);
   assert.doesNotMatch(body, /leadTimeItemDays/);
   assert.equal((body.match(/leadTimeSource: lt\?\.source \?\? null/g) ?? []).length, 2);
-  // The suggestion and the lead it was built on are the item's own.
+  // The item's own suggestion is still at hand; from 1.13 each supplier's
+  // own is supplierSuggestion on that supplier's lead (test/suggest-qty.test.ts),
+  // and the lead it was built on is the item's unless the line was rebuilt.
   assert.match(body, /const suggested = item\.suggestion\?\.qty \?\? 0;/);
-  assert.match(body, /leadTimeDaysUsed: item\.leadTimeDays,/);
+  assert.match(body, /supplierSuggestion\(item, o\.supplierUid, o\.supplierName, leadFor\(item, o\.supplierUid\)\)/);
+  assert.match(body, /leadTimeDaysUsed: rebuilt \? own\.suggestionFor\.leadDays : item\.leadTimeDays,/);
 });
 
 /* ---------- stage-check leads ---------- */

@@ -6,7 +6,17 @@ import { cartStateAll, cartStateOf, inTransaction, logChange } from "./changeLog
 import { supplierLeadTimes } from "./leadTimes.js";
 import type { SupplierLead } from "./leadTimes.js";
 import type { Gap } from "./projection.js";
-import { computedItems, resolveWindow, snapshotState, type DemandWindow, type ItemComputed } from "./queries.js";
+import { suggestedMinimum } from "./minStock.js";
+import {
+  computedItems,
+  leadSourceLabel,
+  resolveWindow,
+  snapshotState,
+  suggestionInputs,
+  suggestOrderQty,
+  type DemandWindow,
+  type ItemComputed,
+} from "./queries.js";
 
 /**
  * The purchasing cart (P5 + P6).
@@ -445,10 +455,10 @@ export interface LineLead {
  * usual one" for, and its "No known supplier" line is the one the suggestion
  * is built for.
  *
- * Display only. The suggested quantity, rationale.leadTimeDaysUsed and every
- * cost are the item's own and do not read this; whether the quantity should
- * follow the chosen supplier's lead is the next release. ETAs never read it
- * either (incoming.ts uses the PO supplier's lead).
+ * From 1.13 the suggested quantity of a line under any other supplier is
+ * rebuilt on this lead (supplierSuggestion); the usual supplier's line keeps
+ * the item's own suggestion. ETAs never read it (incoming.ts uses the PO
+ * supplier's lead).
  */
 export function leadForSupplier(
   item: Pick<ItemComputed, "leadTimeItemDays" | "supplierUid">,
@@ -466,6 +476,131 @@ export function leadForSupplier(
     orders: s.orders,
     sameDayExcluded: s.sameDayExcluded,
     source: s.setByAllied ? "supplier" : "measured",
+  };
+}
+
+/**
+ * What one line's suggested quantity is built on (1.13), carried on the
+ * line as rationale.suggestionFor and read by Why this quantity and the
+ * message after a supplier change.
+ *
+ *   usual      the item's usual (effective) supplier, or an item with none:
+ *              the item's own suggestion, exactly as computeItem gave it
+ *   rebuilt    another supplier: rebuilt on that supplier's own lead
+ *   same_lead  another supplier whose lead equals the one the item's own
+ *              suggestion is built on, so nothing to rebuild
+ *   manual     a minimum typed by hand sets the lead-time stock, and it
+ *              doesn't depend on any lead time
+ *   no_lead    another supplier with no lead time known: the item's own
+ *              suggestion stands, and the line says so
+ *   no_window  a window minimum stored without the burn or lead it was set
+ *              from: the item's own suggestion stands. writeWindowMinimum
+ *              always stores both, so this is a guard, not a case seen
+ */
+export interface SuggestionFor {
+  supplierUid: string;
+  supplierName: string | null;
+  basis: "usual" | "rebuilt" | "same_lead" | "manual" | "no_lead" | "no_window";
+  /** The lead this line's suggestion is built on; null where none. */
+  leadDays: number | null;
+  /** Where that lead came from, as leadTimeSource. */
+  leadSource: LineLead["source"] | null;
+  /**
+   * The item's own suggestion (its usual supplier's), the lead it is built
+   * on (a window minimum's: the lead it was set from) and where that lead
+   * came from, null where it can't be said (a minimum set from a lead that
+   * is no longer the item's).
+   */
+  usualQty: number;
+  usualSupplierName: string | null;
+  usualLeadDays: number | null;
+  usualLeadSource: LineLead["source"] | null;
+}
+
+/*
+ * The suggested quantity for one item under one supplier (1.13). Allied
+ * answered Q5 on 13 Oct: when they pick a different supplier, "yes it should
+ * match with whatever supplier they pick". Until 1.13 every line carried the
+ * item's own suggestion, built on its usual supplier's lead whoever the line
+ * was with. Now a line under any other supplier is rebuilt on that
+ * supplier's own lead (leadForSupplier: Allied's figure on the Suppliers
+ * page, else the measured median), through the same suggestOrderQty
+ * computeItem uses, with only the lead-time stock changed:
+ *
+ *   window minimum   the minimum this window would give at the chosen lead:
+ *                    the stored monthly burn × lead ÷ 30.44, rounded up
+ *                    (minStock.ts suggestedMinimum on the row's own
+ *                    monthly_burn). The stored burn, not today's
+ *                    consumption: at the lead it was set from it gives the
+ *                    stored minimum back exactly (all 289 window minimums
+ *                    in the f2148b2 prod capture, 14 Oct NZ), where
+ *                    today's would drift, so the usual supplier's lead and
+ *                    a pick at that same lead can never disagree
+ *   hand-set minimum unchanged; a typed minimum has no lead time in it
+ *   no minimum       weekly × the chosen lead ÷ 7
+ *
+ * then weekly × 8 + lead-time stock − free stock − on order, rounded up to
+ * MYOB's reorder multiple as before. No MOQ or pack size is stored, and Allied
+ * named none. Free stock, on order, demand and the minimum are the item's,
+ * the same on every line. On the 26 Aug copy, N24S16M with a 6-month
+ * minimum of 1,725 (490.67 a month, from its own 107 days) picked to Hobson
+ * (24 days measured) gets 490.67 × 24 ÷ 30.44 = 387 of lead-time stock and
+ * suggests 1,023 where Shandong Tengda's line suggests 2,361.
+ *
+ * The usual supplier's line keeps item.suggestion exactly, so everything
+ * that never involved a pick reads as it did. A supplier with no known lead
+ * keeps it too, and says so (no_lead), rather than inventing a zero wait.
+ * Typed quantities never come here: the cart shows a typed or carried qty
+ * over any suggestion, so only lines showing the suggestion move.
+ */
+export function supplierSuggestion(
+  item: ItemComputed,
+  supplierUid: string,
+  supplierName: string | null,
+  lead: LineLead | undefined,
+): { qty: number; suggestion: ItemComputed["suggestion"]; suggestionFor: SuggestionFor } {
+  const usualQty = item.suggestion?.qty ?? 0;
+  const min = item.minStock;
+  const usualLeadDays = min?.basis === "manual" ? null : min?.basis === "window" ? min.leadTimeDays : item.leadTimeDays;
+  const usualLeadSource = usualLeadDays != null && usualLeadDays === item.leadTimeDays ? item.leadTimeSource : null;
+  const leadDays = lead?.days ?? null;
+  const usual = { usualQty, usualSupplierName: item.supplierName, usualLeadDays, usualLeadSource };
+  const keep = (basis: SuggestionFor["basis"], days = usualLeadDays, source = usualLeadSource) => ({
+    qty: usualQty,
+    suggestion: item.suggestion,
+    suggestionFor: {
+      supplierUid,
+      supplierName,
+      basis,
+      leadDays: days,
+      leadSource: days == null ? null : source,
+      ...usual,
+    },
+  });
+  if (item.supplierUid == null || supplierUid === item.supplierUid) return keep("usual");
+  if (min?.basis === "manual") return keep("manual", null, null);
+  if (leadDays == null) return keep("no_lead", null, null);
+  if (min && (min.monthlyBurn == null || min.leadTimeDays == null)) return keep("no_window");
+  if (leadDays === usualLeadDays) return keep("same_lead", leadDays, lead?.source ?? null);
+
+  const worked = suggestOrderQty({
+    ...suggestionInputs(item),
+    leadDays,
+    leadSource: leadSourceLabel(lead?.source ?? null, lead?.orders ?? 0),
+    // suggestedMinimum is null at a zero lead or burn: no lead-time stock.
+    ...(min ? { minLeadStock: suggestedMinimum(min.monthlyBurn ?? 0, leadDays) ?? 0 } : {}),
+  });
+  return {
+    qty: worked?.qty ?? 0,
+    suggestion: worked,
+    suggestionFor: {
+      supplierUid,
+      supplierName,
+      basis: "rebuilt",
+      leadDays,
+      leadSource: lead?.source ?? null,
+      ...usual,
+    },
   };
 }
 
@@ -545,9 +680,20 @@ export interface CartLine {
    * 422 KB before 1.11).
    */
   gap?: Omit<Gap, "weeks"> | null;
+  /**
+   * The suggestion for this line's supplier: the item's own on its usual
+   * supplier's line, and from 1.13 rebuilt on the supplier's own lead on any
+   * other (supplierSuggestion; rationale.suggestionFor says which).
+   */
   suggestedQty: number;
   /** Allied's number when they have set one, otherwise the suggestion. */
   qty: number;
+  /**
+   * The quantity is one Allied typed (1.13): saved on this line, or carried
+   * from another supplier. Such a quantity never follows a suggestion.
+   * Optional: absent from a server before 1.13.
+   */
+  qtyTyped?: boolean;
   state: CartState;
   note: string | null;
   estCost: number;
@@ -566,7 +712,17 @@ export interface CartLine {
   kitForm: string | null;
   kitDoubleOrder: boolean;
   otherSuppliers: { supplierUid: string; supplierName: string | null }[];
-  rationale: Record<string, number | string | null>;
+  rationale: LineRationale;
+}
+
+/**
+ * The working behind a line's quantity: the suggestion's own rationale
+ * (queries.ts suggestOrderQty) plus the cart's fields, and from 1.13
+ * suggestionFor, what this line's suggestion is built on.
+ */
+export interface LineRationale {
+  [key: string]: number | string | null | SuggestionFor | undefined;
+  suggestionFor?: SuggestionFor;
 }
 
 /** One supplier in the compare drawer, priced and timed for this item. */
@@ -580,10 +736,25 @@ export interface CartOption extends SupplierOption {
   leadTimeSource?: LineLead["source"] | null;
   /** The decision saved against this supplier, if any. */
   state: CartState | null;
-  /** The saved quantity, else the suggestion. */
+  /**
+   * The quantity on this order from this supplier: the line's where the item
+   * sits under it, else the saved quantity, else the item's own suggestion
+   * (as before 1.13; the drawer shows it only for a supplier in the cart).
+   */
   qty: number;
   /** The item currently sits under this supplier in the cart. */
   inCart: boolean;
+  /*
+   * This supplier's own suggestion (1.13), as its line would show it, so
+   * Compare can set suppliers side by side on their own leads: the item's
+   * own under its usual supplier, rebuilt on this supplier's lead under any
+   * other. suggestedEstCost is that quantity at what the line would cost
+   * (this supplier's last price, else the item's average), and
+   * suggestionBasis is SuggestionFor's basis. Optional: absent before 1.13.
+   */
+  suggestedQty?: number;
+  suggestedEstCost?: number;
+  suggestionBasis?: SuggestionFor["basis"];
 }
 
 export interface CartSupplierGroup {
@@ -663,6 +834,10 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
    * line priced off MYOB's average_cost, which for a built item is the cost of
    * having built it, not a purchase price. The requirement is real and is not
    * lost: it appears on Products & BOM as a quantity to build.
+   *
+   * Still the item's own suggestion from 1.13: a saved pick of a slower
+   * supplier doesn't bring in an item whose usual supplier's suggestion is 0
+   * (RELEASING.md "What 1.13 changed"); that would be a further numbers change.
    */
   const needing = items.filter(
     (i) =>
@@ -735,14 +910,30 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
       removedItems.push({ itemUid: item.uid, number: item.number, name: item.name, how: "struck" });
 
     const suggested = item.suggestion?.qty ?? 0;
+    /*
+     * Each supplier's own suggestion (1.13): the item's own under its usual
+     * supplier, rebuilt on the supplier's lead under any other
+     * (supplierSuggestion). Worked out once per supplier, so a line, its
+     * compare option and the pick-conflict list never disagree.
+     */
+    const ownSuggestion = new Map<string, ReturnType<typeof supplierSuggestion>>();
+    const suggestionFor = (o: SupplierOption) => {
+      let s = ownSuggestion.get(o.supplierUid);
+      if (!s) {
+        s = supplierSuggestion(item, o.supplierUid, o.supplierName, leadFor(item, o.supplierUid));
+        ownSuggestion.set(o.supplierUid, s);
+      }
+      return s;
+    };
     const listed = new Set(plan.lines.map((l) => l.option.supplierUid));
     // What each listed line shows, so the compare drawer never disagrees with it.
     const shownQty = new Map(
-      plan.lines.map((l) => [l.option.supplierUid, l.carried ? l.carried.qty : (l.saved?.qty ?? suggested)]),
+      plan.lines.map((l) => [l.option.supplierUid, l.carried ? l.carried.qty : (l.saved?.qty ?? suggestionFor(l.option).qty)]),
     );
     const compare: CartOption[] = options.map((o) => {
       const s = saved.get(o.supplierUid);
       const lt = leadFor(item, o.supplierUid);
+      const own = suggestionFor(o);
       return {
         ...o,
         lastCost: lastCost.get(`${item.uid}|${o.supplierUid}`) ?? null,
@@ -754,15 +945,21 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         state: s?.state ?? null,
         qty: shownQty.get(o.supplierUid) ?? s?.qty ?? suggested,
         inCart: listed.has(o.supplierUid),
+        suggestedQty: own.qty,
+        suggestedEstCost: own.qty * (lastCost.get(`${item.uid}|${o.supplierUid}`) ?? item.averageCost ?? 0),
+        suggestionBasis: own.suggestionFor.basis,
       };
     });
 
     for (const { option: o, saved: s, carried } of plan.lines) {
       const key = `${item.uid}|${o.supplierUid}`;
+      const own = suggestionFor(o);
       // A newer quantity typed under another supplier beats an older one here.
-      const qty = carried ? carried.qty : (s?.qty ?? suggested);
+      const qty = carried ? carried.qty : (s?.qty ?? own.qty);
       const cost = lastCost.get(key) ?? item.averageCost ?? 0;
       const lt = leadFor(item, o.supplierUid);
+      // Built on this line's own supplier's lead (1.13), where it was rebuilt.
+      const rebuilt = own.suggestionFor.basis === "rebuilt";
 
       const line: CartLine = {
         itemUid: item.uid,
@@ -797,8 +994,9 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         coverBelowLeadTime: item.coverBelowLeadTime,
         riskScore: item.risk.score,
         gap: lineGap((item as { gap?: Gap | null }).gap ?? null),
-        suggestedQty: suggested,
+        suggestedQty: own.qty,
         qty,
+        qtyTyped: carried != null || s?.qty != null,
         state: s?.state ?? (carried ? "edited" : "suggested"),
         note: s?.note ?? null,
         estCost: qty * cost,
@@ -810,7 +1008,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
           .filter((x) => x.option !== o)
           .map((x) => ({ supplierUid: x.option.supplierUid, supplierName: x.option.supplierName })),
         rationale: {
-          ...(item.suggestion?.rationale ?? {}),
+          ...(own.suggestion?.rationale ?? {}),
           weeklyDemand: item.demand.weekly,
           demandWindowMonths: item.demand.windowMonths,
           demandBasis: item.demand.basis,
@@ -838,12 +1036,25 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
            * usual supplier's line (leadForSupplier); the suggestion, and so
            * leadTimeDaysUsed, is still built on it whichever line it is.
            */
-          leadTimeDaysUsed: item.leadTimeDays,
-          leadTimeUsedFor: item.supplierName,
-          leadTimeUsedSource: item.leadTimeSource,
+          /*
+           * From 1.13 a line under another supplier is rebuilt on that
+           * supplier's own lead (supplierSuggestion), and then these three
+           * name it: the field still means "the lead the suggestion was built
+           * on", and on such a line that is the line's. On the usual
+           * supplier's line, and wherever the item's own suggestion stands
+           * (a hand-set minimum, no lead known, the same lead), they are the
+           * item's as before. The min* fields stay facts about the applied
+           * minimum, whichever line. suggestionFor says which case this is
+           * and what the item's own suggestion was; a tab from before 1.13
+           * ignores it.
+           */
+          leadTimeDaysUsed: rebuilt ? own.suggestionFor.leadDays : item.leadTimeDays,
+          leadTimeUsedFor: rebuilt ? o.supplierName : item.supplierName,
+          leadTimeUsedSource: rebuilt ? own.suggestionFor.leadSource : item.leadTimeSource,
           leadStockBasis: item.minStock?.basis ?? "lead",
           minWindowMonths: item.minStock?.windowMonths ?? null,
           minLeadTimeDays: item.minStock?.leadTimeDays ?? null,
+          suggestionFor: own.suggestionFor,
         },
       };
 
@@ -874,7 +1085,7 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
         keptSuppliers: plan.lines.map((l) => ({
           supplierUid: l.option.supplierUid,
           supplierName: l.option.supplierName ?? "Unknown supplier",
-          qty: l.carried ? l.carried.qty : (l.saved?.qty ?? suggested),
+          qty: l.carried ? l.carried.qty : (l.saved?.qty ?? suggestionFor(l.option).qty),
         })),
         preferredSupplierUid: plan.conflict.preferredSupplierUid,
         preferredSupplierName: plan.conflict.preferredSupplierName,

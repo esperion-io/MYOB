@@ -3,6 +3,8 @@
 import { displayVersion, releaseBanner } from "./release-banner.js";
 import {
   BY_ITEM_COLUMNS,
+  coveredByOnOrderTitle,
+  minLeadOwner,
   orderByItemRows,
   orderListSummary,
   orderSortQuery,
@@ -15,7 +17,7 @@ import {
   leadBasisSentence,
   leadOwner,
   leadTimeNote,
-  quantityStaysMessage,
+  quantityChangedMessage,
   sortRows,
   sortWord,
   supplierChangedMessage,
@@ -53,9 +55,38 @@ import { gapCell, gapSentence, gapTile, hasGapFields, outlookModel } from "./gap
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.12.0";
+const UI_VERSION = "1.13.0";
 
 const RELEASES = [
+  {
+    version: "1.13.0",
+    // Set to the ship date, and re-derive every item and figure named here
+    // from that evening's prod capture: `stage-check qty <the 1.12 capture>`
+    // lists every Order list line whose quantity moves, old -> new, and that
+    // list goes to Allied before the deploy (RELEASING.md "Stage 14 deploy").
+    // The worked example below is from the 26 Aug local copy, with a window
+    // minimum, N24S16M's 107-day item lead and a Hobson pick set up there
+    // through the real functions (N24S16M: 6-month minimum 1,725 at 107
+    // days, 490.67 a month; Hobson measured at 24 days), because the 13 Oct
+    // prod capture has no pick of N24S16M; replace it with a line from the
+    // prod list. On the f2148b2 prod capture (14 Oct NZ) five lines sat under a
+    // supplier other than the usual one (FG150P, FG100P and FG250P's split
+    // part with Specialised Washers, TB12135S16 and item 11 with Jiaxing),
+    // and Compare showed 103 of 398 options with a suggestion of their own.
+    // (Stage 10 has not shipped; versions follow ship order, so Stage 14 is
+    // 1.13.)
+    date: "2026-10-14",
+    stage: "Stage 14: Suggested qty follows the chosen supplier",
+    changes: [
+      "You told us that when you pick a different supplier, the suggested quantity should match the supplier you pick. From this version it does. When an item is ordered from a supplier other than its usual one, its suggested quantity is worked out again on that supplier's own lead time: a supplier who delivers in 3 weeks needs less stock to cover the wait than one who takes 4 months.",
+      "How it is worked out. The rule is the one you already know (8 weeks of demand, plus the stock that covers the wait, less free stock and on order), with only the wait changed. If the item has a minimum set from a period of use, the minimum is worked out again for that supplier's lead time: monthly use × lead days ÷ 30.44. If the minimum was typed by hand, it stays as it is, because it doesn't depend on any lead time. With no minimum, it is weekly demand × the supplier's lead time.",
+      "A worked example from our test copy (your own figures will differ): N24S16M has a minimum of 1,725, set from 6 months of use (490.67 a month) and its own 107-day lead time, and SHANDONG TENGDA is its usual supplier. Ordered from HOBSON, whose orders take 24 days, the stock to cover the wait becomes 490.67 × 24 ÷ 30.44 = 387 (rounded up), and the suggestion becomes 1,023 instead of 2,361.",
+      "A quantity you typed never changes. If you typed a number, it stays, and the suggestion for the new supplier is shown beside it. Choosing the usual supplier again brings back the usual suggestion. If a supplier's lead time isn't known, the usual suggestion stays, and Purchasing says so.",
+      "After you choose a supplier on the row, the message says what happened, for example: \"Quantity is now 1,023, rebuilt on HOBSON ENGINEERING Co. PTY.LTD's 24-day lead time (was 2,361 on this item's own 107 days).\" Why this quantity names the lead time and the minimum the line's quantity is built on. Compare now shows each supplier's own suggested quantity under its estimated cost, so you can compare suppliers on their own lead times.",
+    ],
+    numbers: "Yes, on lines ordered from a supplier other than the item's usual one, where the quantity wasn't typed and the minimum wasn't set by hand: their suggested and order quantities, their estimated cost, that supplier's subtotal, the Order list total and the order sheet. We sent you the list of every line that changes, old and new, before this version went live. On a line where you typed the quantity, the quantity stays, but the suggested figure beside it becomes that supplier's. Lines with the usual supplier, typed quantities and every item's own suggestion on Inventory are exactly as before.",
+    check: "Open Purchasing and find a line from the list we sent you: its Suggested and Order qty read the new figure, and Why this quantity names that supplier's lead time. Open Compare on any item with more than one supplier: under each Est cost is that supplier's own suggested quantity, and the usual supplier's is the one Inventory shows. Nothing to choose or undo.",
+  },
   {
     version: "1.12.0",
     // Set to the ship date, and re-derive every item and figure named here
@@ -2263,7 +2294,11 @@ function expandPanelHtml(i, ctx = {}) {
     ${
       s
         ? `<div class="explain">
-            <strong>Suggest ordering ~${qty(s.qty)} units.</strong>
+            <strong>${
+              ctx.suggestionOwner
+                ? `With its usual supplier (${esc(ctx.suggestionOwner)}): ~${qty(s.qty)} units.`
+                : `Suggest ordering ~${qty(s.qty)} units.`
+            }</strong>
             <ul>
               <li>${s.rationale.weeklyDemand}/wk × ${s.rationale.targetCoverWeeks}w target ${leadStockLine(s.rationale)}</li>
               <li>less free stock ${qty(s.rationale.freeStock)} and incoming ${qty(s.rationale.incoming)}</li>
@@ -5687,7 +5722,7 @@ function byItemQtyHtml(r) {
   return `<input class="cart-qty" type="number" step="any" min="0" value="${q.qty}"
       aria-label="Order quantity for ${esc(r.number ?? "")}" />
     ${q.edited ? '<br /><span class="badge brand" title="You typed this quantity">Edited</span>' : ""}
-    ${q.coveredByOnOrder ? '<br /><span class="muted" title="Below its minimum, but free stock plus what is already on order meets the target, so nothing more is suggested">covered by on order</span>' : ""}
+    ${q.coveredByOnOrder ? `<br /><span class="muted" title="${esc(coveredByOnOrderTitle(r))}">covered by on order</span>` : ""}
     ${q.carriedFrom ? `<br /><span class="muted" title="Typed while this item was under ${esc(q.carriedFrom)}; it follows the item">typed under ${esc(q.carriedFrom)}</span>` : ""}`;
 }
 
@@ -5817,12 +5852,17 @@ function wireOrderByItem(cols) {
  * refusal (400: not a supplier on file; 409: the page is out of date) says
  * why and fetches /cart again, which puts the dropdown back where the item
  * really is.
- * Afterwards a message says why the quantity didn't move with the supplier,
- * read from the redrawn row, so it quotes what the server now says.
+ * Afterwards a message says what the quantity did, read from the redrawn
+ * row, so it quotes what the server now says: from 1.13 a suggestion rebuilt
+ * on the chosen supplier's lead, with what it was before; a typed quantity
+ * or a hand-set minimum stays (quantityChangedMessage). Against a server
+ * before 1.13 it says why the quantity didn't move, as 1.12 did.
  */
 async function changeRowSupplier(tr, supplierUid) {
   const itemUid = tr.dataset.uid;
-  const req = supplierChangeRequest(orderItemRows.get(itemUid), supplierUid);
+  // The row as it was, so the message can say what the quantity was (1.13).
+  const before = orderItemRows.get(itemUid);
+  const req = supplierChangeRequest(before, supplierUid);
   if (!req) return;
   tr.querySelectorAll("select, button, input").forEach((el) => {
     el.disabled = true;
@@ -5845,7 +5885,7 @@ async function changeRowSupplier(tr, supplierUid) {
   }
   // Only on By item: the view may have been switched while it saved.
   const row = orderListView === "items" ? orderItemRows.get(itemUid) : null;
-  if (row) showToast(`${supplierChangedMessage(row, req.endpoint)} ${quantityStaysMessage(row, qty)}`);
+  if (row) showToast(`${supplierChangedMessage(row, req.endpoint)} ${quantityChangedMessage(row, before, qty)}`);
 }
 
 /*
@@ -5924,10 +5964,17 @@ async function toggleOrderItemRow(tr, cols) {
   // Redrawn while it loaded, or opened twice: nothing to add.
   if (!tr.isConnected || tr.nextElementSibling?.classList.contains("expand-row")) return;
   orderItemOpen.add(uid);
+  /*
+   * The panel's own suggestion is the item's, its usual supplier's. On a
+   * line rebuilt on another supplier's lead (1.13) it sits beside a
+   * different Suggested, so it says whose it is.
+   */
+  const sf = row.lines.length === 1 ? row.lines[0].rationale?.suggestionFor : null;
   toggleExpandRow(tr, new Map([[uid, detail.item]]), cols, {
     targetCoverWeeks: orderTargetCover(row, detail),
     extraHtml: orderItemPanelHtml(row),
     detail,
+    suggestionOwner: sf?.basis === "rebuilt" ? (sf.usualSupplierName ?? "the usual supplier") : null,
   });
   tr.nextElementSibling
     ?.querySelectorAll(".obi-compare")
@@ -5968,7 +6015,7 @@ function orderItemPanelHtml(r) {
         <h3>Why this quantity</h3>
         <p class="obi-why-head">Suggested <strong>${qty(r.suggestedQty)}</strong> · on this order <strong>${qty(r.qty)}</strong>${
           q.edited ? ' <span class="badge brand">Edited</span>' : ""
-        }${q.coveredByOnOrder ? ' <span class="muted">· covered by on order</span>' : ""}</p>
+        }${q.coveredByOnOrder ? ` <span class="muted" title="${esc(coveredByOnOrderTitle(r))}">· covered by on order</span>` : ""}</p>
         ${why}
         ${basis ? `<p class="obi-why-basis">${esc(basis)}</p>` : ""}
       </div>
@@ -6298,9 +6345,16 @@ function cartMinTitle(l) {
   const base = "Minimum stock level set under Purchasing › Minimum stock review";
   if (r.leadStockBasis === "manual") return `${base}, typed by hand`;
   if (r.leadStockBasis !== "window") return base;
-  const owner = leadOwner(r, r.minLeadTimeDays);
+  // On a line rebuilt on another supplier's lead (1.13) the minimum is the
+  // item's, set from the item's lead, and comes to less or more at this one.
+  const owner = minLeadOwner(r);
   const lead = r.minLeadTimeDays != null ? ` ${owner ? `${owner} ` : "a "}${r.minLeadTimeDays}-day lead time` : " lead time";
-  return `${base}, from${lead}${r.minWindowMonths != null ? ` over ${r.minWindowMonths} months of use` : ""}. It sets the lead-time stock.`;
+  const sf = r.suggestionFor;
+  const sets =
+    sf?.basis === "rebuilt"
+      ? `At this supplier's ${sf.leadDays}-day lead time it comes to ${qty(r.leadStock ?? 0)}, and that sets the lead-time stock.`
+      : "It sets the lead-time stock.";
+  return `${base}, from${lead}${r.minWindowMonths != null ? ` over ${r.minWindowMonths} months of use` : ""}. ${sets}`;
 }
 
 /*
@@ -6322,7 +6376,13 @@ function cartMinTitle(l) {
  *           and the line's own lead is shown for reference.
  *
  * With the usual supplier, or from a server before 1.8, it reads as it
- * always did.
+ * always did. From 1.13 a line under another supplier is rebuilt on its own
+ * lead (rationale.suggestionFor "rebuilt"): "built on this supplier's 24d
+ * lead", or for a window minimum "min at this supplier's 24d lead: 387"
+ * (N24S16M with Hobson on the 26 Aug copy, Stage 14 test decisions);
+ * the title says what the usual supplier's would be. A hand-set minimum, an
+ * unknown lead or the same lead keep the item's own suggestion, and read as
+ * in 1.12.
  */
 function cartLeadBit(l) {
   const r = l.rationale ?? {};
@@ -6331,6 +6391,14 @@ function cartLeadBit(l) {
       ? `<span title="${l.leadTimeSource === "item" ? "Lead time set by Allied on this item" : l.leadTimeSetByAllied ? "Lead time set by Allied" : `Median measured across ${l.leadTimeOrders} matched orders`}">${l.leadTimeDays}d lead</span>`
       : "";
   if (!("leadTimeDaysUsed" in r)) return own;
+  // 1.13: a line under another supplier rebuilt on that supplier's own lead.
+  const sf = r.suggestionFor;
+  if (sf?.basis === "rebuilt") {
+    const usual = `${sf.usualSupplierName ?? "the usual supplier"} it would be ${qty(sf.usualQty ?? 0)}`;
+    if (r.leadStockBasis === "window")
+      return `<span title="${esc(`Your minimum of ${qty(l.minLevel ?? r.minLevel ?? 0)} comes to ${qty(r.leadStock ?? 0)} at this supplier's ${sf.leadDays}-day lead time, and that sets the lead-time stock. With ${usual}.`)}">min at this supplier's ${sf.leadDays}d lead: ${qty(r.leadStock ?? 0)}</span>`;
+    return `<span title="${esc(`The suggested quantity is built on this supplier's own lead time. With ${usual}.`)}">built on this supplier's ${sf.leadDays}d lead</span>`;
+  }
   const picked = !!r.leadTimeUsedFor && l.supplierUid !== "none" && r.leadTimeUsedFor !== l.supplierName;
   const mine = () => (l.leadTimeDays != null ? `this supplier ${own}` : '<span class="muted">this supplier\'s lead unknown</span>');
   if (r.leadStockBasis === "manual") return picked ? mine() : own;
@@ -6342,15 +6410,25 @@ function cartLeadBit(l) {
     return `${from} · ${picked ? mine() : own || '<span class="muted">lead unknown</span>'}`;
   }
   if (!picked) return own;
+  // Why a pick still carries the item's own suggestion: before 1.13 always
+  // ("whichever supplier"); from 1.13 only for an unknown or the same lead.
+  const because =
+    sf?.basis === "no_lead"
+      ? ", because no lead time is known for this supplier"
+      : sf?.basis === "same_lead"
+        ? "; this supplier's lead time is the same"
+        : sf
+          ? ""
+          : ", whichever supplier it is ordered from";
   if (r.leadTimeUsedSource === "item") {
     // Before 1.12 the item's lead was every line's, so the line's own bit said it.
     if (!("leadTimeSource" in l)) return own;
-    return `<span title="The suggested quantity is built on the lead time set on this item, whichever supplier it is ordered from">built on this item's own ${r.leadTimeDaysUsed}d lead</span> · ${mine()}`;
+    return `<span title="The suggested quantity is built on the lead time set on this item${because}">built on this item's own ${r.leadTimeDaysUsed}d lead</span> · ${mine()}`;
   }
   const who = esc(r.leadTimeUsedFor);
   const used =
     r.leadTimeDaysUsed != null
-      ? `<span title="The suggested quantity is built on ${who}'s lead time, the item's usual supplier, whichever supplier it is ordered from">built on ${who}'s ${r.leadTimeDaysUsed}d lead</span>`
+      ? `<span title="The suggested quantity is built on ${who}'s lead time, the item's usual supplier${because}">built on ${who}'s ${r.leadTimeDaysUsed}d lead</span>`
       : `<span title="No lead time is known for ${who}, the item's usual supplier, so the quantity adds no lead-time stock">no lead time for ${who}</span>`;
   return `${used} · ${mine()}`;
 }
@@ -6532,7 +6610,7 @@ function openSupplierCompare(itemUid, number) {
     <div class="table-wrap">
       <table>
         <thead><tr><th>Supplier</th><th class="num">Unit cost</th><th class="num">Lead time</th>
-          <th class="num">Qty</th><th class="num" title="At the suggested quantity, so suppliers compare like for like">Est cost</th><th></th></tr></thead>
+          <th class="num">Qty</th><th class="num" title="At each supplier's own suggested quantity, built on that supplier's lead time (the same quantity for every supplier before 1.13)">Est cost</th><th></th></tr></thead>
         <tbody>
           ${rows
             .map((o) => {
@@ -6556,7 +6634,7 @@ function openSupplierCompare(itemUid, number) {
                 }</td>
                 <td class="num"><input class="cmp-qty" type="number" step="any" min="0" value="${o.inCart ? o.qty : 0}"
                      data-supplier="${esc(o.supplierUid)}" aria-label="Quantity from ${esc(o.supplierName ?? "")}" /></td>
-                <td class="num">${money(first.suggestedQty * cost)}</td>
+                <td class="num">${compareEstCell(o, first, cost)}</td>
                 <td><button class="btn small cmp-choose" data-supplier="${esc(o.supplierUid)}" type="button"
                       title="Order the whole quantity from ${esc(o.supplierName ?? "")}">Choose</button></td>
               </tr>`;
@@ -6595,8 +6673,17 @@ function openSupplierCompare(itemUid, number) {
 
   openDrawer(`Suppliers for ${number || ""}`, nav + body);
 
-  // Live tally: what was suggested, what has been allocated, and the gap.
-  const suggested = first.suggestedQty;
+  /*
+   * Live tally: what was suggested, what has been allocated, and the gap.
+   * From 1.13 each line carries its own supplier's suggestion, so on a split
+   * the first line's depends on which supplier /cart lists first (N10S16 on
+   * the 26 Aug copy, Stage 14 test decisions: Tong Ming's part 4,495, the
+   * item's own 9,472). A split compares with the item's own, as By item's
+   * Suggested does (groupLinesByItem); one line with its own.
+   */
+  const itemLines = cartData.suppliers.flatMap((g) => g.lines.filter((l) => l.itemUid === itemUid));
+  const suggested =
+    itemLines.length > 1 ? (first.rationale?.suggestionFor?.usualQty ?? first.suggestedQty) : first.suggestedQty;
   const tally = () => {
     const el = document.getElementById("split-tally");
     if (!el) return;
@@ -6700,6 +6787,27 @@ function openSupplierCompare(itemUid, number) {
     }
     await afterCartDecision(itemUid);
   });
+}
+
+/*
+ * Compare's Est cost cell (1.13): each supplier at its own suggested
+ * quantity, built on its own lead time (cart.ts supplierSuggestion), with
+ * that quantity under the figure. A server before 1.13 sends no
+ * suggestedQty, and every supplier is priced at the line's suggestion, as
+ * before.
+ */
+function compareEstCell(o, first, cost) {
+  if (o.suggestedQty == null) return money(first.suggestedQty * cost);
+  const est = o.suggestedEstCost ?? o.suggestedQty * cost;
+  const why =
+    o.suggestionBasis === "rebuilt"
+      ? "Built on this supplier's own lead time"
+      : o.suggestionBasis === "manual"
+        ? "Your hand-set minimum doesn't depend on lead time, so this is the item's own suggestion"
+        : o.suggestionBasis === "no_lead"
+          ? "No lead time is known for this supplier, so this is the item's own suggestion"
+          : "The item's own suggestion";
+  return `${money(est)}<br /><span class="muted" title="${esc(why)}">for ${qty(o.suggestedQty)} suggested</span>`;
 }
 
 /**

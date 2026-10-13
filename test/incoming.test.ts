@@ -363,8 +363,13 @@ test("no gap feeds a calculation: only queries.ts reads projection.ts, in the pl
   assert.doesNotMatch(p, /getPool|businessToday|new Date\(\)|Date\.now/);
 
   const q = readFileSync(join(ROOT, "src/insights/queries.ts"), "utf8");
-  const computeItem = q.slice(q.indexOf("export function computeItem("), q.indexOf("let itemsCache"));
-  assert.ok(computeItem.includes("suggestion = {") && computeItem.includes("flags.push("), "computeItem landmarks moved; update this guard");
+  // From 1.13 the suggestion arithmetic sits just above computeItem
+  // (demandRate, suggestOrderQty, suggestionInputs), so the guard starts there.
+  const computeItem = q.slice(q.indexOf("export function demandRate("), q.indexOf("let itemsCache"));
+  assert.ok(
+    computeItem.includes("export function suggestOrderQty(") && computeItem.includes("suggestOrderQty({") && computeItem.includes("flags.push("),
+    "computeItem landmarks moved; update this guard",
+  );
   assert.equal(computeItem.match(GAP_WORDS), null, "computeItem (suggestion, flags, risk, covers) mentions a gap field");
   const region = (from: string, to: string) => {
     const a = q.indexOf(from);

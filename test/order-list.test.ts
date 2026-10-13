@@ -972,7 +972,7 @@ test("dashboard.js: the row's dropdown sends only the existing select / use-pref
   assert.match(fnBody(src, "byItemSupplierHtml"), /No supplier \(ruled\)/);
   assert.match(fnBody(src, "wireOrderByItem"), /changeRowSupplier\(tr, supplierPick\.value\)/);
   const change = fnBody(src, "changeRowSupplier");
-  assert.match(change, /supplierChangeRequest\(orderItemRows\.get\(itemUid\), supplierUid\)/);
+  assert.match(change, /const before = orderItemRows\.get\(itemUid\);\s*const req = supplierChangeRequest\(before, supplierUid\)/);
   assert.match(change, /`\/api\/insights\/cart\/\$\{req\.endpoint\}`/);
   // Locked while it saves; a refusal says why and fetches /cart again (a 400
   // means the tab's options are stale), falling back to a redraw that unlocks it.
@@ -980,7 +980,8 @@ test("dashboard.js: the row's dropdown sends only the existing select / use-pref
   assert.match(change, /alert\(err\.message\);[\s\S]*?reloadOrderList\(\)\.catch\(\(\) => drawOrderList\(\)\)/);
   assert.doesNotMatch(change, /drawOrderByItem\(\)/);
   assert.match(change, /orderListView === "items"/);
-  assert.match(change, /quantityStaysMessage\(row, qty\)/);
+  // 1.13: what the quantity did, against the row as it was (1.12's words from an older server).
+  assert.match(change, /quantityChangedMessage\(row, before, qty\)/);
   // Compare's Choose and Split say why when refused, not fail silently.
   const compare = fnBody(src, "openSupplierCompare");
   assert.equal((compare.match(/catch \(err\) \{\s*await refused\(err\);/g) ?? []).length, 2);

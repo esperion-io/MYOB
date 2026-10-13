@@ -1,0 +1,103 @@
+{
+  "version": "1.13.0",
+  "stage": "Stage 14: Suggested qty follows the chosen supplier",
+  "note": "1.13 is a numbers release. A /cart line under a supplier other than its item's usual (effective) one gets a suggestion of its own, rebuilt on that supplier's lead (cart.ts supplierSuggestion: a window minimum re-derived as the stored monthly burn x that lead / 30.44, a hand-set minimum unchanged, no minimum weekly x that lead / 7; an unknown or the same lead keeps the item's own). Where such a line shows its suggestion (no typed or carried qty) its qty and estCost follow, and with them its supplier's subtotal, the header ends, the quantity the decisions and pick-conflict lists repeat, the in-cart compare option's qty, and that line's Order qty and Est cost in cart.csv (plus its supplier's block heading, a cart.csv note). A typed line's suggestedQty moves, never its qty. A rebuilt line's rationale names its own lead (leadTimeDaysUsed, leadTimeUsedFor, leadTimeUsedSource, leadStock, rawNeed, leadTimeWeeks, leadTimeSource). Additive everywhere: qtyTyped and rationale.suggestionFor on every line, suggestedQty, suggestedEstCost and suggestionBasis on every option. Nothing else may move: every item's own suggestion, items, item pages, lines under the usual supplier, lead times, costs, states, cards, both other CSVs. The wildcards below would let a quantity move on any line, so the record-level proof is `stage-check qty <before> <after>`: the lines that moved equal the lines predicted from <before>, each to the predicted figure, typed quantities did not move, the totals add up from the lines, cart.csv moved only on predicted rows, and every other /cart field is identical.",
+  "reviewed": "Written by hand from in-process captures (stage-check capture through the real router, GET only) on the 26 Aug local copy (allied_dev), the 1.12 tree (7181036) then this tree, 13 Oct. (1) On the copy as it is (no picks, minimums or item leads): 974 differences, every one an addition: qtyTyped and rationale.suggestionFor on 133 lines, suggestedQty / suggestedEstCost / suggestionBasis on 236 options; no quantity moved. (2) With local decisions made through the real functions (N24S16M 107 d on the item with a 6-month window minimum of 1,725 from it, picked to Hobson; B24160S16 picked to Tong Ming; BN16425G with a 12-month window minimum of 688, picked to TANDL; ST20170G with a hand-set minimum of 9,000, picked to Hanova; WQ12503S16 typed 600 then picked to Hanova; N10S16 split 5,000 / 2,000; NL20G picked to Shanghai Screw-Fast, no lead known; B20140S16 picked to Hobson), then removed again (counts, platform_change_log and its sequence restored to 0 / 1,false): 1,066 differences plus release, all covered here; `stage-check qty` predicted 6 lines from the 1.12 capture and exactly those 6 moved (N24S16M under Hobson 2,361 -> 1,023, B24160S16 under Tong Ming 1,158 -> 503, BN16425G under TANDL 230 -> 512, B20140S16 under Hobson 174 -> 0, and the typed WQ12503S16 (600) and N10S16 Tong Ming part (2,000), whose suggestions moved 446 -> 1,872 and 9,472 -> 4,495 while their quantities stayed); header 32,024.65 -> 25,424.86; 4 cart.csv rows and 4 block headings moved; ST20170G (hand-set) and NL20G (no lead) unchanged.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.12.0 -> 1.13.0) and commit"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].qtyTyped",
+      "why": "1.13 adds whether the line's qty was typed (saved or carried); such a qty never follows a suggestion"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].rationale",
+      "why": "1.13 adds rationale.suggestionFor on every line (what its suggestion is built on: supplier, basis usual / rebuilt / same_lead / manual / no_lead / no_window, lead, and the item's own suggestion and lead). On a line rebuilt on its own supplier's lead the working is that rebuild's: leadTimeDaysUsed, leadTimeUsedFor and leadTimeUsedSource name the line's supplier, and leadStock, rawNeed, leadTimeWeeks and leadTimeSource follow (on a rebuilt line whose item had no suggestion, the suggestion's other fields appear). stage-check qty holds every other line's rationale identical apart from suggestionFor"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].suggestedQty",
+      "why": "1.13: a line under a supplier other than the item's usual one suggests its own, rebuilt on that supplier's lead; stage-check qty lists which"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].qty",
+      "why": "1.13: such a line showing its suggestion (no typed qty) follows it; a typed qty never moves"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].estCost",
+      "why": "1.13: follows the line's qty at the same unit cost"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].suggestedQty",
+      "why": "1.13 adds each compare option's own suggestion, as its line would show it"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].suggestedEstCost",
+      "why": "1.13 adds that suggestion at the option's cost (last price, else the item's average)"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].suggestionBasis",
+      "why": "1.13 adds the option's suggestion basis (as rationale.suggestionFor.basis)"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].lines[*].options[*].qty",
+      "why": "1.13: the option the item sits under shows its line's qty, which follows a rebuilt suggestion"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[*].estimatedCost",
+      "why": "1.13: a supplier's subtotal is the sum of its lines' estCost"
+    },
+    {
+      "file": "cart.json",
+      "path": "estimatedCost",
+      "why": "1.13: the sum of every line's estCost"
+    },
+    {
+      "file": "cart.json",
+      "path": "requirementLow",
+      "why": "1.13: the header's low end, from the lines (requirementRange)"
+    },
+    {
+      "file": "cart.json",
+      "path": "requirementHigh",
+      "why": "1.13: the header's high end, from the lines (requirementRange)"
+    },
+    {
+      "file": "cart.json",
+      "path": "decisions[*].suppliers[*].qty",
+      "why": "1.13: a Chosen line's qty, repeated in the decisions list"
+    },
+    {
+      "file": "cart.json",
+      "path": "pickConflicts[*].keptSuppliers[*].qty",
+      "why": "1.13: a kept pick's qty, repeated in the pick-conflict list"
+    },
+    {
+      "file": "cart.csv",
+      "path": "rows[*].Order qty",
+      "why": "1.13: the line's qty (stage-check qty checks only predicted rows moved, to the predicted figure)"
+    },
+    {
+      "file": "cart.csv",
+      "path": "rows[*].Est cost",
+      "why": "1.13: the line's estCost (as above)"
+    },
+    {
+      "file": "cart.csv",
+      "path": "notes",
+      "why": "1.13: a moved supplier's block heading carries its new subtotal, and the blocks are ordered by subtotal; stage-check qty checks no other note changed"
+    }
+  ]
+}
