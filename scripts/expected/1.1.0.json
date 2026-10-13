@@ -1,0 +1,32 @@
+{
+  "version": "1.1.0",
+  "stage": "Stage 1: Safety checks",
+  "note": "1.1 moves no figure. It adds three fields to /divergence, the end-of-sync on_order_below_myob stat (only on a run that finishes between the two captures, which a deploy window should not contain), and the new release block. Anything else, above all any items/cart/overview/suppliers/CSV/item-page figure, is a failure.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.0.0 -> 1.1.0) and commit"
+    },
+    {
+      "file": "divergence.json",
+      "path": "onOrder",
+      "why": "1.1 adds On order vs MYOB: { rows: [{ uid, number, name, ours, myob, proposed, proposedMatchesMyob, known }], diverging }"
+    },
+    {
+      "file": "divergence.json",
+      "path": "openDocs",
+      "why": "1.1 adds the open purchase orders list: [{ uid, number, supplier, date, promisedDate, total, counted, reason, outstanding, outstandingToday }]"
+    },
+    {
+      "file": "divergence.json",
+      "path": "positionParity",
+      "why": "1.1 adds { mismatches, sample }; mismatches must read 0"
+    },
+    {
+      "file": "sync-status.json",
+      "path": "recentRuns[*].stats.on_order_below_myob",
+      "why": "1.1 records it at the end of every sync; appears only if a sync finished between the captures"
+    }
+  ]
+}

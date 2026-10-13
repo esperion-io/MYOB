@@ -2,6 +2,7 @@ import { businessToday } from "./businessDate.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { computedItems, invalidateItemsCache, type ItemComputed } from "./queries.js";
+import { inTransaction, itemLeadTimesOf, logChange, minStockOf } from "./changeLog.js";
 
 /**
  * Minimum stock review (Purchasing › Minimum stock review).
@@ -327,8 +328,36 @@ export async function minStockReview(f: MinStockFilters) {
   };
 }
 
+type Client = { query: (q: string, p?: unknown[]) => Promise<unknown> };
+
+/*
+ * Every minimum and item lead-time write logs the rows it touched, before and
+ * after, in its own transaction (1.1; see changeLog.ts). One item's edit logs
+ * against that item; a bulk edit logs one row listing its items in
+ * detail.items, which is where supplier-rollback.mjs `log --item` looks.
+ */
+async function logItems(
+  client: Parameters<typeof logChange>[0],
+  entity: "min_stock" | "item_lead_time",
+  action: string,
+  uids: string[],
+  before: unknown,
+  detail: Record<string, unknown>,
+  setBy: string | null | undefined,
+): Promise<void> {
+  await logChange(client, {
+    entity,
+    itemUid: uids.length === 1 ? uids[0] : null,
+    action,
+    before,
+    after: entity === "min_stock" ? await minStockOf(client, uids) : await itemLeadTimesOf(client, uids),
+    detail: uids.length === 1 ? detail : { ...detail, items: uids },
+    changedBy: setBy,
+  });
+}
+
 async function writeWindowMinimum(
-  client: { query: (q: string, p?: unknown[]) => Promise<unknown> },
+  client: Client,
   r: MinStockRow,
   w: MinStockWindow,
   level: number,
@@ -363,7 +392,12 @@ export async function applyWindowMinimum(params: {
         ? "No lead time is known for this item's supplier, so no minimum can be calculated. Set one on the Suppliers page."
         : `Nothing was consumed in the last ${params.windowMonths} months, so there is no figure to apply.`,
     );
-  await writeWindowMinimum(getPool(), row, params.windowMonths, level, params.setBy ?? null);
+  await inTransaction(getPool(), async (client) => {
+    const before = await minStockOf(client, [row.uid]);
+    await writeWindowMinimum(client, row, params.windowMonths, level, params.setBy ?? null);
+    await logItems(client, "min_stock", "apply_window", [row.uid], before,
+      { windowMonths: params.windowMonths, minLevel: level }, params.setBy);
+  });
   invalidateItemsCache();
   return { minLevel: level };
 }
@@ -377,20 +411,29 @@ export async function setManualMinimum(params: {
   await ensureInsightsSchema();
   if (!Number.isFinite(params.minLevel) || params.minLevel < 0)
     throw new Error("minLevel must be a number of zero or more.");
-  await getPool().query(
-    `INSERT INTO platform_min_stock (item_uid, min_level, basis, set_by, set_at)
-     VALUES ($1, $2, 'manual', $3, NOW())
-     ON CONFLICT (item_uid) DO UPDATE SET
-       min_level = EXCLUDED.min_level, basis = 'manual', window_months = NULL,
-       monthly_burn = NULL, lead_time_days = NULL, set_by = EXCLUDED.set_by, set_at = NOW()`,
-    [params.itemUid, params.minLevel, params.setBy ?? null],
-  );
+  await inTransaction(getPool(), async (client) => {
+    const before = await minStockOf(client, [params.itemUid]);
+    await client.query(
+      `INSERT INTO platform_min_stock (item_uid, min_level, basis, set_by, set_at)
+       VALUES ($1, $2, 'manual', $3, NOW())
+       ON CONFLICT (item_uid) DO UPDATE SET
+         min_level = EXCLUDED.min_level, basis = 'manual', window_months = NULL,
+         monthly_burn = NULL, lead_time_days = NULL, set_by = EXCLUDED.set_by, set_at = NOW()`,
+      [params.itemUid, params.minLevel, params.setBy ?? null],
+    );
+    await logItems(client, "min_stock", "set_manual", [params.itemUid], before,
+      { minLevel: params.minLevel }, params.setBy);
+  });
   invalidateItemsCache();
 }
 
 export async function clearMinimum(itemUid: string): Promise<void> {
   await ensureInsightsSchema();
-  await getPool().query(`DELETE FROM platform_min_stock WHERE item_uid = $1`, [itemUid]);
+  await inTransaction(getPool(), async (client) => {
+    const before = await minStockOf(client, [itemUid]);
+    await client.query(`DELETE FROM platform_min_stock WHERE item_uid = $1`, [itemUid]);
+    await logItems(client, "min_stock", "clear", [itemUid], before, {}, null);
+  });
   invalidateItemsCache();
 }
 
@@ -412,34 +455,32 @@ export async function applyWindowToView(
   const [items, cons] = await Promise.all([computedItems(), consumption()]);
   const rows = applyFilters(buildRows(items, cons), f, w);
 
-  let applied = 0;
   let skippedManual = 0;
   let skippedNoFigure = 0;
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
-    for (const r of rows) {
-      if (r.status === "manual") {
-        skippedManual += 1;
-        continue;
-      }
-      const level = r.suggested[w];
-      if (level == null) {
-        skippedNoFigure += 1;
-        continue;
-      }
-      await writeWindowMinimum(client, r, w, level, setBy ?? null);
-      applied += 1;
+  const writes: { r: MinStockRow; level: number }[] = [];
+  for (const r of rows) {
+    if (r.status === "manual") {
+      skippedManual += 1;
+      continue;
     }
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
+    const level = r.suggested[w];
+    if (level == null) {
+      skippedNoFigure += 1;
+      continue;
+    }
+    writes.push({ r, level });
+  }
+  if (writes.length) {
+    const uids = writes.map((x) => x.r.uid);
+    await inTransaction(getPool(), async (client) => {
+      const before = await minStockOf(client, uids);
+      for (const { r, level } of writes) await writeWindowMinimum(client, r, w, level, setBy ?? null);
+      await logItems(client, "min_stock", "apply_window_to_view", uids, before,
+        { windowMonths: w, filters: f, skippedManual, skippedNoFigure }, setBy);
+    });
   }
   invalidateItemsCache();
-  return { applied, skippedManual, skippedNoFigure };
+  return { applied: writes.length, skippedManual, skippedNoFigure };
 }
 
 /**
@@ -456,36 +497,33 @@ export async function recalculateWindowMinimums(
   const [items, cons] = await Promise.all([computedItems(), consumption()]);
   const rows = buildRows(items, cons).filter((r) => r.status === "window");
 
-  let updated = 0;
   let unchanged = 0;
   let noFigure = 0;
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
-    for (const r of rows) {
-      const w = r.applied?.windowMonths;
-      if (!isMinStockWindow(w)) continue;
-      const level = r.suggested[w];
-      if (level == null) {
-        noFigure += 1;
-        continue;
-      }
-      if (level === r.applied?.level) {
-        unchanged += 1;
-        continue;
-      }
-      await writeWindowMinimum(client, r, w, level, setBy ?? null);
-      updated += 1;
+  const writes: { r: MinStockRow; w: MinStockWindow; level: number }[] = [];
+  for (const r of rows) {
+    const w = r.applied?.windowMonths;
+    if (!isMinStockWindow(w)) continue;
+    const level = r.suggested[w];
+    if (level == null) {
+      noFigure += 1;
+      continue;
     }
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
+    if (level === r.applied?.level) {
+      unchanged += 1;
+      continue;
+    }
+    writes.push({ r, w, level });
+  }
+  if (writes.length) {
+    const uids = writes.map((x) => x.r.uid);
+    await inTransaction(getPool(), async (client) => {
+      const before = await minStockOf(client, uids);
+      for (const { r, w, level } of writes) await writeWindowMinimum(client, r, w, level, setBy ?? null);
+      await logItems(client, "min_stock", "recalculate", uids, before, { unchanged, noFigure }, setBy);
+    });
   }
   invalidateItemsCache();
-  return { updated, unchanged, noFigure };
+  return { updated: writes.length, unchanged, noFigure };
 }
 
 /*
@@ -512,24 +550,35 @@ function validLeadDays(v: unknown): number {
  * Manual minimums are left alone; an item whose window now gives nothing keeps
  * what it had and shows as drift.
  */
-async function refreshWindowMinimums(itemUids: string[], setBy: string | null): Promise<number> {
+async function refreshWindowMinimums(
+  itemUids: string[],
+  setBy: string | null,
+  cause: string,
+): Promise<number> {
   if (!itemUids.length) return 0;
   invalidateItemsCache();
   const wanted = new Set(itemUids);
   const [items, cons] = await Promise.all([computedItems(), consumption()]);
   const rows = buildRows(items, cons).filter((r) => wanted.has(r.uid) && r.status === "window");
-  let updated = 0;
-  const pool = getPool();
+  const writes: { r: MinStockRow; w: MinStockWindow; level: number }[] = [];
   for (const r of rows) {
     const w = r.applied?.windowMonths;
     if (!isMinStockWindow(w)) continue;
     const level = r.suggested[w];
     if (level == null || level === r.applied?.level) continue;
-    await writeWindowMinimum(pool, r, w, level, setBy);
-    updated += 1;
+    writes.push({ r, w, level });
   }
-  if (updated) invalidateItemsCache();
-  return updated;
+  if (!writes.length) return 0;
+  // Logged as its own change, after the lead time it follows from has
+  // committed: the new minimum is computed from the lead time as stored.
+  const uids = writes.map((x) => x.r.uid);
+  await inTransaction(getPool(), async (client) => {
+    const before = await minStockOf(client, uids);
+    for (const { r, w, level } of writes) await writeWindowMinimum(client, r, w, level, setBy);
+    await logItems(client, "min_stock", "refresh_after_lead_time", uids, before, { cause }, setBy);
+  });
+  invalidateItemsCache();
+  return writes.length;
 }
 
 export async function setItemLeadTime(params: {
@@ -539,15 +588,20 @@ export async function setItemLeadTime(params: {
 }): Promise<{ leadTimeDays: number; minimumsRefreshed: number }> {
   await ensureInsightsSchema();
   const days = validLeadDays(params.leadTimeDays);
-  await getPool().query(
-    `INSERT INTO platform_item_lead_time (item_uid, lead_time_days, set_by, set_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (item_uid) DO UPDATE SET
-       lead_time_days = EXCLUDED.lead_time_days, set_by = EXCLUDED.set_by, set_at = NOW()`,
-    [params.itemUid, days, params.setBy ?? null],
-  );
+  await inTransaction(getPool(), async (client) => {
+    const before = await itemLeadTimesOf(client, [params.itemUid]);
+    await client.query(
+      `INSERT INTO platform_item_lead_time (item_uid, lead_time_days, set_by, set_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (item_uid) DO UPDATE SET
+         lead_time_days = EXCLUDED.lead_time_days, set_by = EXCLUDED.set_by, set_at = NOW()`,
+      [params.itemUid, days, params.setBy ?? null],
+    );
+    await logItems(client, "item_lead_time", "set_lead_time", [params.itemUid], before,
+      { leadTimeDays: days }, params.setBy);
+  });
   invalidateItemsCache();
-  const minimumsRefreshed = await refreshWindowMinimums([params.itemUid], params.setBy ?? null);
+  const minimumsRefreshed = await refreshWindowMinimums([params.itemUid], params.setBy ?? null, "set_lead_time");
   return { leadTimeDays: days, minimumsRefreshed };
 }
 
@@ -557,9 +611,13 @@ export async function clearItemLeadTime(
   setBy?: string | null,
 ): Promise<{ minimumsRefreshed: number }> {
   await ensureInsightsSchema();
-  await getPool().query(`DELETE FROM platform_item_lead_time WHERE item_uid = $1`, [itemUid]);
+  await inTransaction(getPool(), async (client) => {
+    const before = await itemLeadTimesOf(client, [itemUid]);
+    await client.query(`DELETE FROM platform_item_lead_time WHERE item_uid = $1`, [itemUid]);
+    await logItems(client, "item_lead_time", "clear_lead_time", [itemUid], before, {}, setBy);
+  });
   invalidateItemsCache();
-  return { minimumsRefreshed: await refreshWindowMinimums([itemUid], setBy ?? null) };
+  return { minimumsRefreshed: await refreshWindowMinimums([itemUid], setBy ?? null, "clear_lead_time") };
 }
 
 /**
@@ -579,9 +637,9 @@ export async function applyLeadTimeToView(
   const uids = days == null ? rows.filter((r) => r.leadTimeItemDays != null).map((r) => r.uid) : rows.map((r) => r.uid);
   if (!uids.length) return { items: 0, minimumsRefreshed: 0 };
 
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
+  const action = days == null ? "clear_lead_time_in_view" : "apply_lead_time_to_view";
+  await inTransaction(getPool(), async (client) => {
+    const before = await itemLeadTimesOf(client, uids);
     if (days == null) {
       await client.query(`DELETE FROM platform_item_lead_time WHERE item_uid = ANY($1)`, [uids]);
     } else {
@@ -593,15 +651,10 @@ export async function applyLeadTimeToView(
         [uids, days, setBy ?? null],
       );
     }
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+    await logItems(client, "item_lead_time", action, uids, before, { leadTimeDays: days, filters: f }, setBy);
+  });
   invalidateItemsCache();
-  return { items: uids.length, minimumsRefreshed: await refreshWindowMinimums(uids, setBy ?? null) };
+  return { items: uids.length, minimumsRefreshed: await refreshWindowMinimums(uids, setBy ?? null, action) };
 }
 
 /** The review as a spreadsheet, honouring the filters on screen. */

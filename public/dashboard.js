@@ -18,9 +18,22 @@ import { displayVersion, releaseBanner } from "./release-banner.js";
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.0.0";
+const UI_VERSION = "1.1.0";
 
 const RELEASES = [
+  {
+    version: "1.1.0",
+    date: "2026-10-14",
+    stage: "Stage 1: Safety checks",
+    changes: [
+      "Data & Sync has two new lists. \"On order vs MYOB\" shows every item where our On order differs from MYOB's, with a third figure, \"Proposed rule\", for what a coming update will show. \"Open purchase orders\" lists every PO MYOB shows as Open and says whether it is counted.",
+      "Some POs MYOB still shows as Open are reversals of POs that were already billed. Today we count them as stock on order, so a few items show far more on order than is really coming. For example WSBT450G shows 112,897 on order where MYOB shows none. This version only lists them. The fix comes in a later update, announced before it ships.",
+      "The sync status at the bottom left turns amber, with \"On order below MYOB\", if a sync finds an item whose On order is lower than MYOB's. That would mean stock that is coming isn't being shown. If it appears, check again after the next sync: a PO received while the sync was running can cause it once.",
+      "Changes to lead times (on a supplier or an item) and to minimum stock are now recorded with the figure before and after. Nothing about how you make these changes is different.",
+    ],
+    numbers: "None. No figure on any page changes in this version.",
+    check: "Open Data & Sync and scroll to On order vs MYOB. Each item's Proposed rule figure should match MYOB, apart from AFLSA390 and AFLSA490, which are marked as known (a PO older than the data we hold).",
+  },
   {
     version: "1.0.0",
     date: "2026-10-14",
@@ -707,6 +720,27 @@ document.addEventListener("keydown", (e) => {
 
 /* ---------- sync chip ---------- */
 
+/*
+ * On order below MYOB (1.1). The end of every sync records the items whose On
+ * order reads lower than MYOB's — stock that is coming but hidden — in that
+ * run's stats. The chip reads the newest successful run. A run from before
+ * 1.1 has no such field and a server before 1.1 never writes it; both read as
+ * nothing to report. A check that failed is recorded as
+ * on_order_below_myob_error instead, and must not read as all clear.
+ */
+function lastSuccessfulRun(status) {
+  return (status.recentRuns || []).find((r) => r.status === "success");
+}
+
+function onOrderBelowMyob(status) {
+  const items = lastSuccessfulRun(status)?.stats?.on_order_below_myob;
+  return Array.isArray(items) ? items : [];
+}
+
+function onOrderCheckError(status) {
+  return lastSuccessfulRun(status)?.stats?.on_order_below_myob_error ?? null;
+}
+
 async function pollSyncChip() {
   try {
     const status = await fetchJson("/api/insights/sync/status");
@@ -716,6 +750,15 @@ async function pollSyncChip() {
       .filter(Boolean)
       .sort()
       .pop();
+    const below = onOrderBelowMyob(status);
+    const checkError = onOrderCheckError(status);
+    const chip = document.getElementById("sync-chip");
+    if (chip)
+      chip.title = below.length
+        ? `On order below MYOB: ${below.join(", ")}`
+        : checkError
+          ? `On order check failed: ${checkError}`
+          : "";
     if (status.running) {
       syncDot.className = "dot busy";
       syncChipText.textContent = "Sync running…";
@@ -724,6 +767,12 @@ async function pollSyncChip() {
     } else if (!newest) {
       syncDot.className = "dot warn";
       syncChipText.textContent = "No data synced yet";
+    } else if (below.length) {
+      syncDot.className = "dot warn";
+      syncChipText.textContent = `On order below MYOB on ${below.length} item${below.length === 1 ? "" : "s"} — check again after the next sync`;
+    } else if (checkError) {
+      syncDot.className = "dot warn";
+      syncChipText.textContent = "On order check did not run — see Data & Sync";
     } else {
       const hours = (Date.now() - new Date(newest).getTime()) / 3600000;
       syncDot.className = hours > 26 ? "dot warn" : "dot ok";
@@ -3375,6 +3424,7 @@ async function loadDivergence() {
   if (!el) return;
   try {
     const d = await fetchJson("/api/insights/divergence");
+    renderOnOrderCheck(d);
     const body = el.querySelector(".loading");
     if (!d.items.length) {
       body.outerHTML = '<p class="muted">Nothing differs — every figure reconciles to MYOB today.</p>';
@@ -3405,8 +3455,102 @@ async function loadDivergence() {
       </table></div>
       ${d.items.length > 40 ? `<p class="hint">Showing the 40 largest of ${qty(d.items.length)}.</p>` : ""}`;
   } catch (err) {
-    const body = el.querySelector(".loading");
-    if (body) body.outerHTML = `<p class="muted">Could not load divergence: ${esc(err.message)}</p>`;
+    for (const panel of [el, document.getElementById("on-order-panel"), document.getElementById("open-docs-panel")]) {
+      const body = panel?.querySelector(".loading");
+      if (body) body.outerHTML = `<p class="muted">Could not load divergence: ${esc(err.message)}</p>`;
+    }
+  }
+}
+
+/*
+ * On order vs MYOB, and the open purchase orders behind it (1.1).
+ *
+ * A preview, not a change: our On order counts every line of every purchase
+ * order MYOB calls Open, which includes the reversal documents MYOB leaves
+ * open when a billed PO is reversed — 194,147 phantom units on the 26 Aug
+ * copy, 112,897 of them on WSBT450G. "Proposed rule" is what the coming fix
+ * would show, so it can be checked against MYOB on live data before any
+ * figure moves. Fields are read with `?? null`: a server before 1.1 has none.
+ */
+const OPEN_DOC_REASON = {
+  counted: "Counted",
+  negative_total: "Not counted: negative total (a reversal)",
+  billed: "Not counted: reversal of a billed PO (a bill with this number exists)",
+};
+
+/* positionParity sample fields, in the words the dashboard uses elsewhere. */
+const PARITY_FIELD = {
+  onHand: "On hand",
+  committed: "Committed",
+  onOrder: "On order",
+  missing: "not in the item list's calculation",
+};
+
+function renderOnOrderCheck(d) {
+  const onOrderEl = document.getElementById("on-order-panel")?.querySelector(".loading");
+  const docsEl = document.getElementById("open-docs-panel")?.querySelector(".loading");
+  const onOrder = d.onOrder ?? null;
+  const docs = d.openDocs ?? null;
+  const parity = d.positionParity ?? null;
+  const notYet = '<p class="muted">— Not available from this server yet. Reload the page after the next update.</p>';
+
+  if (onOrderEl) {
+    const rows = onOrder?.rows ?? null;
+    const parityLine =
+      parity == null
+        ? ""
+        : parity.mismatches === 0
+          ? '<p class="hint"><span class="badge ok">Position check</span> The two calculations of today\'s position (the item list\'s and the month-end export\'s) agree on every item.</p>'
+          : `<div class="notice warn"><strong>Position check: ${qty(parity.mismatches)} ${parity.mismatches === 1 ? "item differs" : "items differ"}</strong>
+              between the item list's calculation and the month-end export's.
+              ${(parity.sample ?? []).map((x) => `${esc(x.number ?? "—")} ${esc(PARITY_FIELD[x.field] ?? x.field)}: ${qty(x.owned)} vs ${qty(x.view)}`).join(" · ")}</div>`;
+    onOrderEl.outerHTML = rows == null
+      ? notYet
+      : !rows.length
+        ? `<p class="muted">Nothing differs — On order matches MYOB on every item.</p>${parityLine}`
+        : `<p class="hint">${qty(rows.length)} ${rows.length === 1 ? "item differs" : "items differ"}.
+          The proposed rule matches MYOB on ${qty(rows.filter((r) => r.proposedMatchesMyob).length)};
+          ${qty(rows.filter((r) => r.known).length)} ${rows.filter((r) => r.known).length === 1 ? "is" : "are"} a known difference.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Item</th><th class="num">Ours</th><th class="num">MYOB</th><th class="num">Proposed rule</th><th></th></tr></thead>
+          <tbody>${rows.map((r) => `<tr>
+            <td><strong>${esc(r.number ?? "—")}</strong><br /><span class="muted">${esc(r.name ?? "")}</span></td>
+            <td class="num">${qty(r.ours)}</td>
+            <td class="num">${qty(r.myob)}</td>
+            <td class="num">${qty(r.proposed)}</td>
+            <td>${r.known
+              ? `<span class="badge idle">known: ${esc(r.known)}</span>`
+              : r.proposedMatchesMyob
+                ? '<span class="badge ok">Proposed = MYOB</span>'
+                : '<span class="badge fail">Proposed differs from MYOB</span>'}</td>
+          </tr>`).join("")}</tbody>
+        </table></div>${parityLine}`;
+  }
+
+  if (docsEl) {
+    if (docs == null) {
+      docsEl.outerHTML = notYet;
+    } else if (!docs.length) {
+      docsEl.outerHTML = '<p class="muted">No purchase orders are open in MYOB.</p>';
+    } else {
+      const counted = docs.filter((x) => x.counted).length;
+      docsEl.outerHTML = `<p class="hint">${qty(docs.length)} open in MYOB: ${qty(counted)} counted,
+        ${qty(docs.length - counted)} not counted under the proposed rule.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>PO</th><th>Supplier</th><th>Date</th><th class="num">Total</th>
+            <th class="num">Adds to On order today</th><th class="num">Outstanding (proposed rule)</th><th>Counted</th></tr></thead>
+          <tbody>${docs.map((x) => `<tr>
+            <td><strong>${esc(x.number ?? "—")}</strong></td>
+            <td>${esc(x.supplier ?? "—")}</td>
+            <td>${x.date ? dateFmt(`${x.date}T12:00:00`) : "—"}</td>
+            <td class="num">${money(x.total)}</td>
+            <td class="num">${x.outstandingToday == null ? "—" : qty(x.outstandingToday)}</td>
+            <td class="num">${qty(x.outstanding)}</td>
+            <td><span class="badge ${x.counted ? "ok" : "warn"}">${x.counted ? "Yes" : "No"}</span>
+              ${x.counted ? "" : `<span class="muted">${esc((OPEN_DOC_REASON[x.reason] ?? x.reason ?? "").replace(/^Not counted: /, ""))}</span>`}</td>
+          </tr>`).join("")}</tbody>
+        </table></div>`;
+    }
   }
 }
 
@@ -3487,6 +3631,25 @@ async function renderData() {
       counts, bills, invoices, builds, adjustments and open sale orders — not read from MYOB.
       Anything listed below is a real disagreement worth understanding, not a rounding artefact.</p>
       <p class="loading">Loading divergence…</p>
+    </section>
+
+    <section class="panel" id="on-order-panel">
+      <h2>On order vs MYOB</h2>
+      <p class="hint">Our On order counts every line of every purchase order MYOB calls Open. MYOB leaves
+      some of those open after a PO has been billed and reversed, so stock that is not coming gets counted.
+      <strong>Proposed rule</strong> is what On order will show once a coming update fixes that: it skips
+      documents with a negative total and documents already billed. Nothing here changes any figure yet.</p>
+      <p class="loading">Loading…</p>
+    </section>
+
+    <section class="panel" id="open-docs-panel">
+      <h2>Open purchase orders</h2>
+      <p class="hint">Every purchase order MYOB shows as Open, and whether the proposed rule counts it.
+      <strong>Adds to On order today</strong> is what the document contributes to On order now: ordered
+      minus received on every line, as MYOB records them. <strong>Outstanding (proposed rule)</strong> is
+      the same with negative-quantity lines left out and received capped at what was ordered. A document
+      that is not counted adds nothing to On order under the proposed rule, whatever its lines say.</p>
+      <p class="loading">Loading…</p>
     </section>
 
     <section class="panel">
@@ -3656,6 +3819,10 @@ function summariseStats(stats) {
   for (const [k, v] of Object.entries(stats)) {
     if (v && typeof v === "object" && "fetched" in v) parts.push(`${k}: ${v.fetched}`);
   }
+  // 1.1: recorded at the end of each sync; absent on older runs.
+  const below = stats.on_order_below_myob;
+  if (Array.isArray(below) && below.length) parts.push(`on order below MYOB: ${below.join(", ")}`);
+  if (stats.on_order_below_myob_error) parts.push(`on-order check failed: ${stats.on_order_below_myob_error}`);
   return parts.join(" · ");
 }
 

@@ -952,3 +952,4 @@ The first three rows are backfilled from `git log`. They shipped before versioni
 | 0.1.0 (unversioned) | Suppliers: rule that an item has no supplier (19 Sep 2026) | `c90da6e` | Not recorded. Commit 2026-09-18 17:22 | None | Live |
 | 0.1.0 (unversioned) | Purchasing: the Order list follows the preferred supplier (12 Oct 2026 NZ) | `f2148b2` | 2026-10-11 18:38 | `pre_preferred_fix` (taken by its first boot). Not yet confirmed with `supplier-rollback.mjs status`: RELEASING.md, before the first deploy, step 1 | Live |
 | 1.0.0 | Stage 0: Release plumbing | pending | pending | None needed (Stage 0 changes no decision data) | pending |
+| 1.1.0 | Stage 1: Safety checks (and the rollback drill, `RELEASING.md` "Stage 1 deploy") | pending | pending | None needed (Stage 1 changes no decision data; lead-time and minimum edits gain log rows) | pending. Drill: pending (banners, 409, auto-deploy finding). First 1.1 sync stat: pending |

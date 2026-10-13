@@ -9,7 +9,9 @@
  *     "pre_preferred_fix" is taken by that release's first boot on Render;
  *     `snapshot` takes more on demand — take one right before deploying.
  *  2. platform_change_log: every supplier or cart change since, with the
- *     item's whole state before and after.
+ *     item's whole state before and after. From 1.1 it also holds lead-time
+ *     and minimum edits (supplier_meta, item_lead_time, min_stock): `log`
+ *     lists them and `undo` refuses them, since nothing here writes them back.
  *
  * Nothing is written without --apply AND --confirm <database name>. Every
  * restore and whole-cart undo first snapshots the current tables
@@ -603,6 +605,14 @@ async function undo() {
         `  node scripts/supplier-rollback.mjs restore ${entry.detail?.scope ?? "all"} --from ${entry.detail?.savedAs ?? "<pre_restore name>"}${nums ? ` --items ${nums}` : ""}`,
     );
   }
+  // Lead times and minimums (1.1) are logged for the record only. This script
+  // writes back supplier and cart state and nothing else, so it says what to
+  // re-enter instead of guessing at a write it was never built for.
+  if (["supplier_meta", "item_lead_time", "min_stock"].includes(entry.entity))
+    fail(
+      `#${id} is a lead-time or minimum edit (${entry.entity}). It is logged for the record only: undo puts back supplier and cart decisions, nothing else.\n` +
+        `To put it back, re-enter the "before" figures in the dashboard:\n  ${JSON.stringify(entry.before)}`,
+    );
   if (entry.action === "apply_suggestions") return undoSuggestions(entry);
   if (entry.before == null || entry.after == null) fail(`#${id} has no before/after state recorded, so it cannot be undone by itself.`);
   if (!["item_supplier", "cart"].includes(entry.entity)) fail(`Unknown entity ${entry.entity}.`);

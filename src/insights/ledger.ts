@@ -2,6 +2,16 @@ import type pg from "pg";
 import { BUSINESS_TODAY_SQL, businessToday } from "./businessDate.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
+import {
+  OPEN_PO_DOC,
+  OUTSTANDING,
+  OUTSTANDING_LINE,
+  PO_BILLED_ON_OR_AFTER,
+  onOrderBelowMyob,
+  onOrderCheck,
+  openDocReason,
+  type OnOrderCompareRow,
+} from "../sync/openPo.js";
 
 /**
  * Stocktake-anchored stock ledger (P1).
@@ -1070,7 +1080,183 @@ export async function divergenceReport(): Promise<Record<string, unknown>> {
     committedValueAtRisk: committed.reduce((a, x) => a + Number(x.committed_value_at_risk ?? 0), 0),
     onHandValueAtRisk: onHand.reduce((a, x) => a + Number(x.on_hand_value_at_risk ?? 0), 0),
     items: r.rows,
+    // 1.1: additive, for the on-order preview on Data & Sync.
+    onOrder: onOrderCheck(await onOrderComparison()),
+    openDocs: await openPurchaseDocs(),
+    positionParity: positionParity(await ownedPositions(), await viewPositions()),
   };
+}
+
+/*
+ * ---- On order against MYOB (1.1) --------------------------------------------
+ *
+ * Production has no MYOB on-order figure anywhere a person can see it, so the
+ * on-order fix (Stage 2) could not otherwise be checked on live data before it
+ * moved Allied's numbers. These put three figures side by side for every item
+ * that disagrees: ours as shown today, MYOB's, and what the rule in openPo.ts
+ * would give. On the 26 Aug copy that is the six reversal-PO items, where the
+ * proposed figure lands exactly on MYOB's, plus AFLSA390/490 (12 each on a PO
+ * from before the sync floor).
+ *
+ * MYOB's qty_on_order is read here, inside the ledger, which owns every
+ * comparison with MYOB's raw quantities (scripts/check-ledger-boundary.mjs).
+ */
+async function onOrderComparison(): Promise<OnOrderCompareRow[]> {
+  const r = await getPool().query(
+    `WITH proposed AS (
+       SELECT l.item_uid, SUM(${OUTSTANDING("l")})::float8 AS qty
+       FROM myob_purchase_order_lines l
+       JOIN myob_purchase_orders o ON o.uid = l.order_uid
+       WHERE ${OPEN_PO_DOC("o")} AND ${OUTSTANDING_LINE("l")}
+       GROUP BY l.item_uid
+     )
+     SELECT i.uid, i.number, i.name,
+            COALESCE(p.on_order, 0)::float8 AS ours,
+            i.qty_on_order::float8 AS myob,
+            COALESCE(pr.qty, 0)::float8 AS proposed
+     FROM myob_items i
+     LEFT JOIN item_position p ON p.item_uid = i.uid
+     LEFT JOIN proposed pr ON pr.item_uid = i.uid
+     WHERE ABS(COALESCE(p.on_order, 0) - COALESCE(i.qty_on_order, 0)) > 0.001
+        OR ABS(COALESCE(pr.qty, 0) - COALESCE(i.qty_on_order, 0)) > 0.001`,
+  );
+  return r.rows.map((x) => ({
+    uid: x.uid as string,
+    number: x.number as string | null,
+    name: x.name as string | null,
+    ours: Number(x.ours),
+    myob: x.myob == null ? null : Number(x.myob),
+    proposed: Number(x.proposed),
+  }));
+}
+
+/**
+ * Item numbers whose On order reads below MYOB's at the end of a sync, for
+ * sync_runs.stats and the sync chip. See onOrderBelowMyob for why below, and
+ * only below, is the warning.
+ */
+export async function onOrderBelowMyobNow(): Promise<string[]> {
+  await ensureInsightsSchema();
+  return onOrderBelowMyob(await onOrderComparison());
+}
+
+export interface OpenPurchaseDoc {
+  uid: string;
+  number: string | null;
+  supplier: string | null;
+  date: string | null;
+  promisedDate: string | null;
+  total: number | null;
+  counted: boolean;
+  reason: ReturnType<typeof openDocReason>;
+  /** Units still to receive on its lines, under the proposed rule's line clamp (qty > 0 lines only). */
+  outstanding: number;
+  /** What it adds to On order today: every line, ordered minus received, floored at 0. */
+  outstandingToday: number;
+}
+
+/**
+ * Every document MYOB calls Open, and whether the proposed rule counts it.
+ * Locally: 22 Open documents, 16 counted; not counted are 00019910 (billed in
+ * full, yet 3,420 units still "to receive") with its negative twin 00020462,
+ * and both halves of 00022808 and 00020624. The negative 00022808 alone is
+ * the 190,727 phantom units today's rule counts; with 00019910's 3,420 that is
+ * the 194,147 On order vs MYOB shows, which is why each row carries both
+ * figures (outstandingToday: what it adds now; outstanding: under the rule).
+ */
+async function openPurchaseDocs(): Promise<OpenPurchaseDoc[]> {
+  const r = await getPool().query(
+    `SELECT o.uid, o.number, o.supplier_name, o.date::date::text AS date,
+            o.promised_date::date::text AS promised_date, o.total::float8,
+            ${OPEN_PO_DOC("o")} AS counted,
+            ${PO_BILLED_ON_OR_AFTER("o")} AS billed,
+            COALESCE((SELECT SUM(${OUTSTANDING("l")}) FROM myob_purchase_order_lines l
+                      WHERE l.order_uid = o.uid AND ${OUTSTANDING_LINE("l")}), 0)::float8 AS outstanding,
+            -- Today's rule, as item_position_at counts it (every line, ordered
+            -- minus received, floored at 0), so the not-counted rows add up to
+            -- the excess On order vs MYOB shows. Stage 2 makes it equal
+            -- outstanding on every counted document.
+            COALESCE((SELECT SUM(GREATEST(COALESCE(l.qty, 0) - COALESCE(l.received_qty, 0), 0))
+                      FROM myob_purchase_order_lines l
+                      WHERE l.order_uid = o.uid AND l.item_uid IS NOT NULL), 0)::float8 AS outstanding_today
+     FROM myob_purchase_orders o
+     WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
+     ORDER BY o.number, o.total DESC, o.uid`,
+  );
+  return r.rows.map((x) => {
+    const total = x.total == null ? null : Number(x.total);
+    return {
+      uid: x.uid as string,
+      number: x.number as string | null,
+      supplier: x.supplier_name as string | null,
+      date: x.date as string | null,
+      promisedDate: x.promised_date as string | null,
+      total,
+      counted: Boolean(x.counted),
+      reason: openDocReason({ total, billedOnOrAfter: Boolean(x.billed) }),
+      outstanding: Number(x.outstanding),
+      outstandingToday: Number(x.outstanding_today),
+    };
+  });
+}
+
+/** Today's position as the item_position view gives it, for the parity check. */
+async function viewPositions(): Promise<ParityRow[]> {
+  const r = await getPool().query(
+    `SELECT p.item_uid AS uid, i.number, p.on_hand::float8, p.committed::float8, p.on_order::float8
+     FROM item_position p JOIN myob_items i ON i.uid = p.item_uid
+     WHERE i.is_inventoried`,
+  );
+  return r.rows.map((x) => ({
+    uid: x.uid as string,
+    number: x.number as string | null,
+    onHand: x.on_hand == null ? null : Number(x.on_hand),
+    committed: Number(x.committed),
+    onOrder: Number(x.on_order),
+  }));
+}
+
+export interface ParityRow {
+  uid: string;
+  number: string | null;
+  onHand: number | null;
+  committed: number;
+  onOrder: number;
+}
+
+/**
+ * The same position is computed twice: in SQL by item_position_at (which the
+ * item list, cover and the cart read) and here by ownedPositions (which the
+ * snapshot, the month-end export and the item ledger read). Each carries its
+ * own copy of the on-hand, committed and on-order rules, so a change to one
+ * that misses the other would show Allied two different stock figures for the
+ * same item on the same day. Stage 2 edits both on-order copies; this is the
+ * check that it edited them alike. It must read 0.
+ */
+export function positionParity(
+  owned: ParityRow[],
+  view: ParityRow[],
+): { mismatches: number; sample: { number: string | null; field: string; owned: number | null; view: number | null }[] } {
+  const byUid = new Map(view.map((v) => [v.uid, v]));
+  const differs = (a: number | null, b: number | null) =>
+    a == null || b == null ? a !== b : Math.abs(a - b) > 0.001;
+  const found: { number: string | null; field: string; owned: number | null; view: number | null }[] = [];
+  let mismatches = 0;
+  for (const o of owned) {
+    const v = byUid.get(o.uid);
+    const fields: [string, number | null, number | null][] = v
+      ? [
+          ["onHand", o.onHand, v.onHand],
+          ["committed", o.committed, v.committed],
+          ["onOrder", o.onOrder, v.onOrder],
+        ]
+      : [["missing", 1, null]];
+    const bad = fields.filter(([, a, b]) => differs(a, b));
+    if (!bad.length) continue;
+    mismatches += 1;
+    for (const [field, a, b] of bad) if (found.length < 10) found.push({ number: o.number, field, owned: a, view: b });
+  }
+  return { mismatches, sample: found };
 }
 
 /**

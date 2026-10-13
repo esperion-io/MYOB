@@ -116,10 +116,59 @@ export function stampDetail(detail: unknown): unknown {
   return detail;
 }
 
+/*
+ * Lead times and minimums (1.1).
+ *
+ * These are Allied's decisions too, and the next round of questions invites
+ * them to change lead times: Hanova's 120 days against a measured 83 moves
+ * BN1665G's minimum from 2,771 to about 1,916. Until 1.1 nothing recorded the
+ * old figure, so an answer applied by mistake could not be put back. Each edit
+ * now logs the rows it touched as they were and as they are, in the same
+ * transaction as the write.
+ *
+ * Log only, by design: supplier-rollback.mjs `log` lists these rows, and its
+ * `undo` refuses them (it knows how to write back only supplier and cart
+ * state). Putting a lead time or a minimum back is one edit in the dashboard,
+ * using the "before" the log shows. They are not backed up either: adding
+ * tables to BACKUP_TABLES would mark every existing backup as broken, so the
+ * bak_<date>_* copies in RELEASING.md cover them instead.
+ */
+export type ChangeEntity = "item_supplier" | "cart" | "supplier_meta" | "item_lead_time" | "min_stock";
+
+/** One supplier's lead time, region and notes, as stored; null when nothing is set. */
+export async function supplierMetaOf(db: Db, supplierUid: string): Promise<Record<string, unknown> | null> {
+  const r = await db.query(
+    `SELECT supplier_uid, region, lead_time_days, notes, updated_at
+     FROM platform_supplier_meta WHERE supplier_uid = $1`,
+    [supplierUid],
+  );
+  return (r.rows[0] as Record<string, unknown>) ?? null;
+}
+
+/** Item-level lead times for these items, as stored. Items with none are absent. */
+export async function itemLeadTimesOf(db: Db, itemUids: string[]): Promise<Record<string, unknown>[]> {
+  const r = await db.query(
+    `SELECT item_uid, lead_time_days, set_by, set_at
+     FROM platform_item_lead_time WHERE item_uid = ANY($1) ORDER BY item_uid`,
+    [itemUids],
+  );
+  return r.rows as Record<string, unknown>[];
+}
+
+/** Applied minimums for these items, as stored. Items with none are absent. */
+export async function minStockOf(db: Db, itemUids: string[]): Promise<Record<string, unknown>[]> {
+  const r = await db.query(
+    `SELECT item_uid, min_level, basis, window_months, monthly_burn, lead_time_days, set_by, set_at
+     FROM platform_min_stock WHERE item_uid = ANY($1) ORDER BY item_uid`,
+    [itemUids],
+  );
+  return r.rows as Record<string, unknown>[];
+}
+
 export async function logChange(
   db: Db,
   entry: {
-    entity: "item_supplier" | "cart";
+    entity: ChangeEntity;
     itemUid: string | null;
     action: string;
     before: unknown;

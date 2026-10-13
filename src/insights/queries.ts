@@ -3,7 +3,7 @@ import { config } from "../config.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import type { PoolClient } from "pg";
-import { inTransaction, logChange, supplierStateOf } from "./changeLog.js";
+import { inTransaction, logChange, supplierMetaOf, supplierStateOf } from "./changeLog.js";
 import {
   applyKitRules,
   deepBuildable,
@@ -2379,24 +2379,37 @@ export async function setSupplierMeta(
     patch.notes === undefined ? undefined : (patch.notes?.trim().slice(0, 500) || null);
 
   // COALESCE-based partial update: only fields present in the patch change.
-  await pool.query(
-    `INSERT INTO platform_supplier_meta (supplier_uid, region, lead_time_days, notes, updated_at)
-     VALUES ($1, $2, $3, $4, NOW())
-     ON CONFLICT (supplier_uid) DO UPDATE SET
-       region = CASE WHEN $5 THEN $2 ELSE platform_supplier_meta.region END,
-       lead_time_days = CASE WHEN $6 THEN $3 ELSE platform_supplier_meta.lead_time_days END,
-       notes = CASE WHEN $7 THEN $4 ELSE platform_supplier_meta.notes END,
-       updated_at = NOW()`,
-    [
-      supplierUid,
-      region ?? null,
-      patch.leadTimeDays ?? null,
-      notes ?? null,
-      patch.region !== undefined,
-      patch.leadTimeDays !== undefined,
-      patch.notes !== undefined,
-    ],
-  );
+  // Logged with the row before and after (1.1): a supplier's lead time sets
+  // every window minimum under it, and nothing else records the old figure.
+  await inTransaction(pool, async (client) => {
+    const before = await supplierMetaOf(client, supplierUid);
+    await client.query(
+      `INSERT INTO platform_supplier_meta (supplier_uid, region, lead_time_days, notes, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (supplier_uid) DO UPDATE SET
+         region = CASE WHEN $5 THEN $2 ELSE platform_supplier_meta.region END,
+         lead_time_days = CASE WHEN $6 THEN $3 ELSE platform_supplier_meta.lead_time_days END,
+         notes = CASE WHEN $7 THEN $4 ELSE platform_supplier_meta.notes END,
+         updated_at = NOW()`,
+      [
+        supplierUid,
+        region ?? null,
+        patch.leadTimeDays ?? null,
+        notes ?? null,
+        patch.region !== undefined,
+        patch.leadTimeDays !== undefined,
+        patch.notes !== undefined,
+      ],
+    );
+    await logChange(client, {
+      entity: "supplier_meta",
+      itemUid: null,
+      action: "set_supplier_meta",
+      before,
+      after: await supplierMetaOf(client, supplierUid),
+      detail: { supplierUid, patch },
+    });
+  });
   invalidateItemsCache();
 }
 

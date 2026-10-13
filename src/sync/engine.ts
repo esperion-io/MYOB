@@ -5,7 +5,7 @@ import { MyobApiError, myobGetAllPages } from "../myob/client.js";
 import type { CompanyConnection } from "../myob/types.js";
 import { getActiveConnection } from "../store/connections.js";
 import { ensureInsightsSchema } from "./schema.js";
-import { establishOpeningBalance, snapshotPositions } from "../insights/ledger.js";
+import { establishOpeningBalance, onOrderBelowMyobNow, snapshotPositions } from "../insights/ledger.js";
 
 type Raw = Record<string, unknown>;
 
@@ -743,6 +743,19 @@ export async function runSync(
     } catch (err) {
       stats.position_snapshot_error =
         err instanceof Error ? err.message : String(err);
+    }
+
+    /*
+     * On order below MYOB (1.1): item numbers whose On order now reads lower
+     * than MYOB's, which means stock that is coming has been hidden. Read by
+     * the sync chip from the last run's stats. A check, never a gate: it sits
+     * in its own try/catch so a failure here is recorded and the sync still
+     * succeeds exactly as it would have without it.
+     */
+    try {
+      stats.on_order_below_myob = await onOrderBelowMyobNow();
+    } catch (err) {
+      stats.on_order_below_myob_error = err instanceof Error ? err.message : String(err);
     }
 
     await pool.query(
