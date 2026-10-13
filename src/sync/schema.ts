@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { getPool } from "../db.js";
 import { BUSINESS_TODAY_SQL } from "../insights/businessDate.js";
+import { OPEN_PO_DOC, OUTSTANDING, OUTSTANDING_LINE } from "./openPo.js";
 
 /**
  * Insights schema. Tables prefixed `myob_` are read-only mirrors of MYOB
@@ -584,13 +585,21 @@ const DDL: string[] = [
          AND (o.date::date <= p_as_at OR p_as_at >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),
+     /*
+      * Stock on order: the rule in src/sync/openPo.ts (1.2), the same text
+      * ownedPositions and every other open-PO reader use. It drops the
+      * reversal documents MYOB leaves Open after a billed PO is reversed,
+      * which counted 194,147 units nobody was waiting for (WSBT450G read
+      * 112,897 on order against MYOB's 0), and lands on MYOB's own figure to
+      * 24 units. Only this body changed: the arguments and RETURNS TABLE are
+      * as before, so an older release's boot can put its own body back.
+      */
      our_on_order AS (
-       SELECT l.item_uid,
-              SUM(GREATEST(COALESCE(l.qty,0) - COALESCE(l.received_qty,0), 0))::double precision AS qty
+       SELECT l.item_uid, SUM(${OUTSTANDING("l")})::double precision AS qty
        FROM myob_purchase_order_lines l
        JOIN myob_purchase_orders o ON o.uid = l.order_uid
-       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
-         AND l.item_uid IS NOT NULL
+       WHERE ${OPEN_PO_DOC("o")}
+         AND ${OUTSTANDING_LINE("l")}
          AND (o.date::date <= p_as_at OR p_as_at >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),

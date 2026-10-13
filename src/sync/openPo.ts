@@ -1,9 +1,9 @@
 /**
  * Which purchase orders count as stock on order, and how much of each line
- * is still to arrive (1.1).
+ * is still to arrive (1.1; the rule On order follows from 1.2).
  *
- * Today five places read open POs, each with its own copy of one rule: every
- * line of every document MYOB calls Open, ordered minus received. That rule
+ * Before 1.2 five places read open POs, each with its own copy of one rule:
+ * every line of every document MYOB calls Open, ordered minus received. That rule
  * counts MYOB's reversal artefacts. When a PO is converted to a bill and then
  * reversed, MYOB leaves an Open twin behind, sometimes a negative one, and on
  * the 26 Aug copy those twins add 194,147 units nobody is waiting for: our On
@@ -23,12 +23,16 @@
  * bills, and no bill predates its PO. The date bound keeps an older bill that
  * happens to share a number from cancelling a new order.
  *
- * In 1.1 these fragments are used ONLY by the comparison on Data & Sync and
- * the end-of-sync check, so the proposed rule can be previewed on production
- * before any figure moves. Stage 2 wires them into the five readers. The SQL
- * is shared as text rather than as a view or function: a function body changes
+ * In 1.1 these fragments were used only by the comparison on Data & Sync and
+ * the end-of-sync check, so the rule could be previewed on production before
+ * any figure moved. From 1.2 all five readers use them: item_position_at and
+ * ownedPositions (On order), the item page's PO rows, the Suppliers open-PO
+ * count and the Overview region table. test/open-po-rule.test.ts fails the
+ * build if a sixth reader tests status 'OPEN' without OPEN_PO_DOC. The SQL is
+ * shared as text rather than as a view or function: a function body changes
  * at boot, before the code that reads it has been proven, and a fragment
- * ships and reverts with the code.
+ * ships and reverts with the code. (item_position_at is itself a function,
+ * so its body still changes at boot; it is built from these same fragments.)
  */
 
 /** A table alias, checked so a fragment can never be handed anything else. */

@@ -84,8 +84,10 @@ test("the bill test has one copy: OPEN_PO_DOC negates it and the Open purchase o
   assert.match(body, /\$\{OPEN_PO_DOC\("o"\)\} AS counted/);
   assert.match(body, /\$\{PO_BILLED_ON_OR_AFTER\("o"\)\} AS billed/);
   assert.doesNotMatch(body, /myob_purchase_bills/);
-  // Today's figure is reported beside the proposed one (outstandingToday).
-  assert.match(body, /outstandingToday: Number\(x\.outstanding_today\)/);
+  // What it adds to On order today (outstandingToday): from 1.2 On order
+  // follows the rule, so that is the rule's outstanding on a counted document
+  // and nothing on any other, never a second copy of the line arithmetic.
+  assert.match(body, /outstandingToday: counted \? outstanding : 0/);
 });
 
 test("the line clamp: received below 0 or above ordered can't make a line negative or inflate it", () => {

@@ -282,6 +282,12 @@ th {
 
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* Item page, Commitments & incoming (1.2): the PO rows get their own heading
+   ("Outstanding", not the sale orders' "Qty") and a total that equals On order. */
+tr.po-subhead th { padding-top: 0.8rem; }
+tr.po-total td { border-top: 1px solid var(--ink-deep); color: var(--muted); }
+tr.po-total td.num { color: var(--brand-deep); }
+
 tr.rowlink { cursor: pointer; }
 tr.rowlink:hover { background: var(--brand-soft); }
 

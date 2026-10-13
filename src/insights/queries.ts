@@ -2,6 +2,7 @@ import { businessToday } from "./businessDate.js";
 import { config } from "../config.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
+import { OPEN_PO_DOC, OUTSTANDING, OUTSTANDING_LINE } from "../sync/openPo.js";
 import type { PoolClient } from "pg";
 import { inTransaction, logChange, supplierMetaOf, supplierStateOf } from "./changeLog.js";
 import {
@@ -1316,13 +1317,17 @@ export async function overview(opts?: Partial<DemandWindow>) {
       SELECT MIN(last_synced_at) AS oldest, MAX(last_synced_at) AS newest
       FROM sync_state
     `),
+    // Open POs by region: the documents that count as stock on order
+    // (openPo.ts, 1.2). MYOB's reversal twins used to be counted here too, 6
+    // extra documents on 13 Oct (4 Hanova, 2 Steelgal); each pair nets to
+    // nothing, so dropping them moves the count and not the value.
     pool.query(`
       SELECT s.country, m.region AS override,
              COALESCE(SUM(o.total), 0)::float8 AS value, COUNT(*)::int AS orders
       FROM myob_purchase_orders o
       LEFT JOIN myob_suppliers s ON s.uid = o.supplier_uid
       LEFT JOIN platform_supplier_meta m ON m.supplier_uid = o.supplier_uid
-      WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
+      WHERE ${OPEN_PO_DOC("o")}
       GROUP BY s.country, m.region
     `),
     // Largest stock adjustments in the 30 days to the selected date, by
@@ -1653,12 +1658,21 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
          ORDER BY o.date DESC LIMIT 20`,
         [uid],
       ),
+      // The PO lines behind On order (1.2): the same documents and the same
+      // outstanding quantity item_position_at counts, so the rows add up to
+      // the On order figure today. A line with nothing left to arrive is not
+      // shown, nor is a reversal document: BP1675G listed five rows here
+      // totalling 34,600 ordered while one PO, 00023060, has 11,000 coming.
+      // No cap, or the rows would stop adding up. qty and received_qty stay
+      // for a tab loaded before 1.2, which shows qty.
       pool.query(
-        `SELECT o.number, o.date, o.promised_date, o.supplier_name,
-                l.qty::float8 AS qty, l.received_qty::float8 AS received_qty
+        `SELECT o.uid AS po_uid, o.number, o.date, o.promised_date, o.supplier_name,
+                l.qty::float8 AS qty, l.received_qty::float8 AS received_qty,
+                ${OUTSTANDING("l")}::float8 AS outstanding
          FROM myob_purchase_order_lines l JOIN myob_purchase_orders o ON o.uid = l.order_uid
-         WHERE l.item_uid = $1 AND UPPER(COALESCE(o.status,'')) = 'OPEN'
-         ORDER BY o.date DESC LIMIT 20`,
+         WHERE l.item_uid = $1 AND ${OPEN_PO_DOC("o")} AND ${OUTSTANDING_LINE("l")}
+           AND ${OUTSTANDING("l")} > 0
+         ORDER BY o.date DESC, o.number, l.idx`,
         [uid],
       ),
       pool.query(
@@ -2012,10 +2026,13 @@ export async function suppliersList(params: { q?: string } & Partial<DemandWindo
            lead.promised_days, lead.lead_po_count
     FROM myob_suppliers s
     LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
+    -- Open POs that count as stock on order (openPo.ts, 1.2). The reversal
+    -- twins MYOB leaves Open came off: Hanova 6 -> 2 and Steelgal 2 -> 0 on
+    -- 13 Oct, with the open value unchanged because each pair nets to nothing.
     LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(o.total), 0)::float8 AS open_value, COUNT(*)::int AS open_count
       FROM myob_purchase_orders o
-      WHERE o.supplier_uid = s.uid AND UPPER(COALESCE(o.status, '')) = 'OPEN'
+      WHERE o.supplier_uid = s.uid AND ${OPEN_PO_DOC("o")}
     ) po ON TRUE
     LEFT JOIN LATERAL (
       SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (

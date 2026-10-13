@@ -57,9 +57,21 @@ which covers them explicitly. Verified: MYOB's BOM matches build-observed
 quantities on **489 of 496** cross-checkable pairs, and adds 299 live parents
 that builds never reveal.
 
-**PO receipt.** Receipt is recorded by the *bill*, not the order. `ReceivedQuantity`
-on PO lines is **0 on every line** in Allied's file, so it cannot be used to
-detect receipt. Watch for the double debit/credit artefact described in §3.
+**PO receipt.** Receipt is recorded by the *bill*, not the order: a billed PO
+becomes `ConvertedToBill`, and its lines keep `ReceivedQuantity` 0 (every one of
+3,124 lines on the 26 Aug copy). `ReceivedQuantity` is **not always 0**, though.
+On the 26 Aug copy 94 lines of Open POs carry one, all on the three reversal
+pairs MYOB left Open after a billed PO was reversed: each billed original
+(00019910, 00020624, 00022808) and its negative twin (00020462 for 00019910;
+the other two twins reuse their original's number). The 47 lines on the
+originals are 45 fully received and 2 part-received, such as BN16110G on
+00019910 (7,697 of 10,982); the twins carry the 47 matching negative lines.
+So it cannot be used on its own to detect receipt, and an
+Open status does not mean stock is coming. On order uses the rule in
+`src/sync/openPo.ts` (from 1.2): a document counts when it is Open, its total is
+not negative and no bill with the same number from the same supplier is dated
+on or after it; a line counts ordered minus received, received clamped to
+0..ordered. Watch for the double debit/credit artefact described in §3.
 
 ---
 

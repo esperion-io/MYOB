@@ -18,9 +18,28 @@ import { displayVersion, releaseBanner } from "./release-banner.js";
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.1.0";
+const UI_VERSION = "1.2.0";
 
 const RELEASES = [
+  {
+    version: "1.2.0",
+    // The ship date, not the build date: historicalNotice reads it to say
+    // which past days still carry the old On order. Set it on the day 1.2
+    // deploys, with the figures below re-derived from that evening's capture.
+    date: "2026-10-14",
+    stage: "Stage 2: On order matches MYOB",
+    changes: [
+      "On order now matches MYOB. Some purchase orders MYOB still shows as Open are reversals of POs that were already billed, and until now we counted them as stock on order. They are no longer counted, so On order, and Available with it, drop on the six items listed below. Version 1.1 previewed exactly this change on Data & Sync as \"Proposed rule\".",
+      "Suggested orders follow: SPW12G's suggestion goes up, and BN16110G gets one, because stock we thought was coming isn't. If you have typed a quantity on the Order list, it is kept.",
+      "On an item page, Commitments & incoming lists only purchase orders with something still to arrive. Their column reads Outstanding (ordered minus received), and a total row underneath equals On order. Reversal documents no longer appear: BP1675G shows one PO, 00023060 for 11,000, instead of five. The list is no longer cut off at 20 rows.",
+      "The Suppliers page and the Overview's region table count only real open POs: Hanova goes from 6 to 2 and Steelgal from 2 to 0. The open PO value doesn't change, because each reversal cancels out the PO it reverses.",
+      "Kits that use these items may show fewer buildable including incoming.",
+      "On Data & Sync, On order vs MYOB now lists only AFLSA390 and AFLSA490, which are known (a PO older than the data we hold).",
+      "Past dates: days before this version that have a stored daily snapshot keep the On order recorded on the day, so they still include the reversals for these six items. History isn't rewritten. A page showing one of those days says so at the top. Earlier dates, with no snapshot, are already worked out under the new rule.",
+    ],
+    numbers: "As at 13 Oct, and re-checked on the day this version ships. On order (and Available): WSBT450G 112,897 → 0 (Available 115,237 → 2,340); WQ16806G 53,670 → 0 (56,063 → 2,393); BP1675G 34,600 → 11,000 (40,440 → 16,840); SPW12G 15,560 → 15,000 (17,495 → 16,935); BN16110G 5,285 → 2,000 (7,980 → 4,695); BP1690G 3,135 → 3,000 (3,775 → 3,640). Suggested order: SPW12G 3,004 → 3,564; BN16110G none → 1,305 (about NZ$673). BP1675G stays at none: its minimum of 6,648 is still covered. Overview: Suggested orders goes up by 1, and the region table's open POs fall by 6 in total (4 Hanova documents, 2 Steelgal), with the open PO value unchanged. Total on order across all items 1,077,370 → 883,223, and items with stock on order 92 → 90. On hand, committed, free stock, cover, risk and minimums don't change.",
+    check: "In MYOB, WSBT450G shows 0 on order and BP1675G 11,000; the dashboard shows the same. Open BP1675G: Commitments & incoming shows one PO, 00023060, Outstanding 11,000, and the total row = On order 11,000. On Data & Sync, On order vs MYOB lists only AFLSA390 and AFLSA490.",
+  },
   {
     version: "1.1.0",
     date: "2026-10-14",
@@ -97,7 +116,7 @@ const TERMS = {
   incoming: {
     label: "Incoming",
     short: "Quantity still to arrive on open purchase orders.",
-    long: "Outstanding quantity on open purchase orders (ordered − received). Subtracted once when suggesting an order.",
+    long: "Outstanding quantity on open purchase orders (ordered − received). A purchase order MYOB still shows as Open after it was billed and reversed is not counted, so this matches MYOB's own on-order figure. Subtracted once when suggesting an order.",
   },
   weekly_demand: {
     label: "Weekly demand",
@@ -1128,8 +1147,20 @@ function historicalNotice(d) {
          both are exact. Average cost is today's, so the valuation is an approximation.`
       : "";
 
+  // 1.2 corrected On order from its ship day on; closed days keep what was
+  // recorded then. Said only where this view reports reading a stored
+  // snapshot: without one (or without the flag — Products, Suppliers, the
+  // Order list) On order is recomputed under the corrected rule (on the 26 Aug
+  // copy the 10 Aug Order list shows SPW12G with 0 incoming, 560 under 1.1).
+  const onOrderFix = RELEASES.find((r) => r.version === "1.2.0")?.date ?? null;
+  const beforeFix =
+    onOrderFix && windowState.asAt < onOrderFix && stored
+      ? ` On order on days before 1.2 (released ${dateFmt(`${onOrderFix}T12:00:00`)}) included MYOB reversal
+         documents for six items; see What's new.`
+      : "";
+
   return `<div class="notice warn">Showing the stock position <strong>as at ${dateFmt(windowState.asAt)}</strong>.
-    Sales and demand cover the ${windowLabel()} up to that date.${provenance}${gaps}</div>`;
+    Sales and demand cover the ${windowLabel()} up to that date.${provenance}${gaps}${beforeFix}</div>`;
 }
 
 /* ---------- overview ---------- */
@@ -1991,6 +2022,42 @@ function buildabilityHtml(b) {
     </div>`;
 }
 
+/*
+ * The purchase-order rows of "Commitments & incoming" (1.2).
+ *
+ * Each row shows what is still to arrive on that line, and the rows add up to
+ * On order: the server sends only lines that count, from the same rule On
+ * order uses. Before 1.2 the list showed what was ordered on every line of
+ * every document MYOB calls Open, reversals included, so BP1675G listed five
+ * rows (34,600) against one PO, 00023060, with 11,000 coming. A server before
+ * 1.2 sends no `outstanding`: its rows keep the old "Qty" heading and get no
+ * total, because they don't add up to On order.
+ *
+ * The list is today's even at a past date, so the total says so there.
+ */
+function incomingRows(incoming) {
+  if (!incoming?.length) return "";
+  const hasOutstanding = incoming.some((o) => o.outstanding != null);
+  const total = incoming.reduce((a, o) => a + (Number(o.outstanding ?? o.qty) || 0), 0);
+  return `<tr class="po-subhead"><th>Purchase orders</th><th>PO</th><th>Date</th>
+      <th class="num">${hasOutstanding ? "Outstanding" : "Qty"}</th><th>Supplier</th></tr>
+    ${incoming
+      .map(
+        (o) => `<tr><td><span class="badge ok">PO open</span></td><td>${esc(o.number ?? "—")}</td>
+        <td>${dateFmt(o.promised_date ?? o.date)}</td>
+        <td class="num"${o.outstanding != null && o.qty != null
+          ? ` title="Ordered ${qty(o.qty)}, received ${qty(o.received_qty ?? 0)}"`
+          : ""}>${qty(o.outstanding ?? o.qty)}</td>
+        <td class="muted">${esc(o.supplier_name ?? "")}</td></tr>`,
+      )
+      .join("")}
+    ${hasOutstanding
+      ? `<tr class="po-total"><td colspan="3">${isHistorical()
+          ? "Still to arrive today (this list is today's, not the selected date's)"
+          : "= On order"}</td><td class="num"><strong>${qty(total)}</strong></td><td></td></tr>`
+      : ""}`;
+}
+
 async function renderItem(uid) {
   main.innerHTML = '<p class="loading">Loading item…</p>';
   const d = await fetchJson(withWindow(`/api/insights/items/${encodeURIComponent(uid)}`));
@@ -2272,13 +2339,7 @@ async function renderItem(uid) {
                   <td class="muted">${esc(c.customer_name ?? "")}</td></tr>`,
                 )
                 .join("")}
-              ${d.incoming
-                .map(
-                  (o) => `<tr><td><span class="badge ok">PO open</span></td><td>${esc(o.number ?? "—")}</td>
-                  <td>${dateFmt(o.promised_date ?? o.date)}</td><td class="num">${qty(o.qty)}</td>
-                  <td class="muted">${esc(o.supplier_name ?? "")}</td></tr>`,
-                )
-                .join("")}
+              ${incomingRows(d.incoming)}
               ${
                 !d.commitments.length && !d.incoming.length
                   ? '<tr><td colspan="5" class="muted">No open sales orders or purchase orders.</td></tr>'
@@ -3465,12 +3526,14 @@ async function loadDivergence() {
 /*
  * On order vs MYOB, and the open purchase orders behind it (1.1).
  *
- * A preview, not a change: our On order counts every line of every purchase
- * order MYOB calls Open, which includes the reversal documents MYOB leaves
- * open when a billed PO is reversed — 194,147 phantom units on the 26 Aug
- * copy, 112,897 of them on WSBT450G. "Proposed rule" is what the coming fix
- * would show, so it can be checked against MYOB on live data before any
- * figure moves. Fields are read with `?? null`: a server before 1.1 has none.
+ * In 1.1 a preview: our On order counted every line of every purchase order
+ * MYOB calls Open, including the reversal documents MYOB leaves open when a
+ * billed PO is reversed — 194,147 phantom units on the 26 Aug copy, 112,897
+ * of them on WSBT450G — and "Proposed rule" showed what the fix would give.
+ * From 1.2 that rule is On order (`onOrder.ruleLive`), so the list is the
+ * standing check that it still reproduces MYOB, and the documents list says
+ * what each one adds now. Against a 1.1 server (a rollback) the 1.1 columns
+ * come back. Fields are read with `?? null`: a server before 1.1 has none.
  */
 const OPEN_DOC_REASON = {
   counted: "Counted",
@@ -3494,6 +3557,31 @@ function renderOnOrderCheck(d) {
   const parity = d.positionParity ?? null;
   const notYet = '<p class="muted">— Not available from this server yet. Reload the page after the next update.</p>';
 
+  // The explanations are chosen by the same switch as the tables, so a 1.2 tab
+  // left open against a 1.1 server (rollback) never describes columns that are
+  // not on screen.
+  const ruleLive = onOrder?.ruleLive === true;
+  const onOrderHint = ruleLive
+    ? `<p class="hint">MYOB leaves some purchase orders Open after they have been billed and reversed. Since
+      version 1.2 On order skips those (a document with a negative total, or one with a bill of the same
+      number from the same supplier), which brings it into line with MYOB's own figure. This list is the
+      check that it stays that way: it should show only items marked known. Any other item here has a
+      purchase order MYOB counts differently, and is worth a look.</p>`
+    : `<p class="hint">Our On order counts every line of every purchase order MYOB calls Open. MYOB leaves
+      some of those open after a PO has been billed and reversed, so stock that is not coming gets counted.
+      <strong>Proposed rule</strong> is what On order will show once a coming update fixes that: it skips
+      documents with a negative total and documents already billed. Nothing here changes any figure yet.</p>`;
+  const docsHint = ruleLive
+    ? `<p class="hint">Every purchase order MYOB shows as Open, and whether On order counts it.
+      <strong>Adds to On order today</strong> is what the document contributes to On order now.
+      <strong>Still to receive on its lines</strong> is what its lines say: ordered minus received, with
+      negative-quantity lines left out and received capped at what was ordered. The two are the same on a
+      counted document; a document that is not counted adds nothing, whatever its lines say.</p>`
+    : `<p class="hint">Every purchase order MYOB shows as Open, and whether the proposed rule counts it.
+      <strong>Adds to On order today</strong> is what the document contributes to On order now: ordered
+      minus received on every line, as MYOB records them. <strong>Outstanding (proposed rule)</strong> is
+      the same with negative-quantity lines left out and received capped at what was ordered. A document
+      that is not counted adds nothing to On order under the proposed rule, whatever its lines say.</p>`;
   if (onOrderEl) {
     const rows = onOrder?.rows ?? null;
     const parityLine =
@@ -3506,9 +3594,23 @@ function renderOnOrderCheck(d) {
               ${(parity.sample ?? []).map((x) => `${esc(x.number ?? "—")} ${esc(PARITY_FIELD[x.field] ?? x.field)}: ${qty(x.owned)} vs ${qty(x.view)}`).join(" · ")}</div>`;
     onOrderEl.outerHTML = rows == null
       ? notYet
-      : !rows.length
+      : onOrderHint + (!rows.length
         ? `<p class="muted">Nothing differs — On order matches MYOB on every item.</p>${parityLine}`
-        : `<p class="hint">${qty(rows.length)} ${rows.length === 1 ? "item differs" : "items differ"}.
+        : ruleLive
+          ? `<p class="hint">${qty(rows.length)} ${rows.length === 1 ? "item differs" : "items differ"};
+            ${qty(rows.filter((r) => r.known).length)} ${rows.filter((r) => r.known).length === 1 ? "is" : "are"} a known difference.</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Item</th><th class="num">Ours</th><th class="num">MYOB</th><th></th></tr></thead>
+            <tbody>${rows.map((r) => `<tr>
+              <td><strong>${esc(r.number ?? "—")}</strong><br /><span class="muted">${esc(r.name ?? "")}</span></td>
+              <td class="num">${qty(r.ours)}</td>
+              <td class="num">${qty(r.myob)}</td>
+              <td>${r.known
+                ? `<span class="badge idle">known: ${esc(r.known)}</span>`
+                : '<span class="badge fail">Differs from MYOB — check its purchase orders</span>'}</td>
+            </tr>`).join("")}</tbody>
+          </table></div>${parityLine}`
+          : `<p class="hint">${qty(rows.length)} ${rows.length === 1 ? "item differs" : "items differ"}.
           The proposed rule matches MYOB on ${qty(rows.filter((r) => r.proposedMatchesMyob).length)};
           ${qty(rows.filter((r) => r.known).length)} ${rows.filter((r) => r.known).length === 1 ? "is" : "are"} a known difference.</p>
         <div class="table-wrap"><table>
@@ -3524,21 +3626,22 @@ function renderOnOrderCheck(d) {
                 ? '<span class="badge ok">Proposed = MYOB</span>'
                 : '<span class="badge fail">Proposed differs from MYOB</span>'}</td>
           </tr>`).join("")}</tbody>
-        </table></div>${parityLine}`;
+        </table></div>${parityLine}`);
   }
 
   if (docsEl) {
     if (docs == null) {
       docsEl.outerHTML = notYet;
     } else if (!docs.length) {
-      docsEl.outerHTML = '<p class="muted">No purchase orders are open in MYOB.</p>';
+      docsEl.outerHTML = `${docsHint}<p class="muted">No purchase orders are open in MYOB.</p>`;
     } else {
       const counted = docs.filter((x) => x.counted).length;
-      docsEl.outerHTML = `<p class="hint">${qty(docs.length)} open in MYOB: ${qty(counted)} counted,
-        ${qty(docs.length - counted)} not counted under the proposed rule.</p>
+      docsEl.outerHTML = `${docsHint}<p class="hint">${qty(docs.length)} open in MYOB: ${qty(counted)} counted,
+        ${qty(docs.length - counted)} not counted${ruleLive ? "" : " under the proposed rule"}.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>PO</th><th>Supplier</th><th>Date</th><th class="num">Total</th>
-            <th class="num">Adds to On order today</th><th class="num">Outstanding (proposed rule)</th><th>Counted</th></tr></thead>
+            <th class="num">Adds to On order today</th>
+            <th class="num">${ruleLive ? "Still to receive on its lines" : "Outstanding (proposed rule)"}</th><th>Counted</th></tr></thead>
           <tbody>${docs.map((x) => `<tr>
             <td><strong>${esc(x.number ?? "—")}</strong></td>
             <td>${esc(x.supplier ?? "—")}</td>
@@ -3635,20 +3738,11 @@ async function renderData() {
 
     <section class="panel" id="on-order-panel">
       <h2>On order vs MYOB</h2>
-      <p class="hint">Our On order counts every line of every purchase order MYOB calls Open. MYOB leaves
-      some of those open after a PO has been billed and reversed, so stock that is not coming gets counted.
-      <strong>Proposed rule</strong> is what On order will show once a coming update fixes that: it skips
-      documents with a negative total and documents already billed. Nothing here changes any figure yet.</p>
       <p class="loading">Loading…</p>
     </section>
 
     <section class="panel" id="open-docs-panel">
       <h2>Open purchase orders</h2>
-      <p class="hint">Every purchase order MYOB shows as Open, and whether the proposed rule counts it.
-      <strong>Adds to On order today</strong> is what the document contributes to On order now: ordered
-      minus received on every line, as MYOB records them. <strong>Outstanding (proposed rule)</strong> is
-      the same with negative-quantity lines left out and received capped at what was ordered. A document
-      that is not counted adds nothing to On order under the proposed rule, whatever its lines say.</p>
       <p class="loading">Loading…</p>
     </section>
 

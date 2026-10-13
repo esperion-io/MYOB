@@ -19,6 +19,13 @@ How a change gets from a branch to Allied's screen, how to prove it moved only w
 - **The end-of-sync check.** Each sync records `stats.on_order_below_myob`: item numbers whose On order reads below MYOB's, apart from `KNOWN_PRE_FLOOR` (AFLSA390/490). It runs in its own try/catch, so it can never fail a sync; a failure is recorded as `stats.on_order_below_myob_error`. The sync chip turns amber with "On order below MYOB on N items" when the newest successful run lists any, or "On order check did not run" when it carries the error, which Recent sync runs also shows.
 - **Lead-time and minimum edits are logged.** Supplier meta, item lead times and minimums write a `platform_change_log` row (entities `supplier_meta`, `item_lead_time`, `min_stock`) with the rows before and after, in the same transaction as the edit. A bulk edit is one row with its items in `detail.items`. `supplier-rollback.mjs log` lists them; `undo` refuses them by design, and says to re-enter the "before" figure in the dashboard. `BACKUP_TABLES` / `TABLES` are unchanged.
 
+## What 1.2 changed
+
+- **On order follows `src/sync/openPo.ts`.** All five readers of open POs use its fragments: `item_position_at` (body only; same arguments and `RETURNS TABLE`), `ownedPositions`, the item page PO rows, the Suppliers open-PO lateral and the Overview region table. `test/open-po-rule.test.ts` fails the build if any SQL in `src/` tests status `'OPEN'` on `myob_purchase_orders` without `OPEN_PO_DOC`, or if `GREATEST(COALESCE(l.qty` comes back.
+- **Additive fields.** `/items/:uid` `incoming[]` gains `outstanding` and `po_uid` (`qty` and `received_qty` stay for older tabs) and lists only lines with something to arrive, with no 20-row cap. `/divergence` `onOrder` gains `ruleLive: true`; `openDocs[].outstandingToday` now reads the rule (the document's `outstanding` when counted, else 0).
+- **`stage-check` captures kit pages** (`kits/<number>.json`: every watched kit and every kit a watched item goes into), because buildable incl. incoming lives only there. Take both captures of a release with the same checkout of the script, or the kit files show as added.
+- **`stage-check expect <before> <after>`** generates a numbers release's allow-list from two captures of the same data. Review it before committing; never hand-write it.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -180,6 +187,28 @@ Before you start:
    - [ ] `/sync/status` `recentRuns[0]` is `success`, its `stats.on_order_below_myob` is an array (expected `[]`), and it has no `on_order_below_myob_error`.
    - [ ] The sync chip reads "Data synced … ago", with no "below MYOB" or "check did not run" text.
    - [ ] Record the result in the 1.1.0 row of `FIX-PLAN.md` Part 5. Anything below MYOB, or the error, stops Stage 2 until it is explained.
+
+## Stage 2 deploy: On order matches MYOB
+
+The only release in the plan that changes a function body (`item_position_at`), so "Failed deploy" above applies. It is never withdrawn: MYOB's figure is the spec, so a problem is fixed forward.
+
+Before the evening:
+- [ ] Refresh the local copy from production, `DELETE FROM connections` on it, and regenerate the allow-list on it, same data both times:
+  1. Check out the 1.1 commit in a separate worktree and start it on the copy (`npm run dev:local`; its boot puts the 1.1 body back). `node scripts/stage-check.mjs capture ../captures/1.2.0-local-before --base local`, using the 1.2 checkout's script.
+  2. Stop it, start the 1.2 branch on the same copy, `capture ../captures/1.2.0-local-after --base local`.
+  3. `node scripts/stage-check.mjs expect ../captures/1.2.0-local-before ../captures/1.2.0-local-after --stage "Stage 2: On order matches MYOB" > scripts/expected/1.2.0.json`. Read every entry. Expect the six items (WSBT450G, WQ16806G, BP1675G, SPW12G, BN16110G, BP1690G) and what follows from them, and nothing else. The committed file was generated on the 26 Aug copy, where no suggestion moves; on live data SPW12G and BN16110G suggestions, their cart lines and CSV cells, and the Overview suggested count also move.
+  4. Leave the local copy on the 1.2 body.
+- [ ] Re-derive the release note's figures from that evening's Stage 1 "Proposed rule" column, and set the 1.2.0 `RELEASES` date to the ship date (the past-date notice reads it).
+- [ ] Send Allied the before/after table as a heads-up.
+
+On the evening (pre-flight, window and steps as for any deploy):
+- [ ] Capture before, push, wait for `release.version` = `1.2.0`, capture after, `diff --allow scripts/expected/1.2.0.json`: 0 not allowed, and no expected change missing.
+- [ ] Each item's new On order equals the Stage 1 "Proposed rule" figure captured that evening. On order vs MYOB lists only AFLSA390/490.
+- [ ] The `coverBelowLeadTime` count is unchanged (119 before and after on the 26 Aug copy).
+- [ ] `positionParity` is 0.
+- [ ] After the next sync, the chip is green. **Roll back immediately (R1) if any item other than AFLSA390/490 reads below MYOB.**
+- [ ] Allied confirm in MYOB: WSBT450G = 0 and BP1675G = 11,000. Record it in Part 5.
+- [ ] Rollback note for Allied, if ever needed: days that closed while 1.2 was live keep the corrected figure, so history becomes mixed.
 
 ## Snapshots and data changes
 

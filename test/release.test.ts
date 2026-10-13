@@ -21,7 +21,7 @@ import { compareVersions, releaseBanner } from "../public/release-banner.js";
 // @ts-ignore — build script, no types
 import { readDashboardRelease, releaseProblems } from "../scripts/check-release.mjs";
 // @ts-ignore — ops script, no types
-import { allowMatcher, capture, diffCaptures, loadAllow, makeGetter, parseCsv, resolveBase } from "../scripts/stage-check.mjs";
+import { allowMatcher, capture, diffCaptures, loadAllow, makeGetter, parseCsv, proposeAllow, resolveBase } from "../scripts/stage-check.mjs";
 
 const pkgVersion: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
@@ -373,4 +373,74 @@ test("diff --allow: listed paths pass, anything else fails, and the 1.0 list all
   assert.ok(allowMatcher("release").test("release.version"));
   assert.ok(!allowMatcher("release").test("releaseNotes"));
   assert.deepEqual(parseCsv('a,"b,""c"""\r\n1,2\r\n'), [["a", 'b,"c"'], ["1", "2"]]);
+});
+
+test("expect (1.2): a generated allow-list passes exactly the captured changes and nothing on another record", () => {
+  const items = (a: number, b: number) => ({ items: [{ uid: "a", qtyOnOrder: a }, { uid: "b", qtyOnOrder: b }] });
+  const before = writeCapture({
+    "items.json": items(112897, 5),
+    "cart.csv": "Supplier,Item number,Order qty\r\nHAN,WR16301.5S16,10\r\n",
+    "manifest.json": { release: { version: "1.1.0", commit: "local" }, capturedAt: "t1" },
+  });
+  const after = writeCapture({
+    "items.json": items(0, 5),
+    "cart.csv": "Supplier,Item number,Order qty\r\nHAN,WR16301.5S16,12\r\n",
+    "manifest.json": { release: { version: "1.2.0", commit: "local" }, capturedAt: "t2" },
+  });
+  const elsewhere = writeCapture({
+    "items.json": items(0, 6),
+    "cart.csv": "Supplier,Item number,Order qty\r\nHAN,WR16301.5S16,12\r\n",
+  });
+  const dir = mkdtempSync(join(tmpdir(), "stage-expect-"));
+  try {
+    const spec = proposeAllow(before, after, { stage: "Stage 2: test" });
+    assert.equal(spec.version, "1.2.0");
+    assert.deepEqual(
+      spec.allow.map((a: { file: string; path: string; before: unknown; after: unknown }) => [a.file, a.path, a.before, a.after]),
+      [
+        ["cart.csv", "rows[WR16301.5S16|HAN].Order qty", "10", "12"],
+        ["items.json", "items[a].qtyOnOrder", 112897, 0],
+        // Always listed: a deploy changes the release block even when, as
+        // locally, the commit reads the same before and after.
+        ["sync-status.json", "release", undefined, undefined],
+      ],
+    );
+    const file = join(dir, "x.json");
+    writeFileSync(file, JSON.stringify(spec));
+    const allow = loadAllow(file);
+    assert.ok(diffCaptures(before, after, allow).changes.every((c: { allowed: boolean }) => c.allowed));
+    // The same field on a record the list does not name still fails, and a
+    // dotted item number is matched literally, not as "any character".
+    const bad = diffCaptures(before, elsewhere, loadAllow(file)).changes.filter((c: { allowed: boolean }) => !c.allowed);
+    assert.deepEqual(bad.map((c: { path: string }) => c.path), ["items[b].qtyOnOrder"]);
+    assert.ok(!allowMatcher("rows[WR16301.5S16|HAN].Order qty").test("rows[WR16301X5S16|HAN].Order qty"));
+  } finally {
+    for (const d of [before, after, elsewhere, dir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("expect (1.2): a positional list that lost rows is listed whole, one that only moved stays exact", () => {
+  const po = (number: string, qty: number, extra = {}) => ({ number, qty, ...extra });
+  const before = writeCapture({
+    "items/BP1675G.json": { item: { qtyOnOrder: 34600 }, incoming: [po("00023060", 11000), po("00022808", 23600), po("00019910", 0)] },
+    "overview.json": { regions: [{ region: "Asia", openPoOrders: 13 }, { region: "NZ", openPoOrders: 8 }] },
+  });
+  const after = writeCapture({
+    "items/BP1675G.json": { item: { qtyOnOrder: 11000 }, incoming: [po("00023060", 11000, { outstanding: 11000 })] },
+    "overview.json": { regions: [{ region: "Asia", openPoOrders: 9 }, { region: "NZ", openPoOrders: 8 }] },
+  });
+  try {
+    const spec = proposeAllow(before, after);
+    assert.deepEqual(
+      spec.allow.map((a: { file: string; path: string; changes?: number }) => [a.file, a.path, a.changes ?? null]),
+      [
+        ["items/BP1675G.json", "item.qtyOnOrder", null],
+        ["items/BP1675G.json", "incoming", 3],
+        ["overview.json", "regions[0].openPoOrders", null],
+        ["sync-status.json", "release", null],
+      ],
+    );
+  } finally {
+    for (const d of [before, after]) rmSync(d, { recursive: true, force: true });
+  }
 });

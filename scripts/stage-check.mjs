@@ -6,11 +6,13 @@
  * moves a named few (a numbers release). Saying so is not evidence. This takes
  * a full read-only snapshot of what the dashboard serves — every item, the
  * Overview, the Order list and both its exports, suppliers, divergence, kits,
- * sync status and the item pages of a fixed watch-list — before and after a
- * deploy, and fails on any difference the release did not list in advance.
+ * sync status, the item pages of a fixed watch-list and the kit pages around
+ * them — before and after a deploy, and fails on any difference the release
+ * did not list in advance.
  *
  *   DASHBOARD_KEY=… node scripts/stage-check.mjs capture <dir> [--base local|prod|URL]
  *   node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]
+ *   node scripts/stage-check.mjs expect <before> <after> [--stage "…"]   (1.2: generate an allow-list)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -197,6 +199,10 @@ export async function capture(dir, { get, key = "", base = "", log = () => {} })
     .sort()[0] ?? null;
   const watch = [...WATCH, ...(split && !WATCH.includes(split) ? [split] : [])];
   const resolved = {};
+  // Kit pages (1.2): every watched item that is a kit, and every kit a watched
+  // item goes into. "Buildable incl. incoming" lives only there, and it moves
+  // whenever a component's On order does.
+  const kits = new Map();
   for (const number of watch) {
     const uid = numbers.get(number) ?? null;
     resolved[number] = uid;
@@ -205,12 +211,24 @@ export async function capture(dir, { get, key = "", base = "", log = () => {} })
       continue;
     }
     try {
-      write(join("items", `${safeName(number)}.json`), await get(`/items/${encodeURIComponent(uid)}`));
+      const detail = await get(`/items/${encodeURIComponent(uid)}`);
+      write(join("items", `${safeName(number)}.json`), detail);
+      if (detail?.components?.length) kits.set(uid, number);
+      for (const p of detail?.whereUsed ?? []) if (p?.uid && p.number) kits.set(p.uid, p.number);
     } catch (err) {
       problems.push(err.message);
     }
   }
   log(`${"items/".padEnd(24)}${Object.values(resolved).filter(Boolean).length} of ${watch.length} watched items`);
+  if (kits.size) mkdirSync(join(dir, "kits"), { recursive: true });
+  for (const [uid, number] of [...kits].sort((a, b) => a[1].localeCompare(b[1]))) {
+    try {
+      write(join("kits", `${safeName(number)}.json`), await get(`/kits/${encodeURIComponent(uid)}`));
+    } catch (err) {
+      problems.push(err.message);
+    }
+  }
+  log(`${"kits/".padEnd(24)}${kits.size} kit pages (watched kits and the kits watched items go into)`);
 
   write("manifest.json", {
     capturedAt: new Date().toISOString(),
@@ -419,6 +437,91 @@ export function diffCaptures(beforeDir, afterDir, allow = []) {
   return { changes, unused: allow.filter((x) => !x.used) };
 }
 
+/* ---------- generating an allow-list ---------- */
+
+/**
+ * A numbers release's allow-list, generated rather than hand-written (1.2):
+ * capture the same data before and after the change (locally, on one copy of
+ * the database), and every difference becomes one entry with its exact path
+ * and the before and after it showed. A hand-written list says what we think
+ * moves; this one says what did, and is then read line by line before it is
+ * committed. Paths keep their record identities (an item's uid, a cart line's
+ * item|supplier), so on production a figure moving on any other record still
+ * fails. A record key containing `*` would widen its entry (allowMatcher reads
+ * it as a wildcard); no item number or uid does today.
+ *
+ * Two changes are not listed one by one:
+ *   - sync-status.json `release` is one entry: every deploy changes its
+ *     version and commit, and locally the commit reads "local" both times;
+ *   - a list compared by position (no uid to pair its records by) that gained
+ *     or lost a record is one entry for the whole list. Past the first record
+ *     removed, positions no longer line up, so per-position entries would be
+ *     describing an accident of order (the item page's PO rows, in 1.2).
+ *
+ * Entries carry `before` and `after` for the reviewer; loadAllow reads only
+ * `file`, `path` and `why`.
+ */
+export function proposeAllow(beforeDir, afterDir, { version = null, stage = null, note = null } = {}) {
+  const manifest = (dir) => {
+    try {
+      return JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  const ma = manifest(beforeDir);
+  const mb = manifest(afterDir);
+  const { changes } = diffCaptures(beforeDir, afterDir);
+  const whole = new Map(); // `${file} ${list path}` -> entry
+  for (const c of changes) {
+    const m = /^(.*)\[\d+\]$/.exec(c.path);
+    if (m && m[1] && (c.before === undefined || c.after === undefined)) {
+      whole.set(`${c.file} ${m[1]}`, {
+        file: c.file,
+        path: m[1],
+        why: "a list compared by position gained or lost records between the two captures; listed whole",
+        changes: 0,
+      });
+    }
+  }
+  const allow = [];
+  let release = null;
+  for (const c of changes) {
+    if (c.file === "sync-status.json" && /^release(\.|$)/.test(c.path)) {
+      if (!release) {
+        release = { file: c.file, path: "release", why: "every deploy reports its own version and commit" };
+        allow.push(release);
+      }
+      continue;
+    }
+    const list = [...whole.values()].find((w) => w.file === c.file && c.path.startsWith(`${w.path}[`));
+    if (list) {
+      if (!list.changes++) allow.push(list);
+      continue;
+    }
+    allow.push({
+      file: c.file,
+      path: c.path,
+      why: "moved between the two captures this list was generated from",
+      before: c.before,
+      after: c.after,
+    });
+  }
+  if (!release) allow.push({ file: "sync-status.json", path: "release", why: "every deploy reports its own version and commit" });
+  return {
+    version: version ?? mb?.release?.version ?? null,
+    stage,
+    note:
+      note ??
+      `Generated by stage-check expect from two captures of the same data: ${changes.length} differences as ${allow.length} entries. Review each entry before committing; any change not listed here fails the diff.`,
+    generatedFrom: {
+      before: { release: ma?.release ?? null, capturedAt: ma?.capturedAt ?? null },
+      after: { release: mb?.release ?? null, capturedAt: mb?.capturedAt ?? null },
+    },
+    allow,
+  };
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -442,7 +545,7 @@ async function main() {
       continue;
     }
     const name = argv[i].slice(2);
-    if (!["base", "allow"].includes(name)) fail(`Unknown option --${name}.`);
+    if (!["base", "allow", "stage"].includes(name)) fail(`Unknown option --${name}.`);
     const v = argv[++i];
     if (v === undefined || v.startsWith("--")) fail(`--${name} needs a value.`);
     options[name] = v;
@@ -477,10 +580,17 @@ async function main() {
     process.exit(bad.length ? 1 : 0);
   }
 
+  if (command === "expect" && args.length === 2 && !options.base && !options.allow) {
+    // Prints the list; redirect it into scripts/expected/<version>.json and review it.
+    process.stdout.write(`${JSON.stringify(proposeAllow(args[0], args[1], { stage: options.stage ?? null }), null, 2)}\n`);
+    return;
+  }
+
   fail(
     "Usage:\n" +
       "  DASHBOARD_KEY=… node scripts/stage-check.mjs capture <dir> [--base local|prod|URL]\n" +
-      "  node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]",
+      "  node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]\n" +
+      "  node scripts/stage-check.mjs expect <before> <after> [--stage \"Stage N: …\"] > scripts/expected/<version>.json",
   );
 }
 

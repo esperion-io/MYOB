@@ -697,12 +697,14 @@ export async function ownedPositions(
          AND (o.date::date <= $1::date OR $1::date >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),
+     -- Stock on order under the openPo.ts rule (1.2), the same fragments
+     -- item_position_at uses; positionParity checks the two agree.
      our_on_order AS (
-       SELECT l.item_uid, SUM(GREATEST(COALESCE(l.qty, 0) - COALESCE(l.received_qty, 0), 0))::float8 AS qty
+       SELECT l.item_uid, SUM(${OUTSTANDING("l")})::float8 AS qty
        FROM myob_purchase_order_lines l
        JOIN myob_purchase_orders o ON o.uid = l.order_uid
-       WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
-         AND l.item_uid IS NOT NULL
+       WHERE ${OPEN_PO_DOC("o")}
+         AND ${OUTSTANDING_LINE("l")}
          AND (o.date::date <= $1::date OR $1::date >= ${BUSINESS_TODAY_SQL})
        GROUP BY l.item_uid
      ),
@@ -1080,8 +1082,11 @@ export async function divergenceReport(): Promise<Record<string, unknown>> {
     committedValueAtRisk: committed.reduce((a, x) => a + Number(x.committed_value_at_risk ?? 0), 0),
     onHandValueAtRisk: onHand.reduce((a, x) => a + Number(x.on_hand_value_at_risk ?? 0), 0),
     items: r.rows,
-    // 1.1: additive, for the on-order preview on Data & Sync.
-    onOrder: onOrderCheck(await onOrderComparison()),
+    // 1.1: additive, for the on-order preview on Data & Sync. From 1.2 the
+    // proposed rule IS the rule, so "ours" equals "proposed" on every row and
+    // what remains is a real difference from MYOB; ruleLive says so to the
+    // page (a 1.1 server never sends it).
+    onOrder: { ...onOrderCheck(await onOrderComparison()), ruleLive: true },
     openDocs: await openPurchaseDocs(),
     positionParity: positionParity(await ownedPositions(), await viewPositions()),
   };
@@ -1097,6 +1102,11 @@ export async function divergenceReport(): Promise<Record<string, unknown>> {
  * would give. On the 26 Aug copy that is the six reversal-PO items, where the
  * proposed figure lands exactly on MYOB's, plus AFLSA390/490 (12 each on a PO
  * from before the sync floor).
+ *
+ * From 1.2 ours is computed by that rule, so the two columns agree and the
+ * list is down to AFLSA390/490. It stays as the standing check that the rule
+ * still reproduces MYOB: anything else appearing here is a document MYOB
+ * counts differently, and the end-of-sync warning reads the same comparison.
  *
  * MYOB's qty_on_order is read here, inside the ledger, which owns every
  * comparison with MYOB's raw quantities (scripts/check-ledger-boundary.mjs).
@@ -1149,20 +1159,29 @@ export interface OpenPurchaseDoc {
   total: number | null;
   counted: boolean;
   reason: ReturnType<typeof openDocReason>;
-  /** Units still to receive on its lines, under the proposed rule's line clamp (qty > 0 lines only). */
+  /** Units still to receive on its lines, under the rule's line clamp (qty > 0 lines only). */
   outstanding: number;
-  /** What it adds to On order today: every line, ordered minus received, floored at 0. */
+  /**
+   * What it adds to On order today. In 1.1 that was today's old rule (every
+   * line, ordered minus received, floored at 0), so the not-counted rows
+   * added up to the phantom. From 1.2 On order follows the rule, so it is
+   * `outstanding` on a counted document and 0 on any other.
+   */
   outstandingToday: number;
 }
 
 /**
- * Every document MYOB calls Open, and whether the proposed rule counts it.
- * Locally: 22 Open documents, 16 counted; not counted are 00019910 (billed in
- * full, yet 3,420 units still "to receive") with its negative twin 00020462,
- * and both halves of 00022808 and 00020624. The negative 00022808 alone is
- * the 190,727 phantom units today's rule counts; with 00019910's 3,420 that is
- * the 194,147 On order vs MYOB shows, which is why each row carries both
- * figures (outstandingToday: what it adds now; outstanding: under the rule).
+ * Every document MYOB calls Open, and whether the rule counts it. Locally: 22
+ * Open documents, 16 counted; not counted are 00019910 (billed in full, yet
+ * 3,420 units still "to receive") with its negative twin 00020462, and both
+ * halves of 00022808 and 00020624. Before 1.2 the negative 00022808 alone put
+ * 190,727 phantom units on order, and with 00019910's 3,420 that was the
+ * 194,147 On order vs MYOB showed. The list stays from 1.2 as the place to see
+ * why a document MYOB calls Open adds nothing.
+ *
+ * It deliberately reads every Open document, not just the counted ones, so it
+ * tests status itself and carries OPEN_PO_DOC as a column
+ * (test/open-po-rule.test.ts allows exactly that).
  */
 async function openPurchaseDocs(): Promise<OpenPurchaseDoc[]> {
   const r = await getPool().query(
@@ -1171,20 +1190,15 @@ async function openPurchaseDocs(): Promise<OpenPurchaseDoc[]> {
             ${OPEN_PO_DOC("o")} AS counted,
             ${PO_BILLED_ON_OR_AFTER("o")} AS billed,
             COALESCE((SELECT SUM(${OUTSTANDING("l")}) FROM myob_purchase_order_lines l
-                      WHERE l.order_uid = o.uid AND ${OUTSTANDING_LINE("l")}), 0)::float8 AS outstanding,
-            -- Today's rule, as item_position_at counts it (every line, ordered
-            -- minus received, floored at 0), so the not-counted rows add up to
-            -- the excess On order vs MYOB shows. Stage 2 makes it equal
-            -- outstanding on every counted document.
-            COALESCE((SELECT SUM(GREATEST(COALESCE(l.qty, 0) - COALESCE(l.received_qty, 0), 0))
-                      FROM myob_purchase_order_lines l
-                      WHERE l.order_uid = o.uid AND l.item_uid IS NOT NULL), 0)::float8 AS outstanding_today
+                      WHERE l.order_uid = o.uid AND ${OUTSTANDING_LINE("l")}), 0)::float8 AS outstanding
      FROM myob_purchase_orders o
      WHERE UPPER(COALESCE(o.status, '')) = 'OPEN'
      ORDER BY o.number, o.total DESC, o.uid`,
   );
   return r.rows.map((x) => {
     const total = x.total == null ? null : Number(x.total);
+    const counted = Boolean(x.counted);
+    const outstanding = Number(x.outstanding);
     return {
       uid: x.uid as string,
       number: x.number as string | null,
@@ -1192,10 +1206,10 @@ async function openPurchaseDocs(): Promise<OpenPurchaseDoc[]> {
       date: x.date as string | null,
       promisedDate: x.promised_date as string | null,
       total,
-      counted: Boolean(x.counted),
+      counted,
       reason: openDocReason({ total, billedOnOrAfter: Boolean(x.billed) }),
-      outstanding: Number(x.outstanding),
-      outstandingToday: Number(x.outstanding_today),
+      outstanding,
+      outstandingToday: counted ? outstanding : 0,
     };
   });
 }
@@ -1230,8 +1244,9 @@ export interface ParityRow {
  * snapshot, the month-end export and the item ledger read). Each carries its
  * own copy of the on-hand, committed and on-order rules, so a change to one
  * that misses the other would show Allied two different stock figures for the
- * same item on the same day. Stage 2 edits both on-order copies; this is the
- * check that it edited them alike. It must read 0.
+ * same item on the same day. Stage 2 (1.2) moved both on-order copies onto
+ * the openPo.ts fragments; this is the check that they still agree. It must
+ * read 0.
  */
 export function positionParity(
   owned: ParityRow[],
