@@ -16,6 +16,7 @@
  *   node scripts/stage-check.mjs cover <after> [--before <before>] [--base …]   (1.3: the cover identities)
  *   node scripts/stage-check.mjs splits <after> [--before <before>]   (1.4: the Order list total for splits)
  *   node scripts/stage-check.mjs schedule <after> [--base …]   (1.9: incoming POs add up to On order)
+ *   npx tsx scripts/stage-check.mjs gap <after> [--base …]    (1.10: stock gaps, recomputed with the server's projection)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -886,6 +887,202 @@ export async function scheduleCheck(dir, { get = null } = {}) {
   return scheduleChecks({ items, details, docs });
 }
 
+/* ---------- 1.10: stock gaps ---------- */
+
+/*
+ * `stage-check gap`: the server's gap fields recomputed, field for field,
+ * from what /items/:uid serves (the item and its incomingSchedule), with the
+ * server's own pure projectItem (src/insights/projection.ts, passed in as
+ * `projection`, so this file still runs under plain node for every other
+ * command). With --base it fetches every item with stock on order plus 50
+ * others spread through the list (GET only); without it, the capture's
+ * watched pages. Then the identities the plan names:
+ *   - the first run-out with no counted delivery before it is free-stock
+ *     cover × 7 days, to within 1 day;
+ *   - every known gap end is one of the item's ETAs (a due line's date);
+ *   - gapStatus is gap.status; the Overview count, and with --base the
+ *     gap and incoming_overdue filters and the gap sort, agree with the
+ *     items list.
+ * It prints the counts by status, how many gap + gap_open items are NOT
+ * flagged below lead time (the 26 Aug prototype found 33 of 34 were), and
+ * one line per item that runs out before its next delivery.
+ */
+const GAP_FIELD_KEYS = ["gap", "gapStatus", "nextDelivery", "incomingOverdueQty"];
+
+/** Key-order-free equality for JSON values. */
+function sameJson(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null || typeof a !== "object" || typeof b !== "object") return Number.isNaN(a) && Number.isNaN(b);
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && sameJson(a[k], b[k]));
+}
+
+function daysFrom(a, b) {
+  const t = (iso) => {
+    const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((t(b) - t(a)) / 86_400_000);
+}
+
+const runsOut = (s) => s === "gap" || s === "gap_open";
+
+/** Every 1.10 check as { check, ok, detail }, the counts and the per-item table. */
+export function gapChecks({ items, details, projection, overview = null, lists = null }) {
+  const out = [];
+  const add = (check, bad, detail) =>
+    out.push({ check, ok: bad.length === 0, detail: bad.length ? `${bad.length}: ${bad.slice(0, 5).join("; ")}` : detail });
+  const name = (i) => i.number ?? i.uid;
+
+  const old = items.filter((i) => GAP_FIELD_KEYS.some((k) => !(k in i))).map(name);
+  add("every item carries gap, gapStatus, nextDelivery, incomingOverdueQty (a 1.10 server)", old, `${items.length} items`);
+
+  // Field for field, from the item page's own inputs.
+  const mismatch = [];
+  const listDiffers = [];
+  const byUid = new Map(items.map((i) => [i.uid, i]));
+  for (const [uid, d] of details) {
+    const it = d?.item;
+    if (!it) continue;
+    const today = d.incomingScheduleDate;
+    const served = Object.fromEntries(GAP_FIELD_KEYS.map((k) => [k, it[k] ?? null]));
+    const lines = Array.isArray(d.incomingSchedule) ? d.incomingSchedule : [];
+    // At a past date the server projects nothing; a page served with
+    // schedule facts only (no status) must carry null fields.
+    const want =
+      it.gapStatus === undefined || lines.some((l) => !("status" in l))
+        ? { gap: null, gapStatus: null, nextDelivery: null, incomingOverdueQty: null }
+        : projection.projectItem(projection.projectionInput(it, lines, today));
+    const bad = GAP_FIELD_KEYS.filter((k) => !sameJson(served[k], want[k] ?? null));
+    if (bad.length) mismatch.push(`${name(it)}: ${bad.join(", ")}`);
+    const row = byUid.get(uid);
+    if (row && GAP_FIELD_KEYS.some((k) => !sameJson(row[k] ?? null, served[k]))) listDiffers.push(name(it));
+  }
+  add("projectItem(item page inputs) = the server's gap fields, field for field", mismatch, `${details.size} item pages`);
+  add("the items list carries the item page's gap fields", listDiffers, `${details.size} items`);
+
+  const statusOk = items.filter((i) => (i.gap?.status ?? null) !== (i.gapStatus ?? null)).map(name);
+  add("gapStatus = gap.status", statusOk, "holds on every item");
+
+  // The cover identity, over every item: nextDelivery is the soonest
+  // counted delivery, so none before the run-out means it is null or on or
+  // after that day. From the item's own figures, not the gap's echo of them.
+  const cover = [];
+  const ends = [];
+  let coverChecked = 0;
+  const today = [...details.values()].find((d) => d?.incomingScheduleDate)?.incomingScheduleDate ?? null;
+  for (const it of items) {
+    const g = it.gap;
+    if (!g?.runOut || !today) continue;
+    if (it.nextDelivery && it.nextDelivery.eta < g.runOut) continue;
+    const weekly = unroundedWeekly(it.demand);
+    if (!(weekly > 0) || it.qtyFreeStock == null) continue;
+    coverChecked += 1;
+    const want = (Math.max(it.qtyFreeStock, 0) / weekly) * 7;
+    const got = daysFrom(today, g.runOut);
+    if (Math.abs(got - want) > 1 + 1e-9) cover.push(`${name(it)} runs out in ${got} d, cover × 7 = ${want.toFixed(2)}`);
+  }
+  for (const [, d] of details) {
+    const it = d?.item;
+    const g = it?.gap;
+    if (!g?.runOut) continue;
+    const lines = d.incomingSchedule ?? [];
+    if (g.status === "gap") {
+      const etas = new Set(lines.filter((l) => l.status === "due").map((l) => l.eta));
+      if (!etas.has(g.end) || g.endingPo?.eta !== g.end) ends.push(`${name(it)} ends ${g.end}, not a due ETA`);
+    }
+  }
+  add("first run-out with no counted delivery before it = free-stock cover × 7, within 1 day", cover, `${coverChecked} items`);
+  add("every known gap end is one of the item's ETAs", ends, "holds on every gap");
+
+  const counts = { gap: 0, gap_open: 0, covered: 0, tight: 0, nothing_on_order: 0, no_demand: 0, built_here: 0, none: 0 };
+  let notBelowLead = 0;
+  let overdueItems = 0;
+  for (const i of items) {
+    counts[i.gapStatus ?? "none"] = (counts[i.gapStatus ?? "none"] ?? 0) + 1;
+    if (i.gapStatus === "covered" && i.gap?.tight) counts.tight += 1;
+    if (runsOut(i.gapStatus) && !i.coverBelowLeadTime) notBelowLead += 1;
+    if ((i.incomingOverdueQty ?? 0) > 0) overdueItems += 1;
+  }
+  const runsOutCount = counts.gap + counts.gap_open;
+
+  if (overview) {
+    const k = overview.kpis?.runsOutBeforeNextDelivery;
+    add("Overview runsOutBeforeNextDelivery = gap + gap_open in the items list", k === runsOutCount ? [] : [`${k} vs ${runsOutCount}`], `${runsOutCount} items`);
+  }
+  if (lists?.gapFilter) {
+    const bad = lists.gapFilter.rows.filter((r) => !runsOut(r.gapStatus)).map(name);
+    if (lists.gapFilter.rows.length !== runsOutCount) bad.unshift(`filter lists ${lists.gapFilter.rows.length}, ${runsOutCount} items run out`);
+    add("filter=gap lists exactly gap + gap_open", bad, `${runsOutCount} items`);
+  }
+  if (lists?.overdueFilter) {
+    const bad = lists.overdueFilter.rows.filter((r) => !((r.incomingOverdueQty ?? 0) > 0)).map(name);
+    if (lists.overdueFilter.rows.length !== overdueItems) bad.unshift(`filter lists ${lists.overdueFilter.rows.length}, ${overdueItems} items have incoming overdue or late`);
+    add("filter=incoming_overdue lists exactly the items with incoming past its date", bad, `${overdueItems} items`);
+  }
+  if (lists?.gapSort) {
+    const v = lists.gapSort.rows.map((r) => (runsOut(r.gapStatus) ? r.gap?.start ?? null : null));
+    const firstNull = v.indexOf(null);
+    const head = firstNull < 0 ? v : v.slice(0, firstNull);
+    const bad = [];
+    if (lists.gapSort.dir !== "asc") bad.push(`first click sorts ${lists.gapSort.dir}`);
+    head.forEach((x, k) => k && head[k - 1] > x && bad.push(`row ${k + 1}: ${head[k - 1]} then ${x}`));
+    if (firstNull >= 0 && v.slice(firstNull).some((x) => x != null)) bad.push("a run-out after the first blank");
+    if (head.length !== runsOutCount) bad.push(`${head.length} dated rows, ${runsOutCount} items run out`);
+    add("sort=gap: soonest run-out first, the rest last", bad, `${head.length} run-outs`);
+  }
+
+  const table = items
+    .filter((i) => runsOut(i.gapStatus))
+    .map((i) => ({
+      number: name(i),
+      status: i.gapStatus,
+      start: i.gap.start,
+      end: i.gap.end,
+      days: i.gap.days,
+      short: i.gap.unitsShort,
+      po: i.gap.endingPo ? `${i.gap.endingPo.number} ${i.gap.endingPo.basis}` : null,
+      reason: i.gap.openReason,
+      belowLead: Boolean(i.coverBelowLeadTime),
+    }))
+    .sort((a, b) => String(a.start).localeCompare(String(b.start)) || String(a.number).localeCompare(String(b.number)));
+  return { checks: out, counts: { ...counts, runsOut: runsOutCount, notBelowLead, overdueItems }, table };
+}
+
+/** Every item with stock on order, plus `others` more spread evenly through the rest by item number. */
+export function gapSample(items, others = 50) {
+  const onOrder = items.filter((i) => i.qtyOnOrder > 0);
+  const rest = items.filter((i) => !(i.qtyOnOrder > 0)).sort((a, b) => String(a.number).localeCompare(String(b.number)));
+  const step = rest.length / Math.max(Math.min(others, rest.length), 1);
+  const picked = [];
+  for (let k = 0; k < Math.min(others, rest.length); k++) picked.push(rest[Math.floor(k * step)]);
+  return [...onOrder, ...picked];
+}
+
+/** `gap <capture> [--base …]`: the capture's items and Overview, item pages and lists fetched if asked. */
+export async function gapCheck(dir, { get = null, projection }) {
+  const items = JSON.parse(readFileSync(join(dir, "items.json"), "utf8")).items;
+  const overview = existsSync(join(dir, "overview.json")) ? JSON.parse(readFileSync(join(dir, "overview.json"), "utf8")) : null;
+  const details = new Map();
+  let lists = null;
+  if (get) {
+    for (const i of gapSample(items)) details.set(i.uid, await get(`/items/${encodeURIComponent(i.uid)}`));
+    lists = {
+      gapFilter: await servedList(get, "filter=gap&sort=number&dir=asc"),
+      overdueFilter: await servedList(get, "filter=incoming_overdue&sort=number&dir=asc"),
+      gapSort: await servedList(get, "sort=gap"),
+    };
+  } else if (existsSync(join(dir, "items"))) {
+    for (const f of readdirSync(join(dir, "items"))) {
+      const d = JSON.parse(readFileSync(join(dir, "items", f), "utf8"));
+      if (d?.item?.uid) details.set(d.item.uid, d);
+    }
+  }
+  return gapChecks({ items, details, projection, overview, lists });
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -941,6 +1138,34 @@ async function main() {
     process.exit(checks.every((c) => c.ok) ? 0 : 1);
   }
 
+  if (command === "gap" && args.length === 1 && !options.allow && !options.before) {
+    // The server's own pure projection, so a match means the same code gave
+    // the same answer. It is TypeScript: run this command under tsx.
+    let projection;
+    try {
+      projection = await import("../src/insights/projection.ts");
+    } catch (err) {
+      fail(`stage-check gap reads src/insights/projection.ts; run it with tsx: npx tsx scripts/stage-check.mjs gap <capture> [--base …] (${err.message})`);
+    }
+    const get = options.base
+      ? makeGetter({ base: resolveBase(options.base), key: process.env.DASHBOARD_KEY?.trim() ?? "" })
+      : null;
+    const { checks, counts, table } = await gapCheck(args[0], { get, projection });
+    for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
+    console.log(
+      `counts: gap ${counts.gap}, gap_open ${counts.gap_open}, covered ${counts.covered} (tight ${counts.tight}), nothing_on_order ${counts.nothing_on_order}, ` +
+        `no_demand ${counts.no_demand}, built_here ${counts.built_here}, no position ${counts.none}; incoming overdue or late on ${counts.overdueItems} items`,
+    );
+    console.log(`${counts.notBelowLead} of the ${counts.runsOut} that run out before their next delivery are NOT flagged below lead time.`);
+    for (const r of table)
+      console.log(
+        `  ${String(r.number).padEnd(16)} ${r.status.padEnd(8)} ${r.start} → ${r.end ?? `end unknown (${r.reason})`}` +
+          `${r.days != null ? `, ${r.days} d` : ""}${r.short != null ? `, ~${r.short} short` : ""}${r.po ? `, ends on ${r.po}` : ""}${r.belowLead ? "" : "  [not below lead time]"}`,
+      );
+    if (!get) console.log("note: only the capture's watched item pages recomputed; pass --base to fetch every item with stock on order plus 50 others, and the filter and sort lists (GET only).");
+    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  }
+
   if (command === "splits" && args.length === 1 && !options.allow && !options.base) {
     const checks = splitCheck(args[0], { beforeDir: options.before ?? null });
     for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
@@ -989,7 +1214,8 @@ async function main() {
       "  node scripts/stage-check.mjs expect <before> <after> [--stage \"Stage N: …\"] > scripts/expected/<version>.json\n" +
       "  node scripts/stage-check.mjs cover <after> [--before <before>] [--base local|prod|URL]\n" +
       "  node scripts/stage-check.mjs splits <after> [--before <before>]\n" +
-      "  node scripts/stage-check.mjs schedule <after> [--base local|prod|URL]",
+      "  node scripts/stage-check.mjs schedule <after> [--base local|prod|URL]\n" +
+      "  npx tsx scripts/stage-check.mjs gap <after> [--base local|prod|URL]",
   );
 }
 

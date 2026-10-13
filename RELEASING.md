@@ -98,6 +98,19 @@ Allied's request #2, part 1: "If an ETA date on the PO can Allied use that data 
 - **`stage-check schedule <after> [--base local|prod|URL]`** checks a capture: Σ schedule outstanding = `qtyOnOrder` per item, the summary adds up, the POs listed are exactly the counted open documents with stock to arrive and no reversal, one date per PO across every item, promised exactly when the Promised Date ≥ the PO date, estimate = PO date + lead, rows in order, and Data & Sync's date = the item pages'. `--base` fetches every item with stock on order (GET only; about 125 pages); without it only the watched pages are checked. It prints one line per PO.
 - **Stage 9 deploy:** see "Stage 9 deploy" below.
 
+## What 1.10 changed
+
+Stage 11 of the plan, the groundwork for Allied's request #2 part 2 ("show what gaps might exist between current stock levels, current demand, and incoming stock"). It ships as 1.10 because versions follow ship order and Stage 10 (the daily PO record) has not shipped; the plan's heading says 1.11. Nothing on screen changes and no figure moves; no table, view or function is added.
+
+- **The projection** (`src/insights/projection.ts`, `projectItem`, pure: no database, no clock, type-only imports). P(d) = free stock today + Σ outstanding on schedule lines that are dated, still to come (status `due`) and ≤ d − (weekly ÷ 7) × d, with weekly the unrounded rate free-stock cover uses (`weeklyRate`, rebuilt from `demand`'s sums). Committed is reserved today, as free stock already does. Overdue, late and undated lines are not counted. The horizon is the later of the last dated delivery and the day free stock alone runs out, capped at 26 weeks. The run-out is the first day P < 0; the gap ends on the counted delivery that brings P back to ≥ 0 (`end`, `endingPo` with its basis), else it is `gap_open` with `openReason` `overdue` | `late` | `no_date` | `after_26_weeks` | `too_small` (in that order of precedence). `unitsShort` is the deepest shortfall, today's included; an open gap's depth is unknown, so it carries today's shortfall when it starts today and null otherwise (Stage 12 shows it as blank, never as a total). Threshold zero; `minLevel` travels as a reference only. Statuses: `gap`, `gap_open`, `covered` (with `tight` when the next counted delivery lands under 14 days before free stock alone runs out), `nothing_on_order`, `no_demand` (no demand and free stock not negative; already-negative free stock is projected, a gap from today), `built_here` (a kit whose form is `made_here` and that has no PO open for the complete kit; a kit on a PO is being bought complete and is projected like any item, never broken open). No position (free stock null): no projection.
+- **Attached in `computedItems`** (`attachGaps`), after the kit rules: one `openPoSchedule()` per cache build, started beside the item query and only when as-at is the business date. Every item gains `gap`, `gapStatus`, `nextDelivery` (soonest counted delivery: date, basis, largest PO that day, units that day, PO count) and `incomingOverdueQty` (units on lines overdue or late). All four are null at a past date.
+- **Fail-safe.** The schedule query's failure is caught where it starts; the projection runs over the whole set before anything is assigned. On any error every item gets null gap fields, one line is logged for that cache build ("Stock gaps left blank for this build: …"), and nothing is thrown: the Order list, the minimum review, kits, the Overview and Inventory carry on as on 1.9.
+- **Switch-off:** `GAP_ENABLED` in `queries.ts`. `false` runs no schedule query and leaves every field null. Withdrawing gaps after a later release has shipped is that one-line release, never a revert (§4.2): the constant, plus the version bump and its RELEASES entry as for any release. No test pins it to `true` (the off path is tested through `gapsRunFor(…, enabled)`), so `npm run build` passes with it `false`.
+- **Server keys, nothing on screen:** sort `gap` (soonest run-out first, gap + gap_open only, the rest last; first click ascending), filters `gap` (gap + gap_open) and `incoming_overdue` (`incomingOverdueQty` > 0), and Overview `kpis.runsOutBeforeNextDelivery` (null when nothing was projected). `INVENTORY_FILTERS`, `INVENTORY_SORTS` and `PURCHASING_SORTS` do not offer them yet (Stage 12); on a 1.9 checkout the filters list everything and the sort falls back to risk.
+- **Not touched:** no CSV column; gap fields are not in `flags`, so Tags, the CSV Flags column and risk are unchanged; suggestions, both covers, the cart and the daily rows read none of it. `test/incoming.test.ts` holds that: no file under `src/` but `queries.ts` and `projection.ts` mentions `projection.js` or a gap field; in `queries.ts` they appear only where it declares, attaches, sorts, filters and counts, and never in `computeItem` or `items.csv`; and `queries.ts` reads the schedule (`openPoSchedule`, `ScheduleRow`) only in `itemDetail` and the gap attachment.
+- **`npx tsx scripts/stage-check.mjs gap <after> [--base local|prod|URL]`** recomputes each item's four fields from its `/items/:uid` (the item and its `incomingSchedule`) with the server's own `projectItem` and fails on any difference. With `--base` it fetches every item with stock on order plus 50 others spread through the list (GET only) and the `gap` / `incoming_overdue` / `sort=gap` lists. It checks the identities (first run-out with no counted delivery before it = free-stock cover × 7 within a day, on every item; every known gap end is one of the item's due ETAs) and the Overview count, and prints the counts by status, how many gap + gap_open items are not flagged below lead time, and one line per item that runs out. It runs under tsx (it imports the `.ts` module); every other command still runs under plain node.
+- **Stage 11 deploy:** see "Stage 11 deploy" below.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -389,6 +402,31 @@ On the evening (pre-flight and window as for any deploy):
 4. [ ] `positionParity` is 0.
 5. [ ] In the browser (GET only): BN1665G's panel reads 00023070 ~10 Dec, "ETA missing — estimated: raised 12 Aug + 120 days (HANOVA INTERNATIONAL LTD lead set by Allied) · measured 83 days would give ~3 Nov"; Data & Sync lists the POs with no Promised Date; a past date shows "Open purchase orders today" with no dates.
 6. [ ] Send the release note. After Allied enter their first Promised Dates: the next sync's capture shows those POs as `promised`, and the "N of M" count falls.
+
+## Stage 11 deploy: Stock gaps, server only
+
+Groundwork with additive fields only. No figure moves, nothing is written, nothing on screen changes, so no snapshot (§4.10). Rollback is a pure revert while 1.10 is the newest release; after that, a release setting `GAP_ENABLED = false` (with its version and RELEASES entry; `npm run build` passes with the switch off).
+
+Before the evening, on the refreshed local copy (`npm run dev:local`):
+- [ ] `stage-check capture` before (1.9 checkout) and after, `diff --allow scripts/expected/1.10.0.json`: 0 not allowed; `items.csv`, `cart.csv`, `suppliers.json`, `divergence.json` and the kit pages byte-identical, `cart.json` apart from `generatedAt`.
+- [ ] `npx tsx scripts/stage-check.mjs gap <after> --base local`: all ok. Note the counts.
+- [ ] Fail-safe, on a scratch copy of the tree (never the repo): make `projectItem` throw. `/items`, `/cart`, `/min-stock`, `/overview` and an item page answer 200 with every gap field null, `filter=gap` lists nothing, `runsOutBeforeNextDelivery` is null, and one "Stock gaps left blank for this build" line is logged per cache build.
+
+On the evening (pre-flight and window as for any deploy):
+1. [ ] **Latency before**, on 1.9: each of `/items`, `/cart` and `/min-stock` (the Minimum stock review behind `#/purchasing/minimums`) 3 times, 35 s apart so each call rebuilds the 30-second item cache. GET only, the key in the header:
+   ```sh
+   for p in "/items?pageSize=50" /cart /min-stock; do for k in 1 2 3; do
+     curl -s -o /dev/null -H "x-dashboard-key: $DASHBOARD_KEY" -w "$p %{http_code} %{time_total}\n" "https://esperion-inventory-dashboard.onrender.com/api/insights$p"; sleep 35
+   done; done
+   ```
+2. [ ] Capture before. **Re-derive the plan's expected-values table** (FEEDBACK-PLAN Stage 11) from the 1.9 capture: for each item there, free stock and weekly from `items.json`, its POs' expected dates from its item page (`incomingSchedule`, with that evening's Promised Dates and Allied's leads). The run-outs move every day and BN1665G's has probably passed.
+3. [ ] Push, wait for `release.version` = `1.10.0`, capture after, `diff --allow scripts/expected/1.10.0.json`: 0 not allowed.
+4. [ ] `npx tsx scripts/stage-check.mjs gap ../captures/1.10.0-after --base prod`: all ok, and its lines agree with step 2. Record the gap and gap_open counts and how many are not flagged below lead time (the 26 Aug prototype: 33 of 34; the 26 Aug copy under 1.10: 44 of 46) for the Part 5 row and the commit body.
+5. [ ] **Latency after:** step 1 again on 1.10. Each endpoint's median within +20% of its median before. Over that, set `GAP_ENABLED = false` in a 1.10.1 (or revert, while 1.10 is newest) and look at the schedule query.
+6. [ ] **Fail-safe live:** `/overview` `kpis.runsOutBeforeNextDelivery` is a number, not null, and the Render log for the deploy has no "Stock gaps left blank for this build" line. Either would mean the fail-safe fired: the screens are fine, but find out why before Stage 12.
+7. [ ] `positionParity` is 0. Send the release note (What's new says only "Groundwork for stock gaps; nothing on screen changes.").
+
+If rolled back: nothing to restore. A 1.9 page and server ignore the new fields; a `filter=gap` URL lists everything on 1.9.
 
 ## Snapshots and data changes
 

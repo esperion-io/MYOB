@@ -3,7 +3,14 @@ import { config } from "../config.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { OPEN_PO_DOC, OUTSTANDING, OUTSTANDING_LINE } from "../sync/openPo.js";
-import { openPoSchedule, promisedHistory, scheduleFacts, summariseSchedule } from "./incoming.js";
+import { openPoSchedule, promisedHistory, scheduleFacts, summariseSchedule, type ScheduleRow } from "./incoming.js";
+import {
+  NO_GAP_FIELDS,
+  projectionInput,
+  projectItem,
+  runsOutBeforeNextDelivery,
+  type GapFields,
+} from "./projection.js";
 import type { PoolClient } from "pg";
 import { inTransaction, logChange, supplierMetaOf, supplierStateOf } from "./changeLog.js";
 import {
@@ -547,6 +554,19 @@ export interface ItemComputed {
    * row at a time.
    */
   kit: KitFacts | null;
+  /*
+   * Stock gaps (1.10): when free stock runs out against today's dated
+   * deliveries (projection.ts). Attached by computedItems after the kit
+   * rules, on every item, and null at a past date (MYOB keeps no PO
+   * history), with GAP_ENABLED off, or after a failure. Optional only so
+   * computeItem, which must never see them, can return without them.
+   * Nothing calculates from them: not the suggestion, flags, risk, either
+   * cover figure, the cart or the daily rows.
+   */
+  gap?: GapFields["gap"];
+  gapStatus?: GapFields["gapStatus"];
+  nextDelivery?: GapFields["nextDelivery"];
+  incomingOverdueQty?: GapFields["incomingOverdueQty"];
 }
 
 /** Exported for test/cover-incl.test.ts (1.3); the screens reach it through computedItems. */
@@ -998,6 +1018,63 @@ export async function kitRuleSummary(
   return itemsCache?.kitSummary ?? EMPTY_KIT_SUMMARY;
 }
 
+/**
+ * The switch-off for stock gaps (1.10). Rollback is newest-first only
+ * (FEEDBACK-PLAN §4.2), so once a later release ships, the way to withdraw
+ * gaps is a one-line release setting this false: no schedule query runs and
+ * every gap field is null, which every screen already reads as "—".
+ */
+export const GAP_ENABLED = true;
+
+/**
+ * Whether a cache build projects gaps: the switch on, and as-at the business
+ * date (the schedule's statuses are today's; a past date has no schedule).
+ * Exported with the switch passed in, so a test runs the off path without
+ * the constant being pinned: a switch-off release must build.
+ */
+export function gapsRunFor(asAt: string, today: string, enabled: boolean = GAP_ENABLED): boolean {
+  return enabled && asAt === today;
+}
+
+/**
+ * Put the gap fields on every item (1.10). `schedule` is today's PO schedule,
+ * null at a past date or with GAP_ENABLED off, or the Error its query failed
+ * with.
+ *
+ * FAIL-SAFE. Every screen reads computedItems: the Order list, the minimum
+ * review, kits, the Overview, Inventory. A projection that throws must cost
+ * the gap fields and nothing else, so the whole set is worked out first and
+ * only then assigned: on any error every item gets null fields, the error is
+ * logged once for this cache build, and nothing is thrown. Exported, with
+ * the projection passed in, so a test can make it throw.
+ */
+export function attachGaps(
+  items: ItemComputed[],
+  schedule: ScheduleRow[] | Error | null,
+  today: string,
+  project: typeof projectItem = projectItem,
+  log: (message: string) => void = (m) => console.error(m),
+): void {
+  let fields: GapFields[] | null = null;
+  if (schedule instanceof Error) {
+    log(`Stock gaps left blank for this build: the PO schedule failed (${schedule.message}).`);
+  } else if (schedule) {
+    try {
+      const byItem = new Map<string, ScheduleRow[]>();
+      for (const r of schedule) {
+        const list = byItem.get(r.itemUid);
+        if (list) list.push(r);
+        else byItem.set(r.itemUid, [r]);
+      }
+      fields = items.map((i) => project(projectionInput(i, byItem.get(i.uid) ?? [], today)));
+    } catch (err) {
+      fields = null;
+      log(`Stock gaps left blank for this build: the projection failed (${err instanceof Error ? err.message : String(err)}).`);
+    }
+  }
+  items.forEach((i, k) => Object.assign(i, fields ? fields[k] : NO_GAP_FIELDS));
+}
+
 export async function computedItems(
   opts?: Partial<DemandWindow> | boolean,
 ): Promise<ItemComputed[]> {
@@ -1021,6 +1098,16 @@ export async function computedItems(
 
   const promise = (async () => {
     await ensureInsightsSchema();
+    // Today's PO schedule for the gap projection (1.10), started beside the
+    // item query rather than after it. Its failure is caught here, never
+    // awaited bare: a bad schedule must cost the gap fields, not the build.
+    const today = businessToday();
+    const schedule: Promise<ScheduleRow[] | Error> | null =
+      gapsRunFor(win.asAt, today)
+        ? openPoSchedule(undefined, today).catch((err: unknown) =>
+            err instanceof Error ? err : new Error(String(err)),
+          )
+        : null;
     const result = await getPool().query(
       `WITH ${demandCte(win)} ${itemSelect(win)}`,
     );
@@ -1034,6 +1121,8 @@ export async function computedItems(
      * whether a component still needs ordering.
      */
     const kitSummary = applyKitRules(items, await loadKitGraph());
+    // After the kit rules: a kit made here is told apart by its kit facts.
+    attachGaps(items, schedule ? await schedule : null, today);
     itemsCache = { key, at: Date.now(), items, kitSummary };
     return items;
   })();
@@ -1096,6 +1185,10 @@ const SORT_VALUES: Record<string, (i: ItemComputed) => number | string | null> =
   excess: (i) => i.excess?.value ?? null,
   potential: (i) => (i.potential.qtyWindow > 0 ? i.potential.qtyWindow : null),
   used_in: (i) => Math.max(i.parentCountDeep, i.parentCount),
+  // Soonest run-out first (1.10): the day free stock runs out before a
+  // counted delivery, for gap and gap_open; everything else has no gap and
+  // sorts last. ISO dates, so string order is date order.
+  gap: (i) => (runsOutBeforeNextDelivery(i.gapStatus) ? (i.gap?.start ?? null) : null),
 };
 
 /**
@@ -1111,6 +1204,7 @@ export const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
   cover_incl: "asc",
   available: "asc",
   on_hand: "asc",
+  gap: "asc",
 };
 
 /**
@@ -1248,6 +1342,16 @@ export async function listItems(params: ListParams) {
     case "committed":
       rows = rows.filter((r) => (r.qtyCommitted ?? 0) > 0);
       break;
+    // Stock gaps (1.10), today only: runs out before the next counted
+    // delivery, end known or not (gap + gap_open); and incoming that has
+    // missed its date, overdue against a Promised Date or late against an
+    // estimate. Both list nothing at a past date, where the fields are null.
+    case "gap":
+      rows = rows.filter((r) => runsOutBeforeNextDelivery(r.gapStatus));
+      break;
+    case "incoming_overdue":
+      rows = rows.filter((r) => (r.incomingOverdueQty ?? 0) > 0);
+      break;
   }
 
   const sortKey = params.sort && SORT_VALUES[params.sort] ? params.sort : "risk";
@@ -1312,6 +1416,12 @@ export async function overview(opts?: Partial<DemandWindow>) {
   const parents = items.filter((i) => i.componentCount > 0);
   const excessItems = items.filter((i) => i.excess != null);
   const excessValue = excessItems.reduce((s, i) => s + (i.excess?.value ?? 0), 0);
+  // 1.10: null, not 0, when there is no projection (a past date, gaps
+  // switched off, or a failed build), so nothing reads "none run out".
+  const gapsKnown = items.some((i) => i.gapStatus != null);
+  const runsOutBeforeNext = gapsKnown
+    ? items.filter((i) => runsOutBeforeNextDelivery(i.gapStatus)).length
+    : null;
 
   const attention = [...items]
     .sort((a, b) => b.risk.score - a.risk.score)
@@ -1439,6 +1549,7 @@ export async function overview(opts?: Partial<DemandWindow>) {
       trackedParents: parents.length,
       excessItems: excessItems.length,
       excessValue,
+      runsOutBeforeNextDelivery: runsOutBeforeNext,
     },
     relationships: relationships.rows,
     attention,

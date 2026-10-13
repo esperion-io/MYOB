@@ -50,9 +50,22 @@ import {
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.9.0";
+const UI_VERSION = "1.10.0";
 
 const RELEASES = [
+  {
+    version: "1.10.0",
+    // Set to the ship date. Nothing here names a live figure, so there is
+    // nothing to re-derive. (Stage 10, the daily PO record, has not shipped;
+    // versions follow ship order, so Stage 11 is 1.10.)
+    date: "2026-10-14",
+    stage: "Stage 11: Stock gaps (groundwork)",
+    changes: [
+      "Groundwork for stock gaps; nothing on screen changes.",
+    ],
+    numbers: "None. Nothing you see changes: suggested quantities, risk, cover, the Order list and the exports are exactly as before.",
+    check: "Nothing to check on screen. The footer reads Version 1.10.",
+  },
   {
     version: "1.9.0",
     // Set to the ship date, and re-derive every PO named here (dates, days

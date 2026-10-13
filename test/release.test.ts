@@ -242,6 +242,34 @@ test("check-release: withdrawn must name a later listed release; --pre-push need
   assert.match(releaseProblems({ ...base, newestTag: "v1.1.0" }).join("\n"), /not newer than the newest tag v1\.1\.0/);
 });
 
+test("check-release: 1.10 is newer than 1.9 as numbers, in RELEASES order, withdrawals and the tag check", () => {
+  // String order puts "1.10.0" before "1.9.0"; the first two-digit minor
+  // (1.10, ship order with Stage 10 skipped) is where that would bite.
+  const ok = releaseProblems({ pkgVersion: "1.10.0", uiVersion: "1.10.0", releases: [entry("1.10.0"), entry("1.9.0"), entry("1.8.0")] });
+  assert.deepEqual(ok, []);
+  const wrong = releaseProblems({ pkgVersion: "1.10.0", uiVersion: "1.10.0", releases: [entry("1.10.0"), entry("1.11.0"), entry("1.9.0")] });
+  assert.match(wrong.join("\n"), /not strictly newest first: 1\.10\.0 is listed above 1\.11\.0/);
+  assert.match(
+    releaseProblems({ pkgVersion: "1.9.0", uiVersion: "1.9.0", releases: [entry("1.9.0"), entry("1.10.0")] }).join("\n"),
+    /1\.9\.0 is listed above 1\.10\.0/,
+  );
+  const withdrawn = releaseProblems({
+    pkgVersion: "1.10.0",
+    uiVersion: "1.10.0",
+    releases: [entry("1.10.0"), entry("1.9.0", { withdrawn: "1.10.0" })],
+  });
+  assert.deepEqual(withdrawn, []);
+  const base = { pkgVersion: "1.10.0", uiVersion: "1.10.0", releases: [entry("1.10.0")] };
+  assert.deepEqual(releaseProblems({ ...base, newestTag: "v1.9.0" }), []);
+  assert.match(
+    releaseProblems({ pkgVersion: "1.9.0", uiVersion: "1.9.0", releases: [entry("1.9.0")], newestTag: "v1.10.0" }).join("\n"),
+    /not newer than the newest tag v1\.10\.0/,
+  );
+  assert.equal(compareVersions("1.10.0", "1.9.9"), 1);
+  assert.equal(compareVersions("1.9.0", "1.10.0"), -1);
+  assert.deepEqual(["1.9.0", "1.10.0", "1.8.0"].sort((a, b) => compareVersions(b, a)), ["1.10.0", "1.9.0", "1.8.0"]);
+});
+
 /* ---------- stage-check: GET only, key never written ---------- */
 
 test("stage-check refuses any method but GET before anything is sent", async () => {

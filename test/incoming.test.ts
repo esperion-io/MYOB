@@ -16,7 +16,7 @@
  * No database: incoming.ts's pool is created only on first use.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -283,13 +283,35 @@ test("the browser module stays DOM-free and clear of the banned stock names", ()
 
 /* ---------- nothing calculates from it ---------- */
 
-test("no ETA feeds a calculation: only the item page and Data & Sync read incoming.ts", () => {
+test("no ETA feeds a calculation: only the item page, Data & Sync and the gap projection read incoming.ts", () => {
   for (const f of ["src/insights/cart.ts", "src/insights/minStock.ts", "src/insights/kits.ts", "src/insights/kitPlan.ts", "src/sync/schema.ts", "src/sync/engine.ts"]) {
     assert.doesNotMatch(readFileSync(join(ROOT, f), "utf8"), /incoming\.js/, `${f} imports the schedule`);
   }
   const q = readFileSync(join(ROOT, "src/insights/queries.ts"), "utf8");
   const computeItem = q.slice(q.indexOf("export function computeItem("), q.indexOf("export async function kitRuleSummary("));
   assert.doesNotMatch(computeItem, /schedule|openPoSchedule|poEta/);
+  // In queries.ts the schedule is read in two places: the item page
+  // (itemDetail) and, from 1.10, computedItems for the gap projection. A third
+  // read (a sort, a filter or a count in listItems or the Overview) would
+  // feed a list from ETAs directly; the gap fields are the only way in.
+  const span = (from: string, to: string) => {
+    const a = q.indexOf(from);
+    const b = q.indexOf(to, a);
+    assert.ok(a >= 0 && b > a, `queries.ts landmark moved: ${from}; update this guard`);
+    return [a, b] as const;
+  };
+  const scheduleAllowed = [
+    span('import { openPoSchedule,', '} from "./incoming.js";'),
+    span("export const GAP_ENABLED", "export function invalidateItemsCache("),
+    span("export async function itemDetail(", "export async function productsList("),
+  ];
+  for (const m of q.matchAll(/incoming\.js|openPoSchedule|ScheduleRow|scheduleFacts|summariseSchedule|promisedHistory|poEta|PoEta/g)) {
+    const at = m.index!;
+    assert.ok(
+      scheduleAllowed.some(([a, b]) => at >= a && at <= b + 30),
+      `queries.ts reads the schedule (${m[0]}) outside itemDetail and the gap attachment (offset ${at})`,
+    );
+  }
   // ledger.ts imports it for Data & Sync's open-document list only: every
   // mention sits in the import, OpenPurchaseDoc or openPurchaseDocs, never in
   // ownedPositions / snapshotPositions (On order and the daily rows).
@@ -303,6 +325,77 @@ test("no ETA feeds a calculation: only the item page and Data & Sync read incomi
     const allowed = (at >= importAt && at < importAt + 60) || (at >= from && at < to);
     assert.ok(allowed, `ledger.ts mentions ${m[0]} outside openPurchaseDocs (offset ${at})`);
   }
+});
+
+/*
+ * 1.10: the gap projection READS the schedule (projection.ts, through
+ * queries.ts attachGaps), and that is the one door it may come through. The
+ * gap fields it writes are read by nothing that calculates: not computeItem
+ * (the suggestion, flags, risk, both covers), not the cart, minimums, kits,
+ * the sync, or ledger.ts (On order and the daily snapshot rows). In
+ * queries.ts they may appear only where they are declared, attached, sorted,
+ * filtered and counted for the Overview: no CSV column yet (Stage 12).
+ */
+const GAP_WORDS = /projection\.js|projectItem|projectionInput|attachGaps|gapStatus|\.gap\b|\bgap\?:|nextDelivery|incomingOverdueQty|runsOutBeforeNextDelivery|GAP_ENABLED|NO_GAP_FIELDS/g;
+
+test("no gap feeds a calculation: only queries.ts reads projection.ts, in the places it attaches, sorts, filters and counts", () => {
+  // Every file under src/ but these two: the cart, minimums, kits, ledger.ts
+  // (On order and the daily snapshot rows), the sync, the routes, all of it.
+  const files = (readdirSync(join(ROOT, "src"), { recursive: true }) as string[])
+    .map((f) => `src/${String(f).split("\\").join("/")}`)
+    .filter((f) => f.endsWith(".ts") && f !== "src/insights/queries.ts" && f !== "src/insights/projection.ts");
+  for (const f of ["src/insights/cart.ts", "src/insights/minStock.ts", "src/insights/kits.ts", "src/insights/ledger.ts", "src/sync/engine.ts"])
+    assert.ok(files.includes(f), `${f} not scanned`);
+  for (const f of files) {
+    const src = readFileSync(join(ROOT, f), "utf8");
+    const hit = src.match(GAP_WORDS);
+    assert.equal(hit, null, `${f} mentions ${hit?.[0]}`);
+  }
+  // projection.ts stays pure: types only from incoming.ts, nothing that can reach a database or a clock.
+  const p = readFileSync(join(ROOT, "src/insights/projection.ts"), "utf8");
+  const imports = [...p.matchAll(/^import .*$/gm)].map((m) => m[0]);
+  assert.deepEqual(imports, ['import type { EtaBasis, EtaStatus, ScheduleRow } from "./incoming.js";']);
+  assert.doesNotMatch(p, /getPool|businessToday|new Date\(\)|Date\.now/);
+
+  const q = readFileSync(join(ROOT, "src/insights/queries.ts"), "utf8");
+  const computeItem = q.slice(q.indexOf("export function computeItem("), q.indexOf("let itemsCache"));
+  assert.ok(computeItem.includes("suggestion = {") && computeItem.includes("flags.push("), "computeItem landmarks moved; update this guard");
+  assert.equal(computeItem.match(GAP_WORDS), null, "computeItem (suggestion, flags, risk, covers) mentions a gap field");
+  const region = (from: string, to: string) => {
+    const a = q.indexOf(from);
+    const b = q.indexOf(to, a);
+    assert.ok(a >= 0 && b > a, `queries.ts landmark moved: ${from}; update this guard`);
+    return [a, b] as const;
+  };
+  const allowed = [
+    region("import {\n  NO_GAP_FIELDS,", '} from "./projection.js";'), // the import
+    region("   * Stock gaps (1.10): when free stock runs out", "incomingOverdueQty?: GapFields"), // ItemComputed
+    region("export const GAP_ENABLED", "export function invalidateItemsCache("), // the switch, attachGaps, computedItems
+    region("const SORT_VALUES", "export async function snapshotState("), // the gap sort key
+    region('    case "gap":', '    case "incoming_overdue":'),
+    region('    case "incoming_overdue":', "  const sortKey ="),
+    region("  // 1.10: null, not 0, when there is no projection", "    relationships: relationships.rows,"), // Overview count
+  ];
+  for (const m of q.matchAll(GAP_WORDS)) {
+    const at = m.index!;
+    const ok = allowed.some(([a, b]) => at >= a && at < b + 80);
+    assert.ok(ok, `queries.ts mentions ${m[0]} outside the gap attachment, sort, filters and Overview count (offset ${at})`);
+  }
+  const csv = q.slice(q.indexOf("export async function itemsCsv("));
+  assert.equal(csv.match(GAP_WORDS), null, "items.csv gains no gap column in 1.10");
+});
+
+test("the Inventory screen offers no gap filter or sort yet (Stage 12)", () => {
+  const dash = readFileSync(join(ROOT, "public/dashboard.js"), "utf8");
+  const keysOf = (name: string) => {
+    const start = dash.indexOf(`const ${name} = [`);
+    assert.ok(start >= 0, name);
+    return [...dash.slice(start, dash.indexOf("\n];", start)).matchAll(/^\s*\["([a-z_]+)",/gm)].map((m) => m[1]);
+  };
+  for (const k of ["gap", "incoming_overdue"]) assert.ok(!keysOf("INVENTORY_FILTERS").includes(k), `filter ${k}`);
+  assert.ok(!keysOf("INVENTORY_SORTS").includes("gap"));
+  const orderList = readFileSync(join(ROOT, "public/order-list.js"), "utf8");
+  assert.doesNotMatch(orderList.slice(orderList.indexOf("PURCHASING_SORTS")), /^\s*gap:/m);
 });
 
 test("the supplier lead query lives in leadTimes.ts; the cart imports it and keeps no copy", () => {
