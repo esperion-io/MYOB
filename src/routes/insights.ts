@@ -4,6 +4,7 @@ import { dashboardGuard } from "./guard.js";
 import type { NextFunction, Request, Response } from "express";
 import { config } from "../config.js";
 import { hasDatabaseUrl } from "../db.js";
+import { release, staleWriteError } from "../release.js";
 import type { CartState } from "../insights/cart.js";
 import {
   cartExport,
@@ -144,6 +145,24 @@ function send500(res: Response, err: unknown): void {
 
 insightsRouter.use(dashboardGuard);
 
+/*
+ * Refuse a write from a tab running different JS than this server (1.0).
+ *
+ * Mounted after the key check, so an unauthenticated caller still gets 401 and
+ * learns nothing about versions. Only writes that carry `x-ui-version` are
+ * checked; see staleWriteError for why a write without it passes. The reply
+ * also carries `release`, so a tab that has not polled yet raises its reload
+ * banner from the refusal itself instead of up to a minute later.
+ */
+insightsRouter.use((req, res, next) => {
+  const error = staleWriteError(req.method, req.get("x-ui-version"));
+  if (!error) {
+    next();
+    return;
+  }
+  res.status(409).json({ error, release });
+});
+
 // ---- Sync control (read-only toward MYOB; writes only to our Postgres) ----
 
 insightsRouter.post("/sync/run", async (req, res) => {
@@ -163,7 +182,9 @@ insightsRouter.post("/sync/run", async (req, res) => {
 insightsRouter.get("/sync/status", async (_req, res) => {
   if (!requireDb(res)) return;
   try {
-    res.json(await getSyncStatus());
+    // `release` rides on the status every open tab already polls, so a deploy
+    // or a rollback reaches each tab within a minute. /api/health is unchanged.
+    res.json({ ...(await getSyncStatus()), release });
   } catch (err) {
     send500(res, err);
   }

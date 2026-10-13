@@ -1,5 +1,41 @@
 /* Allied Fastenings — Inventory Intelligence (read-only MYOB). */
 
+import { displayVersion, releaseBanner } from "./release-banner.js";
+
+/*
+ * Which version this tab is running, and what each version changed (1.0).
+ *
+ * UI_VERSION is the version of THIS file, not of the server: a tab keeps the
+ * JS it loaded, so the two can differ after a deploy or a rollback, and the
+ * reload banner exists to say so. `npm run build` refuses to build unless
+ * UI_VERSION, package.json and the newest RELEASES entry all agree, and the
+ * entries run newest first (scripts/check-release.mjs).
+ *
+ * RELEASES is the change log Allied read, in the help drawer under What's new.
+ * It lives here so it ships and reverts with the code it describes. Each entry
+ * is written for Allied, not for us: what you'll see, the numbers that
+ * changed (with an example item), and how to check. A withdrawn release keeps
+ * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
+ * still explains what was live on a given day.
+ */
+const UI_VERSION = "1.0.0";
+
+const RELEASES = [
+  {
+    version: "1.0.0",
+    date: "2026-10-14",
+    stage: "Stage 0: Release plumbing",
+    changes: [
+      "The bottom of the left-hand menu now shows which version of the dashboard you are using, with a What's new link that opens this list.",
+      "Every update from now on is listed here: its date, what changed, any figures that moved (with an example item), and how to check it.",
+      "From this version on, if the dashboard is updated while you have it open, a bar appears across the top asking you to reload, and that page won't save changes until you do. It never reloads by itself, so nothing you are typing is lost.",
+      "This once: please reload any dashboard page that was already open before this update. Pages opened earlier can't show the bar.",
+    ],
+    numbers: "None. No figure on any page changes in this version.",
+    check: "Look at the bottom of the left-hand menu: it reads Version 1.0. Click What's new and this entry is at the top.",
+  },
+];
+
 const main = document.getElementById("main");
 const nav = document.getElementById("nav");
 const syncDot = document.getElementById("sync-dot");
@@ -495,11 +531,24 @@ function saveKey(value) {
   }
 }
 
+/*
+ * Every write says which version of the page sent it (1.0).
+ *
+ * The server refuses a write whose `x-ui-version` differs from its own (409),
+ * which closes the up-to-a-minute gap between a deploy and the next poll
+ * raising the banner. Once the banner is up the write is not even sent: the
+ * server it would reach may be older than 1.0 and have no such check.
+ */
 async function fetchJson(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   const key = accessKey();
   if (key) headers["x-dashboard-key"] = key;
   if (options.body) headers["Content-Type"] = "application/json";
+  const isWrite = (options.method || "GET").toUpperCase() !== "GET";
+  if (isWrite) {
+    if (releaseState.banner) throw new Error(releaseState.banner.refusal);
+    headers["x-ui-version"] = UI_VERSION;
+  }
   const res = await fetch(url, { ...options, headers });
   if (res.status === 401) {
     keyOverlay.hidden = false;
@@ -507,6 +556,12 @@ async function fetchJson(url, options = {}) {
     throw new Error("Dashboard access key required.");
   }
   const data = await res.json().catch(() => ({}));
+  if (res.status === 409 && data.release) {
+    // The server's text always says "updated"; after a rollback the banner
+    // says "changed back", and the alert should not contradict it.
+    checkRelease(data.release);
+    throw new Error(releaseState.banner?.refusal ?? data.error);
+  }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -530,10 +585,28 @@ keyForm.addEventListener("submit", async (e) => {
 
 const helpDrawer = document.getElementById("help-drawer");
 
+/** One version in What's new: what changed, numbers that moved, how to check. */
+function releaseEntryHtml(r) {
+  const changes = Array.isArray(r.changes) ? r.changes : [r.changes].filter(Boolean);
+  return `<div class="release-entry${r.withdrawn ? " withdrawn" : ""}">
+    <div class="release-head">
+      <strong>Version ${esc(displayVersion(r.version))}</strong>
+      <span class="release-meta">${esc(dateFmt(`${r.date}T12:00:00`))} · ${esc(r.stage)}</span>
+      ${r.withdrawn ? `<span class="badge idle">withdrawn in ${esc(displayVersion(r.withdrawn))}</span>` : ""}
+    </div>
+    ${changes.length ? `<ul>${changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
+    ${r.numbers ? `<p><strong>Numbers that changed:</strong> ${esc(r.numbers)}</p>` : ""}
+    ${r.check ? `<p><strong>How to check:</strong> ${esc(r.check)}</p>` : ""}
+  </div>`;
+}
+
 function renderHelp() {
   const body = document.getElementById("help-body");
   if (!body || body.dataset.filled) return;
   body.innerHTML = `
+    <h3 class="sub-h" id="whats-new">What's new</h3>
+    <div class="release-list">${RELEASES.map(releaseEntryHtml).join("")}</div>
+    <h3 class="sub-h">What the terms mean</h3>
     <dl class="glossary">
       ${Object.values(TERMS)
         .map((t) => `<dt>${esc(t.label)}</dt><dd>${esc(t.long)}</dd>`)
@@ -575,6 +648,56 @@ document.getElementById("help-open")?.addEventListener("click", () => {
   renderHelp();
   helpDrawer.hidden = false;
 });
+
+/** Open the help drawer at What's new, from the footer link. */
+function openWhatsNew() {
+  renderHelp();
+  helpDrawer.hidden = false;
+  document.getElementById("whats-new")?.scrollIntoView({ block: "start" });
+}
+
+/* ---------- release: footer and reload banner (1.0) ---------- */
+
+/*
+ * What the polls have told this tab about the server's release. `firstCommit`
+ * is the build of the first poll that reported this tab's own version, so it
+ * is the build this JS came from. A poll that lands on the old instance during
+ * a deploy cutover reports another version and must not set it, or the tab
+ * would later see "its" version on a different commit and ask for a reload
+ * it doesn't need.
+ */
+const releaseState = { seenRelease: false, firstCommit: null, banner: null };
+
+function renderVersionFooter() {
+  const el = document.getElementById("side-version");
+  if (!el) return;
+  el.innerHTML = `Version ${esc(displayVersion(UI_VERSION))} · ${esc(releaseState.firstCommit ?? "—")} ·
+    <button class="side-link help-btn" id="whats-new-open" type="button">What's new</button>`;
+  document.getElementById("whats-new-open")?.addEventListener("click", openWhatsNew);
+}
+
+/** Compare one reported release with this tab, and raise or clear the banner. */
+function checkRelease(release) {
+  if (release?.version) releaseState.seenRelease = true;
+  if (release?.version === UI_VERSION && releaseState.firstCommit == null && release.commit) {
+    releaseState.firstCommit = release.commit;
+    renderVersionFooter();
+  }
+  releaseState.banner = releaseBanner(release, {
+    version: UI_VERSION,
+    known: RELEASES.map((r) => r.version),
+    firstCommit: releaseState.firstCommit,
+    seenRelease: releaseState.seenRelease,
+  });
+  const bar = document.getElementById("release-banner");
+  if (!bar) return;
+  bar.hidden = !releaseState.banner;
+  const text = document.getElementById("release-banner-text");
+  if (text) text.textContent = releaseState.banner?.text ?? "";
+}
+
+document.getElementById("release-reload")?.addEventListener("click", () => location.reload());
+renderVersionFooter();
 document.getElementById("help-close")?.addEventListener("click", () => {
   helpDrawer.hidden = true;
 });
@@ -587,6 +710,7 @@ document.addEventListener("keydown", (e) => {
 async function pollSyncChip() {
   try {
     const status = await fetchJson("/api/insights/sync/status");
+    checkRelease(status.release);
     const newest = (status.entities || [])
       .map((e) => e.last_synced_at)
       .filter(Boolean)

@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "stage": "Stage 0: Release plumbing",
+  "note": "1.0 moves no figure. The only expected difference is the release block that /sync/status gains; anything else is a failure.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "1.0 adds { version, commit, bootedAt } to /sync/status"
+    }
+  ]
+}

@@ -937,3 +937,18 @@ P1 now sits directly behind P0 rather than beside P2, because on-hand is an inpu
 
 1. **Confirming historical stocktakes.** Detection proposes candidates, but someone at Allied has to confirm which of the 28 memo matches were genuine counts — and whether any counts happened that never reached MYOB. This is the one input only they can supply, and P1's accuracy depends on it.
 2. **`SPWD20G` and the second anomaly.** Two items fail the ledger completeness check. We will diagnose both during P1; if they turn out to be a document type we do not sync, that is a P0 addition.
+
+---
+
+## Part 5 — Rollout
+
+From 1.0 every release is one stage of `FEEDBACK-PLAN-2026-10-12.md` (or a follow-up to one), with one version, one `v<version>` tag, one `RELEASES` entry in `public/dashboard.js` and one row here. `RELEASING.md` is the runbook. The version shown never goes backwards: a rollback is itself a new version that withdraws the old one (status `withdrawn in 1.N`), and an Allied answer applied as data rather than code gets a **data change** row with no version.
+
+The first three rows are backfilled from `git log`. They shipped before versioning, so they all report `0.1.0`, and their deploy times were not recorded: Render auto-deploys `main` on push, so the commit time is the earliest they can have gone live.
+
+| Version | Stage | Commit | Deploy time (UTC) | Snapshot | Status |
+|---|---|---|---|---|---|
+| 0.1.0 (unversioned) | Minimum stock review: Allied's own minimums, item lead times, cover in weeks or months (15–16 Sep 2026) | `82d8a72`…`3cd8163` (6 commits) | Not recorded. Commits 2026-09-15 08:24 to 2026-09-16 00:37 | None | Live; superseded in place by the rows below |
+| 0.1.0 (unversioned) | Suppliers: rule that an item has no supplier (19 Sep 2026) | `c90da6e` | Not recorded. Commit 2026-09-18 17:22 | None | Live |
+| 0.1.0 (unversioned) | Purchasing: the Order list follows the preferred supplier (12 Oct 2026 NZ) | `f2148b2` | 2026-10-11 18:38 | `pre_preferred_fix` (taken by its first boot). Not yet confirmed with `supplier-rollback.mjs status`: RELEASING.md, before the first deploy, step 1 | Live |
+| 1.0.0 | Stage 0: Release plumbing | pending | pending | None needed (Stage 0 changes no decision data) | pending |

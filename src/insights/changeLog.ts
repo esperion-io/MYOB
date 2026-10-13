@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { release } from "../release.js";
 
 /**
  * The before/after record behind every supplier and cart change.
@@ -97,6 +98,24 @@ export async function cartStateAll(db: Db): Promise<{
   };
 }
 
+/*
+ * Which release wrote a log row (1.0).
+ *
+ * "Did this change come from 1.2 or from 1.3?" is the first question when a
+ * release is suspected of writing something wrong, and `changed_at` alone only
+ * answers it if the deploy time is known to the minute. The version and commit
+ * go into `detail`, which is JSONB and which the rollback script reads only for
+ * `items`, `inserted`, `scope` and `savedAs`, so adding keys changes nothing it
+ * does. A detail that is not a plain object (none today) is left as it is
+ * rather than wrapped, so its shape never changes under a reader.
+ */
+export function stampDetail(detail: unknown): unknown {
+  const stamp = { release: release.version, commit: release.commit };
+  if (detail == null) return stamp;
+  if (typeof detail === "object" && !Array.isArray(detail)) return { ...detail, ...stamp };
+  return detail;
+}
+
 export async function logChange(
   db: Db,
   entry: {
@@ -118,7 +137,7 @@ export async function logChange(
       entry.action,
       JSON.stringify(entry.before ?? null),
       JSON.stringify(entry.after ?? null),
-      JSON.stringify(entry.detail ?? null),
+      JSON.stringify(stampDetail(entry.detail)),
       entry.changedBy ?? "dashboard",
     ],
   );

@@ -39,10 +39,19 @@
           <button class="side-link help-btn" id="help-open" type="button">What do these terms mean?</button>
           <a class="side-link" href="/">Connection console</a>
           <p class="side-note">Read-only MYOB. No data is ever written back.</p>
+          <!-- Which release this tab is running. Filled by renderVersionFooter():
+               this tab's own version, the server's commit, and What's new. -->
+          <p class="side-version" id="side-version"></p>
         </div>
       </aside>
 
       <div class="main-wrap">
+        <!-- Raised by the 60-second status poll when the server is running a
+             different version than this tab. Never reloads by itself. -->
+        <div class="release-banner" id="release-banner" role="alert" hidden>
+          <span id="release-banner-text"></span>
+          <button class="btn small primary" id="release-reload" type="button">Reload</button>
+        </div>
         <!--
           The two P3 controls. Deliberately separate and visually distinct:
           an as-at date is a moment (what was on the shelf that day), a rolling
@@ -118,9 +127,9 @@
       <div class="drawer-body" id="side-drawer-body"></div>
     </aside>
 
-    <aside class="drawer" id="help-drawer" hidden aria-label="Glossary">
+    <aside class="drawer" id="help-drawer" hidden aria-label="Help">
       <div class="drawer-head">
-        <h2>What the numbers mean</h2>
+        <h2>What's new, and what the numbers mean</h2>
         <button class="btn small" id="help-close" type="button">Close</button>
       </div>
       <p class="drawer-note">

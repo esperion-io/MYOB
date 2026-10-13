@@ -101,6 +101,39 @@ body {
 
 .side-note { margin: 0; color: var(--muted); font-size: 0.68rem; line-height: 1.5; }
 
+/* ---------- release (1.0): footer version, reload banner, What's new ---------- */
+
+.side-version { margin: 0; color: var(--muted); font-size: 0.68rem; line-height: 1.5; }
+.side-version .help-btn { font-size: inherit; text-decoration: underline; }
+
+/* Below the key overlay (50) and the drawers and modals (60), so it never
+   covers a drawer's Close button; it stays above the page it scrolls over. */
+.release-banner {
+  position: sticky;
+  top: 0;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.65rem 1.6rem;
+  border-bottom: 1px solid rgba(154, 106, 29, 0.4);
+  background: #f6ead6;
+  color: var(--warn);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.release-banner[hidden] { display: none; }
+
+.release-entry { padding: 0.55rem 0 0.7rem; border-bottom: 1px solid var(--line); font-size: 0.74rem; line-height: 1.55; }
+.release-entry:last-child { border-bottom: 0; }
+.release-entry ul { margin: 0.35rem 0; padding-left: 1.1rem; }
+.release-entry p { margin: 0.3rem 0 0; color: var(--muted); }
+.release-entry.withdrawn { opacity: 0.7; }
+.release-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 0.6rem; color: var(--ink-deep); }
+.release-meta { color: var(--muted); font-size: 0.7rem; }
+
 /* ---------- main ---------- */
 
 .main { padding: 1.6rem 1.8rem 3rem; min-width: 0; }
