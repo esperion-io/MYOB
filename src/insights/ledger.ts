@@ -12,6 +12,7 @@ import {
   openDocReason,
   type OnOrderCompareRow,
 } from "../sync/openPo.js";
+import { openPoEtas, type PoEta } from "./incoming.js";
 
 /**
  * Stocktake-anchored stock ledger (P1).
@@ -1168,6 +1169,13 @@ export interface OpenPurchaseDoc {
    * `outstanding` on a counted document and 0 on any other.
    */
   outstandingToday: number;
+  /**
+   * When it is expected (1.9; incoming.ts), on a counted document with
+   * something still to arrive; null on any other. The same rule and leads as
+   * the item page, so Data & Sync can list the POs with no Promised Date
+   * for Allied to fill in.
+   */
+  expected: PoEta | null;
 }
 
 /**
@@ -1184,6 +1192,7 @@ export interface OpenPurchaseDoc {
  * (test/open-po-rule.test.ts allows exactly that).
  */
 async function openPurchaseDocs(): Promise<OpenPurchaseDoc[]> {
+  const etas = await openPoEtas();
   const r = await getPool().query(
     `SELECT o.uid, o.number, o.supplier_name, o.date::date::text AS date,
             o.promised_date::date::text AS promised_date, o.total::float8,
@@ -1210,6 +1219,7 @@ async function openPurchaseDocs(): Promise<OpenPurchaseDoc[]> {
       reason: openDocReason({ total, billedOnOrAfter: Boolean(x.billed) }),
       outstanding,
       outstandingToday: counted ? outstanding : 0,
+      expected: counted && outstanding > 0 ? (etas.get(x.uid as string) ?? null) : null,
     };
   });
 }

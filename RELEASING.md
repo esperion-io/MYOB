@@ -86,6 +86,18 @@ Allied's request #3, second half: "select supplier — preferred is the default 
 - **Width:** the dropdown fills the Supplier column down to 8rem (a fixed 9rem made the table 4 px over at 1366 px), the row's buttons read "Use preferred" / "Keep" (the cell already names the preferred supplier; "Use SHANDONG TENGDA" beside Keep took the column to 241 px and the table to 1,203 px whenever a pick was open, on 1.7 as well), and a split's two lead times may wrap. Measured in headless Chrome without the web fonts: 1,078 px in the 1,078 px panel at 1366 and 1,152 in 1,152 at 1440, with and without open picks, kept picks and a split.
 - **Stage 8 deploy:** see "Stage 8 deploy" below. The snapshot is mandatory: the row is a new place a supplier pick can be made from.
 
+## What 1.9 changed
+
+Allied's request #2, part 1: "If an ETA date on the PO can Allied use that data pulled over to the dashboard". Allied decided on 12 Oct 2026 to enter ETAs as the PO's Promised Date in MYOB, which is already synced. No figure moves and no table, view or function is added.
+
+- **The ETA rule** (`src/insights/incoming.ts`, `poEta`, pure), worked out once per PO document: the Promised Date when it is on or after the PO date (an earlier one is ignored and flagged `promisedIgnored`); otherwise the PO date + the PO's own supplier's lead (Allied's `platform_supplier_meta.lead_time_days`, else the measured median), labelled an estimate; otherwise no date. A passed date with stock outstanding is `overdue` (promised) or `late` (estimated) and keeps its date; it is never placed in the past as received or moved to today. An item's own lead time is never used: one PO arrives once. Where Allied's lead differs from the measured median by more than 14 days, the estimate carries the measured date too (`measuredDays`, `measuredEta`).
+- **`src/insights/leadTimes.ts`** holds the per-supplier lead query, moved out of `cart.ts` unchanged and imported by both. It is a runtime SELECT over `supplier_lead_time`; nothing in the database depends on that view. `/cart` and `cart.csv` are byte-identical.
+- **Additive fields.** `/items/:uid` gains `incomingSchedule[]` (`openPoSchedule`: one row per open PO line with something to arrive, from the `openPo.ts` fragments: `poUid`, `number`, `supplier`, `raised`, `ordered`, `received`, `outstanding`, `eta`, `etaBasis` `promised`/`estimated`/`none`, `status` `due`/`overdue`/`late`/`undated`, `daysToGo`/`daysLate`, `promisedIgnored`, and the lead inputs of the basis text), `incomingSummary` (units by status: `dated` + `overdue` + `late` + `undated` = `total` = On order; `next`; POs overdue, late and undated; `promisedHistory`) and `incomingScheduleDate`. `incoming` is unchanged. `/divergence` `openDocs[]` gains `expected` (the same per-document ETA; null when not counted or nothing to arrive). Today only: at a past as-at the schedule rows are facts only (no date or status) and `incomingSummary` is null, because MYOB keeps no PO history.
+- **Screens.** The item page gets an **Incoming purchase orders** panel (PO | Supplier | Raised | Outstanding | Expected | Basis | Status, overdue and late first, total "= On order", the Promised Date history once under it, and the footnote "Enter a Promised Date on the PO in MYOB to replace an estimate (picked up within 6 hours)"), titled "Open purchase orders today" at a past date. Commitments & incoming keeps the sale orders, with Ordered and Promised columns. The On order tile and the expand panel's On order row say "next 1 Nov (promised)", "next ~10 Dec (est.)" or "1 PO overdue"; the expand panel (Inventory and Purchasing's drill-down) lists the POs. Data & Sync's Open purchase orders gains Expected / Basis / Status, the line "N of M open POs have no Promised Date — enter one in MYOB", a No Promised Date badge and a filter for them. Wording lives in `public/incoming.js` (DOM-free). Against a server before 1.9 every screen draws its 1.8 form.
+- **No ETA feeds any calculation.** On order, cover, suggestions, flags, risk, minimums, the cart and the daily rows are untouched; `test/incoming.test.ts` checks that the calculating modules (cart, minimums, kits, kit plan, schema, sync engine) do not import `incoming.ts`, that `computeItem` never mentions the schedule, and that `ledger.ts` uses it only in `openPurchaseDocs` (Data & Sync's list), never in `ownedPositions` or `snapshotPositions`.
+- **`stage-check schedule <after> [--base local|prod|URL]`** checks a capture: Σ schedule outstanding = `qtyOnOrder` per item, the summary adds up, the POs listed are exactly the counted open documents with stock to arrive and no reversal, one date per PO across every item, promised exactly when the Promised Date ≥ the PO date, estimate = PO date + lead, rows in order, and Data & Sync's date = the item pages'. `--base` fetches every item with stock on order (GET only; about 125 pages); without it only the watched pages are checked. It prints one line per PO.
+- **Stage 9 deploy:** see "Stage 9 deploy" below.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -345,6 +357,38 @@ On the evening (pre-flight and window as for any deploy):
 If rolled back (R1–R5): picks made from the row are ordinary `selected` rows, which 1.7 shows as flagged picks, and an Undo's `edited` row is an ordinary typed qty. R5 is `status`, then `diff --from pre_s8_<yyyymmdd>`. Nothing is restored by default.
 - **One bad pick:** `supplier-rollback.mjs log --item <N>`, then `undo <id>` on that `select_supplier` (dry run, then `--apply --confirm <db>`). It puts back the rows the pick deleted, the typed qty included.
 - **Wholesale, only if Allied ask:** `diff --from pre_s8_<yyyymmdd>`, then `restore cart --from pre_s8_<yyyymmdd>` as a dry run, then `--apply --confirm <db>`. This also wipes every quantity typed since the snapshot, so say so to Allied first.
+
+## Stage 9 deploy: Incoming POs with expected dates
+
+A UI release with additive fields. No figure moves and nothing is written, so no snapshot (§4.10). Rollback is a pure revert: a 1.8 page ignores the new fields.
+
+Before the evening, on the refreshed local copy (`npm run dev:local`):
+- [ ] `stage-check capture` before (1.8 checkout) and after, `diff --allow scripts/expected/1.9.0.json`: 0 not allowed, `cart.json`/`cart.csv`/`items.json` unchanged. `stage-check schedule <after> --base local`: all ok.
+- [ ] The browser checks in the 1.9.0 `RELEASES` `check`, on the copy's figures.
+
+On the evening (pre-flight and window as for any deploy):
+1. [ ] Capture before. **Re-derive the expected values table** from it, with that evening's live leads (Allied's figures apply on prod; the copy has none). The before-capture comes from 1.8, which serves no schedule, so work the rule by hand: each counted PO from `divergence.json` `openDocs` (number, supplier, `date`, `promisedDate`), its supplier's lead (Allied's figure is `lead_time_days` in `suppliers.json`; the measured median is not in that file, so take it from the "Lead time (days)" column of `GET /api/insights/suppliers.csv`; `promised_days` in `suppliers.json` is Promised Date minus PO date, not a lead, and must not be used), then the Promised Date if it is on or after the PO date, else PO date + lead, and overdue or late against that evening's NZ date. As at the 13 Oct capture, with prod's leads:
+
+   | PO | Supplier | Expected |
+   |---|---|---|
+   | 00022886 | Tong Ming | Overdue 28 days (promised 15 Sep) |
+   | 00023060 | Hanova | Promised 1 Nov |
+   | 00023070 | Hanova | ~10 Dec on every line, WR16503G and WR16301.5S16 included (measured: ~3 Nov) |
+   | 00023096 | TANDL | ~24 Nov (measured 117 d: ~9 Dec) |
+   | 00023002 | Jiaxing | ~24 Nov on every line, TB12125S16 included (measured: ~4 Nov) |
+   | 00023049 | Jiaxing | ~4 Dec (measured: ~14 Nov) |
+   | 00023260 | Maptco | ~30 Oct |
+   | 00023268 / 00023267 | Hobson | ~31 Oct / ~1 Nov |
+   | 00023248 | Steel & Tube | est. 30 Sep: late by 13 days |
+   | 00023309 | Specialised Washers | est. 12 Oct: late by 1 day |
+   | 00022464 | Cash Purchase | est. 16 Apr: late by ~180 days |
+
+   Any PO Allied have dated since reads its Promised Date instead. Update the 1.9.0 `RELEASES` `changes` and `check` (BP1675G's PO and its days to go, Tong Ming's days overdue, the "13 of 16" count, the Promised Date history) to match, and set `date`.
+2. [ ] Push, wait for `release.version` = `1.9.0`, capture after, `diff --allow scripts/expected/1.9.0.json`: 0 not allowed. `cart.json` (apart from `generatedAt`) and `cart.csv` identical.
+3. [ ] `stage-check schedule ../captures/1.9.0-after --base prod`: all ok, exactly the counted open POs listed (none of 00020462, 00019910, 00022808, 00020624), and each line of its table agrees with step 1's.
+4. [ ] `positionParity` is 0.
+5. [ ] In the browser (GET only): BN1665G's panel reads 00023070 ~10 Dec, "ETA missing — estimated: raised 12 Aug + 120 days (HANOVA INTERNATIONAL LTD lead set by Allied) · measured 83 days would give ~3 Nov"; Data & Sync lists the POs with no Promised Date; a past date shows "Open purchase orders today" with no dates.
+6. [ ] Send the release note. After Allied enter their first Promised Dates: the next sync's capture shows those POs as `promised`, and the "N of M" count falls.
 
 ## Snapshots and data changes
 

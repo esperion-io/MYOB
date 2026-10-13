@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { OPEN_PO_DOC, OUTSTANDING, OUTSTANDING_LINE } from "../sync/openPo.js";
+import { openPoSchedule, promisedHistory, scheduleFacts, summariseSchedule } from "./incoming.js";
 import type { PoolClient } from "pg";
 import { inTransaction, logChange, supplierMetaOf, supplierStateOf } from "./changeLog.js";
 import {
@@ -1630,7 +1631,7 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
   if (!item) return null;
   const chartMonths = Math.max(12, win.windowMonths);
 
-  const [monthly, movements, commitments, incoming, purchases, rels, freshness, potentialParents] =
+  const [monthly, movements, commitments, incoming, purchases, rels, freshness, potentialParents, schedule, promised] =
     await Promise.all([
       // The bar chart ends at the selected date and spans at least a year, or
       // the whole window when that is wider — so the chart and the window
@@ -1762,7 +1763,22 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
          ORDER BY potential_qty DESC`,
         [uid],
       ),
+      // When the stock on order is expected (1.9; incoming.ts): the same lines
+      // as `incoming`, one row each, with their PO's expected date.
+      openPoSchedule([uid]),
+      promisedHistory(),
     ]);
+
+  /*
+   * The schedule is today's, like `incoming`: MYOB keeps no history of open
+   * POs or their Promised Dates. At a past date the lines are still listed
+   * (they are what is open now) but as facts only, with no expected date,
+   * status or summary, because "overdue 28 days" on a page about 1 Sep would
+   * be false on 1 Sep (FEEDBACK-PLAN §4.7).
+   */
+  const today = businessToday();
+  const scheduleToday = win.asAt === today;
+  const incomingSchedule = scheduleToday ? schedule : schedule.map(scheduleFacts);
 
   // Buildability from free stock, two ways: sub-assemblies as they sit today,
   // or exploded to base components assuming sub-assemblies get built first.
@@ -1798,6 +1814,10 @@ export async function itemDetail(uid: string, opts?: Partial<DemandWindow>) {
     movements: movements.rows,
     commitments: commitments.rows,
     incoming: incoming.rows,
+    // 1.9, additive. `incoming` above is unchanged for tabs from before 1.9.
+    incomingSchedule,
+    incomingSummary: scheduleToday ? { ...summariseSchedule(schedule), promisedHistory: promised } : null,
+    incomingScheduleDate: today,
     purchases: purchases.rows,
     components: rels.components,
     componentTree: tree,

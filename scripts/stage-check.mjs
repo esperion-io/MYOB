@@ -15,6 +15,7 @@
  *   node scripts/stage-check.mjs expect <before> <after> [--stage "…"]   (1.2: generate an allow-list)
  *   node scripts/stage-check.mjs cover <after> [--before <before>] [--base …]   (1.3: the cover identities)
  *   node scripts/stage-check.mjs splits <after> [--before <before>]   (1.4: the Order list total for splits)
+ *   node scripts/stage-check.mjs schedule <after> [--base …]   (1.9: incoming POs add up to On order)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -749,6 +750,142 @@ export function splitCheck(dir, { beforeDir = null } = {}) {
   return splitChecks({ after: read(dir), before: beforeDir ? read(beforeDir) : null });
 }
 
+/* ---------- 1.9: incoming POs with expected dates ---------- */
+
+/*
+ * `stage-check schedule`: what 1.9's incoming schedule must satisfy, from the
+ * items list of a capture, the item pages (every item with stock on order
+ * when --base fetches them, GET only; else the capture's watched pages) and
+ * the capture's /divergence open documents. The golden diff proves nothing
+ * else moved; this proves the new rows are On order, line for line:
+ *   - per item, Σ outstanding over incomingSchedule = qtyOnOrder exactly, and
+ *     the summary's dated + overdue + late + undated = total = qtyOnOrder;
+ *   - the POs in the schedules are exactly the counted open documents with
+ *     something to arrive, and no reversal document appears;
+ *   - one date per PO document: every line of a PO, on every item, carries
+ *     the same expected date, basis and status (item lead times never move
+ *     an ETA), and that is the date /divergence gives the document;
+ *   - promised exactly when MYOB's Promised Date is on or after the PO date;
+ *     an estimate is the PO date + its lead; nothing estimated reads as
+ *     promised;
+ *   - the rows are in the panel's order: overdue and late, then dated, then
+ *     undated.
+ * It prints one line per PO (expected, basis, status) to compare with the
+ * plan's table and with what Allied see.
+ */
+const SCHEDULE_RANK = { overdue: 0, late: 0, due: 1, undated: 2 };
+
+function addDaysIso(iso, days) {
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d) + Math.round(days) * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Every 1.9 check as { check, ok, detail }, and the per-PO table. */
+export function scheduleChecks({ items, details, docs }) {
+  const out = [];
+  const add = (check, bad, detail) =>
+    out.push({ check, ok: bad.length === 0, detail: bad.length ? `${bad.length}: ${bad.slice(0, 5).join("; ")}` : detail });
+  const name = (i) => i.number ?? i.uid;
+  const near = (a, b) => Math.abs((a ?? NaN) - (b ?? NaN)) <= 1e-6;
+  const onOrder = items.filter((i) => i.qtyOnOrder > 0);
+  const checked = onOrder.filter((i) => details.has(i.uid));
+
+  const missing = checked.filter((i) => !Array.isArray(details.get(i.uid)?.incomingSchedule)).map(name);
+  add("every item page carries incomingSchedule (a 1.9 server)", missing, `${checked.length} pages`);
+  const sums = [];
+  const summary = [];
+  const order = [];
+  for (const i of checked) {
+    const d = details.get(i.uid);
+    const rows = d?.incomingSchedule ?? [];
+    const sum = rows.reduce((a, r) => a + r.outstanding, 0);
+    if (!near(sum, i.qtyOnOrder)) sums.push(`${name(i)} Σ ${sum} vs on order ${i.qtyOnOrder}`);
+    const s = d?.incomingSummary;
+    if (!s || !near(s.dated + s.overdue + s.late + s.undated, s.total) || !near(s.total, i.qtyOnOrder))
+      summary.push(`${name(i)} ${s ? `${s.dated}+${s.overdue}+${s.late}+${s.undated} / ${s.total}` : "no summary"} vs ${i.qtyOnOrder}`);
+    rows.forEach((r, k) => {
+      if (k && SCHEDULE_RANK[rows[k - 1].status] > SCHEDULE_RANK[r.status]) order.push(`${name(i)} row ${k + 1}`);
+    });
+  }
+  add("Σ schedule outstanding = qtyOnOrder, every item with stock on order", sums, `${checked.length} of ${onOrder.length} items`);
+  add("summary: dated + overdue + late + undated = total = qtyOnOrder", summary, `${checked.length} items`);
+  add("rows ordered overdue/late, then dated, then undated", order, "holds on every item");
+
+  // One date per document, across every item it carries.
+  const perPo = new Map();
+  const split = [];
+  const rule = [];
+  for (const i of checked)
+    for (const r of details.get(i.uid)?.incomingSchedule ?? []) {
+      const key = `${r.eta}|${r.etaBasis}|${r.status}`;
+      const seen = perPo.get(r.poUid);
+      if (seen && seen.key !== key) split.push(`${r.number}: ${seen.key} vs ${key} (${name(i)})`);
+      if (!seen) perPo.set(r.poUid, { key, row: r, units: 0, lines: 0 });
+      const e = perPo.get(r.poUid);
+      e.units += r.outstanding;
+      e.lines += 1;
+      const promisedOk = r.promisedDate != null && r.raised != null && r.promisedDate >= r.raised;
+      if ((r.etaBasis === "promised") !== promisedOk) rule.push(`${r.number}: ${r.etaBasis} with promised ${r.promisedDate}, raised ${r.raised}`);
+      if (r.etaBasis === "estimated" && (r.leadDays == null || r.eta !== addDaysIso(r.raised, r.leadDays)))
+        rule.push(`${r.number}: ~${r.eta} ≠ ${r.raised} + ${r.leadDays}`);
+      if (r.etaBasis === "promised" && r.eta !== r.promisedDate) rule.push(`${r.number}: ${r.eta} ≠ promised ${r.promisedDate}`);
+    }
+  add("one expected date, basis and status per PO document", split, `${perPo.size} POs`);
+  add("promised exactly when Promised Date ≥ PO date; estimate = PO date + lead", rule, `${perPo.size} POs`);
+
+  if (docs) {
+    const counted = docs.filter((x) => x.counted && x.outstanding > 0);
+    const notCounted = new Set(docs.filter((x) => !x.counted).map((x) => x.uid));
+    const extra = [...perPo.keys()].filter((u) => !counted.some((x) => x.uid === u)).map((u) => perPo.get(u).row.number);
+    const reversal = [...perPo.keys()].filter((u) => notCounted.has(u)).map((u) => perPo.get(u).row.number);
+    const absent = counted.filter((x) => !perPo.has(x.uid)).map((x) => x.number);
+    add("no reversal (not counted) document appears", reversal, `${notCounted.size} not counted`);
+    add("every PO in the schedules is a counted open document", extra, `${perPo.size} POs`);
+    if (checked.length === onOrder.length)
+      add("every counted open document with stock to arrive appears", absent, `${counted.length} documents`);
+    const compared = counted.filter((x) => perPo.has(x.uid));
+    const disagree = compared
+      .filter((x) => {
+        const r = perPo.get(x.uid).row;
+        return x.expected?.eta !== r.eta || x.expected?.etaBasis !== r.etaBasis || x.expected?.status !== r.status;
+      })
+      .map((x) => x.number);
+    add("Data & Sync gives each document the item pages' date", disagree, `${compared.length} of ${counted.length} documents`);
+  }
+  const table = [...perPo.values()]
+    .map(({ row: r, units, lines }) => ({
+      po: r.number,
+      supplier: r.supplier,
+      raised: r.raised,
+      expected: r.eta == null ? "—" : r.etaBasis === "estimated" ? `~${r.eta}` : r.eta,
+      basis: r.etaBasis === "estimated" ? `${r.leadSource} ${r.leadDays} d${r.measuredEta ? ` (measured ${r.measuredDays} d: ~${r.measuredEta})` : ""}` : r.etaBasis,
+      status: r.status === "due" ? `due in ${r.daysToGo} d` : r.status === "undated" ? "no date" : `${r.status} ${r.daysLate} d`,
+      lines,
+      units,
+    }))
+    .sort((a, b) => String(a.po).localeCompare(String(b.po)));
+  return { checks: out, table };
+}
+
+/** `schedule <capture> [--base …]`: the capture's items and /divergence, item pages fetched if asked. */
+export async function scheduleCheck(dir, { get = null } = {}) {
+  const items = JSON.parse(readFileSync(join(dir, "items.json"), "utf8")).items;
+  const docs = existsSync(join(dir, "divergence.json"))
+    ? (JSON.parse(readFileSync(join(dir, "divergence.json"), "utf8")).openDocs ?? null)
+    : null;
+  const details = new Map();
+  if (get) {
+    for (const i of items.filter((x) => x.qtyOnOrder > 0))
+      details.set(i.uid, await get(`/items/${encodeURIComponent(i.uid)}`));
+  } else if (existsSync(join(dir, "items"))) {
+    for (const f of readdirSync(join(dir, "items"))) {
+      const d = JSON.parse(readFileSync(join(dir, "items", f), "utf8"));
+      if (d?.item?.uid) details.set(d.item.uid, d);
+    }
+  }
+  return scheduleChecks({ items, details, docs });
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -788,6 +925,19 @@ async function main() {
     for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
     if (!get) console.log("note: filter=below_lead and sort=cover_incl not checked; pass --base to fetch them (GET only).");
     if (!options.before) console.log("note: existing items.csv columns not compared; pass --before <the 1.2 capture>.");
+    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  }
+
+  if (command === "schedule" && args.length === 1 && !options.allow && !options.before) {
+    // GET only, like capture: the item pages come through the same getter.
+    const get = options.base
+      ? makeGetter({ base: resolveBase(options.base), key: process.env.DASHBOARD_KEY?.trim() ?? "" })
+      : null;
+    const { checks, table } = await scheduleCheck(args[0], { get });
+    for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
+    for (const r of table)
+      console.log(`  ${String(r.po).padEnd(9)} ${String(r.supplier ?? "—").slice(0, 28).padEnd(29)} raised ${r.raised}  ${r.expected.padEnd(12)} ${r.basis.padEnd(36)} ${r.status}  (${r.lines} line(s), ${r.units})`);
+    if (!get) console.log("note: only the capture's watched item pages checked; pass --base to fetch every item with stock on order (GET only).");
     process.exit(checks.every((c) => c.ok) ? 0 : 1);
   }
 
@@ -838,7 +988,8 @@ async function main() {
       "  node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]\n" +
       "  node scripts/stage-check.mjs expect <before> <after> [--stage \"Stage N: …\"] > scripts/expected/<version>.json\n" +
       "  node scripts/stage-check.mjs cover <after> [--before <before>] [--base local|prod|URL]\n" +
-      "  node scripts/stage-check.mjs splits <after> [--before <before>]",
+      "  node scripts/stage-check.mjs splits <after> [--before <before>]\n" +
+      "  node scripts/stage-check.mjs schedule <after> [--base local|prod|URL]",
   );
 }
 

@@ -22,6 +22,17 @@ import {
   supplierRole,
   supplierSelect,
 } from "./order-list.js";
+import {
+  basisText,
+  expectedText,
+  nextDeliveryNote,
+  PROMISED_FOOTNOTE,
+  promisedDateGaps,
+  promisedDateGapsText,
+  promisedHistoryText,
+  shortDate,
+  statusModel,
+} from "./incoming.js";
 
 /*
  * Which version this tab is running, and what each version changed (1.0).
@@ -39,9 +50,31 @@ import {
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.8.0";
+const UI_VERSION = "1.9.0";
 
 const RELEASES = [
+  {
+    version: "1.9.0",
+    // Set to the ship date, and re-derive every PO named here (dates, days
+    // overdue or late, which POs have a Promised Date) from that evening's
+    // capture with `stage-check schedule`: the days move every day and
+    // Allied are entering Promised Dates.
+    date: "2026-10-14",
+    stage: "Stage 9: Incoming POs with expected dates",
+    changes: [
+      "You asked whether an ETA on the purchase order could come through to the dashboard. It can: you'll enter it as the Promised Date on the PO in MYOB, and the dashboard picks it up at the next sync, within 6 hours. Until a PO has one, the dashboard estimates it, and says plainly that it is an estimate.",
+      "On an item page, purchase orders now have their own panel, Incoming purchase orders: PO, supplier, the date it was raised, what is still to arrive, the Expected date, its basis and its status. The rows still add up to On order. Overdue and late POs are listed first, then the rest by date.",
+      "Expected is the PO's Promised Date in MYOB (\"Promised in MYOB\"). Where there isn't one, it reads for example \"~10 Dec\" with \"ETA missing — estimated: raised 12 Aug + 120 days (HANOVA INTERNATIONAL LTD lead set by Allied)\": the PO date plus that supplier's lead time, your figure from the Suppliers page, or else the time their orders have actually taken (\"measured over 11 orders\"). Where your lead time and the measured one differ by more than two weeks, both dates are shown. A Promised Date earlier than the PO date is ignored, and the row says so.",
+      "Status says \"Due in 19 days\", or, in red, \"Overdue 28 days: promised 15 Sep, nothing received\" when a promised date has passed and the stock hasn't arrived, or, in amber, \"Late against estimate by 13 days\" when an estimate has passed. An overdue PO stays on its date; it is never treated as if it had arrived. Under the table, on items with a promised PO: how Promised Dates have held up so far (a median of about 5 days late; 7 of 20 were more than 2 weeks late).",
+      "The On order tile says what is next: \"next 1 Nov (promised)\", \"next ~10 Dec (est.)\" or \"1 PO overdue\". The same note, and a short list of the POs, appear when you open an item's detail on Inventory and on Purchasing.",
+      "Open sale orders, in Commitments & incoming, now show the order date and the promised date in separate columns.",
+      "On Data & Sync, Open purchase orders gains Expected, Basis and Status, and a line saying how many open POs have no Promised Date yet, for example \"13 of 16 open POs have no Promised Date — enter one in MYOB\". Those are marked No Promised Date, and a button shows only them: that is the list to work through in MYOB.",
+      "One difference to know about: an expected date always uses the lead time of the supplier the PO was raised with. A lead time you set on an item itself is not used for it, because one PO arrives once, on one date. Purchasing still uses an item's own lead time for a new order, whichever supplier it goes to, as before.",
+      "At a past date the panel is called Open purchase orders today and shows no expected dates: MYOB keeps no history of POs or their Promised Dates, so expected dates exist only for today.",
+    ],
+    numbers: "None. Expected dates feed no figure: On order, cover, suggested quantities, minimums, risk, the Order list and the order sheets are exactly as before.",
+    check: "Open BP1675G: Incoming purchase orders shows PO 00023060 from HANOVA, 11,000 outstanding, Expected 1 Nov, Promised in MYOB, Due in 19 days; the total row = On order 11,000, and the On order tile says \"next 1 Nov (promised)\". On Data & Sync, Open purchase orders shows 00022886 (Tong Ming) as overdue since 15 Sep. Enter a Promised Date on one PO we agree on in MYOB: after the next sync (within 6 hours) its Expected date reads that date, marked Promised in MYOB.",
+  },
   {
     version: "1.8.0",
     // Set to the ship date, and re-derive BN1665G's figures in `changes`
@@ -242,6 +275,11 @@ const TERMS = {
     label: "On order",
     short: "Quantity still to arrive on open purchase orders (also called incoming).",
     long: "Also called incoming. Outstanding quantity on open purchase orders (ordered − received). A purchase order MYOB still shows as Open after it was billed and reversed is not counted, so this matches MYOB's own on-order figure. Subtracted once when suggesting an order.",
+  },
+  expected: {
+    label: "Expected (when on order arrives)",
+    short: "When a purchase order is expected: its Promised Date in MYOB, or an estimate where it has none.",
+    long: "Worked out once per purchase order, never per line. Promised: the Promised Date on the PO in MYOB, when it is on or after the PO date (an earlier one is ignored and said so). Estimate (~date): where the PO has no Promised Date, the PO date plus that PO's supplier's lead time, Allied's figure on the Suppliers page or else the median measured from their orders; it is labelled \"ETA missing — estimated\", never as promised. A lead time set on an item is never used here: one purchase order arrives once. Overdue: the promised date has passed and stock is still to arrive. Late against estimate: the estimate has passed. No date: the supplier has no lead time at all. Nothing is calculated from these dates: On order, cover, suggestions and the Order list are exactly as they would be without them. Today only: MYOB keeps no history of Promised Dates, so at a past date the list shows today's open POs without dates. Enter a Promised Date on the PO in MYOB to replace an estimate; it is picked up by the next sync, within 6 hours.",
   },
   weekly_demand: {
     label: "Weekly demand",
@@ -1643,6 +1681,7 @@ async function renderInventory() {
 let invItems = new Map();
 let invTargetCover = null;
 let invLastDir = "desc";
+/** /items/:uid for Inventory's expand panel, by its dated URL (withWindow). */
 const itemDetailCache = new Map();
 
 function currentDir() {
@@ -2051,7 +2090,7 @@ function expandPanelHtml(i, ctx = {}) {
     ${kvRow("On hand", `${qty(i.qtyOnHand)}${derivationNote(i)}`)}
     ${kvRow("Committed", `${qty(i.qtyCommitted)}${committedNote(i)}`)}
     ${kvRow("Free stock (on hand − committed)", `<strong>${qty(i.qtyFreeStock)}</strong>`)}
-    ${kvRow("On order (open POs)", qty(i.incomingQty))}
+    ${kvRow("On order (open POs)", `${qty(i.incomingQty)} <span class="expand-next">${ctx.detail ? nextDeliveryHtml(ctx.detail, "next-note") : ""}</span>`)}
     ${kvRow("Available (free stock + on order)", qty(i.qtyAvailable))}
     ${kvRow(
       "Minimum stock",
@@ -2141,12 +2180,18 @@ function expandPanelHtml(i, ctx = {}) {
 async function loadExpandExtras(uid, el, known = null) {
   if (!el) return;
   try {
-    let detail = known ?? itemDetailCache.get(uid);
+    // Keyed by the dated URL, like orderItemDetails: a detail fetched at a
+    // past date carries no ETAs (1.9) and must not stand in for today's.
+    const url = withWindow(`/api/insights/items/${encodeURIComponent(uid)}`);
+    let detail = known ?? itemDetailCache.get(url);
     if (!detail) {
-      detail = await fetchJson(withWindow(`/api/insights/items/${encodeURIComponent(uid)}`));
-      itemDetailCache.set(uid, detail);
+      detail = await fetchJson(url);
+      itemDetailCache.set(url, detail);
     }
     const moves = (detail.movements || []).slice(0, 5);
+    // 1.9: the next delivery beside On order, and the incoming list below.
+    const next = el.closest(".expand-panel")?.querySelector(".expand-next");
+    if (next && !next.innerHTML.trim()) next.innerHTML = nextDeliveryHtml(detail, "next-note");
     el.innerHTML = `
       <div class="expand-extra-grid">
         <div>
@@ -2174,7 +2219,8 @@ async function loadExpandExtras(uid, el, known = null) {
               : '<p class="muted">No movements in the synced window.</p>'
           }
         </div>
-      </div>`;
+      </div>
+      ${incomingCompactHtml(detail)}`;
   } catch (err) {
     el.innerHTML = `<p class="muted">Could not load activity: ${esc(err.message)}</p>`;
   }
@@ -2318,6 +2364,196 @@ function incomingRows(incoming) {
 }
 
 /*
+ * Commitments & incoming. From 1.9 the purchase orders have their own panel
+ * (incomingScheduleHtml), so this lists the open sale orders, with the order
+ * date and the promised date in separate columns: one "Date" column used to
+ * show the promised date where there was one and the order date otherwise,
+ * with nothing to say which. Against a server before 1.9 (no
+ * incomingSchedule) it is 1.2's table, purchase orders included.
+ */
+function commitmentsHtml(d) {
+  if (!Array.isArray(d.incomingSchedule)) {
+    return `
+        <section class="panel">
+          <h2>Commitments &amp; incoming</h2>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Type</th><th>Doc</th><th>Date</th><th class="num">Qty</th><th>With</th></tr></thead>
+            <tbody>
+              ${d.commitments
+                .map(
+                  (c) => `<tr><td><span class="badge fail">SO open</span></td><td>${esc(c.number ?? "—")}</td>
+                  <td>${dateFmt(c.promised_date ?? c.date)}</td><td class="num">${qty(c.qty)}</td>
+                  <td class="muted">${esc(c.customer_name ?? "")}</td></tr>`,
+                )
+                .join("")}
+              ${incomingRows(d.incoming)}
+              ${
+                !d.commitments.length && !d.incoming.length
+                  ? '<tr><td colspan="5" class="muted">No open sales orders or purchase orders.</td></tr>'
+                  : ""
+              }
+            </tbody>
+          </table></div>
+        </section>`;
+  }
+  // Same test as incomingScheduleHtml, so the link names the heading it scrolls to.
+  const poPanel = isHistorical() || d.incomingSummary == null ? "Open purchase orders today" : "Incoming purchase orders";
+  return `
+        <section class="panel">
+          <h2>Commitments &amp; incoming</h2>
+          <p class="hint">Open sale orders. Purchase orders on the way are under
+            <button type="button" class="linkish" data-scroll-to="item-incoming">${poPanel} &uarr;</button></p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Type</th><th>Doc</th><th>Ordered</th><th>Promised</th><th class="num">Qty</th><th>With</th></tr></thead>
+            <tbody>
+              ${
+                d.commitments.length
+                  ? d.commitments
+                      .map(
+                        (c) => `<tr><td><span class="badge fail">SO open</span></td><td>${esc(c.number ?? "—")}</td>
+                        <td>${dateFmt(c.date)}</td><td>${c.promised_date ? dateFmt(c.promised_date) : '<span class="muted">—</span>'}</td>
+                        <td class="num">${qty(c.qty)}</td><td class="muted">${esc(c.customer_name ?? "")}</td></tr>`,
+                      )
+                      .join("")
+                  : '<tr><td colspan="6" class="muted">No open sales orders.</td></tr>'
+              }
+            </tbody>
+          </table></div>
+        </section>`;
+}
+
+/*
+ * When the stock on order is expected (1.9): the item page's "Incoming
+ * purchase orders" panel, which takes the purchase-order rows out of
+ * Commitments & incoming.
+ *
+ * One row per open PO line with something still to arrive, as 1.2's rows
+ * were, in the server's order: overdue and late first, then by date, then
+ * the undated. The server works out every date and status (incoming.ts:
+ * the Promised Date, else the PO date + that PO's supplier's lead time,
+ * labelled as an estimate); public/incoming.js words them. The rows still
+ * add up to On order, so the total row says "= On order". How Promised
+ * Dates have held up is said once, under the table and on the promised rows'
+ * hover, not on every row.
+ *
+ * At a past date the server sends the lines as facts only: MYOB keeps no
+ * history of open POs or their Promised Dates, so the panel is titled "Open
+ * purchase orders today" and shows no expected date. A server before 1.9
+ * sends no incomingSchedule, and the page draws 1.2's rows instead.
+ */
+function incomingScheduleHtml(d) {
+  const rows = d.incomingSchedule ?? [];
+  const today = d.incomingScheduleDate ?? null;
+  const past = isHistorical() || d.incomingSummary == null;
+  const total = rows.reduce((a, r) => a + (Number(r.outstanding) || 0), 0);
+  const linesTip = (r) => ` title="Ordered ${qty(r.ordered)}, received ${qty(r.received ?? 0)}"`;
+  if (past) {
+    return `
+      <section class="panel" id="item-incoming">
+        <h2>Open purchase orders today</h2>
+        <p class="hint">MYOB keeps no PO history; expected dates exist only for today. These are the
+        purchase orders open now, whatever date is chosen at the top of the page.</p>
+        ${
+          rows.length
+            ? `<div class="table-wrap"><table>
+                <thead><tr><th>PO</th><th>Supplier</th><th>Raised</th><th class="num">Outstanding</th></tr></thead>
+                <tbody>${rows
+                  .map(
+                    (r) => `<tr><td><strong>${esc(r.number ?? "—")}</strong></td><td>${esc(r.supplier ?? "—")}</td>
+                      <td class="nowrap">${shortDateCell(r.raised, today)}</td><td class="num"${linesTip(r)}>${qty(r.outstanding)}</td></tr>`,
+                  )
+                  .join("")}
+                  <tr class="po-total"><td colspan="3">Still to arrive today (this list is today's, not the selected date's)</td>
+                    <td class="num"><strong>${qty(total)}</strong></td></tr>
+                </tbody>
+              </table></div>`
+            : '<p class="muted">No purchase orders open today.</p>'
+        }
+      </section>`;
+  }
+  const history = promisedHistoryText(d.incomingSummary?.promisedHistory);
+  const anyPromised = rows.some((r) => r.etaBasis === "promised");
+  return `
+    <section class="panel" id="item-incoming">
+      <h2>Incoming purchase orders</h2>
+      ${
+        rows.length
+          ? `<div class="table-wrap"><table class="incoming-table">
+              <thead><tr><th>PO</th><th>Supplier</th><th>Raised</th><th class="num">Outstanding</th>
+                <th title="${esc(TERMS.expected.short)}">Expected</th><th>Basis</th><th>Status</th></tr></thead>
+              <tbody>${rows
+                .map((r) => {
+                  const st = statusModel(r, today, qty);
+                  return `<tr>
+                    <td><strong>${esc(r.number ?? "—")}</strong></td>
+                    <td>${esc(r.supplier ?? "—")}</td>
+                    <td class="nowrap">${shortDateCell(r.raised, today)}</td>
+                    <td class="num"${linesTip(r)}>${qty(r.outstanding)}</td>
+                    <td class="nowrap">${esc(expectedText(r, today))}</td>
+                    <td class="incoming-basis"${r.etaBasis === "promised" && history ? ` title="${esc(history)}"` : ""}>${esc(basisText(r, today))}</td>
+                    <td>${statusCell(st)}</td>
+                  </tr>`;
+                })
+                .join("")}
+                <tr class="po-total"><td colspan="3">= On order</td><td class="num"><strong>${qty(total)}</strong></td><td colspan="3"></td></tr>
+              </tbody>
+            </table></div>
+            ${anyPromised && history ? `<p class="hint muted">Promised in MYOB: ${esc(history.charAt(0).toLowerCase() + history.slice(1))}</p>` : ""}
+            <p class="hint">${esc(PROMISED_FOOTNOTE)}</p>`
+          : '<p class="muted">Nothing on order.</p>'
+      }
+    </section>`;
+}
+
+function shortDateCell(iso, today) {
+  return iso ? esc(shortDate(iso, today)) : "—";
+}
+
+/** A status as the panels show it: overdue and late as badges, the rest as text. */
+function statusCell(st) {
+  if (st.tone === "fail" || st.tone === "warn") return `<span class="badge ${st.tone}">${esc(st.text)}</span>`;
+  return st.tone === "idle" ? `<span class="muted">${esc(st.text)}</span>` : esc(st.text);
+}
+
+/** The On order tile's and the expand panel's note: "next ~10 Dec (est.)", "1 PO overdue". */
+function nextDeliveryHtml(d, cls = "f-note") {
+  if (isHistorical()) return "";
+  const note = nextDeliveryNote(d?.incomingSummary ?? null, d?.incomingScheduleDate ?? null);
+  return note ? `<span class="${cls}${note.tone ? ` ${note.tone}` : ""}">${esc(note.text)}</span>` : "";
+}
+
+/*
+ * The compact list the expand panel adds under its demand chart and
+ * movements (Inventory, and Purchasing's drill-down), from the item detail
+ * it already loads: PO, supplier, outstanding, expected and status, with the
+ * basis on hover. Nothing at a past date or against a server before 1.9.
+ */
+function incomingCompactHtml(d) {
+  const rows = d?.incomingSchedule ?? null;
+  if (!rows?.length || isHistorical() || d.incomingSummary == null) return "";
+  const today = d.incomingScheduleDate ?? null;
+  return `
+    <div class="expand-incoming">
+      <h3>Incoming purchase orders</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>PO</th><th>Supplier</th><th class="num">Outstanding</th><th>Expected</th><th>Status</th></tr></thead>
+        <tbody>${rows
+          .map(
+            (r) => `<tr>
+              <td>${esc(r.number ?? "—")}</td>
+              <td class="muted">${esc((r.supplier ?? "—").slice(0, 32))}</td>
+              <td class="num">${qty(r.outstanding)}</td>
+              <td class="nowrap" title="${esc(basisText(r, today))}">${esc(expectedText(r, today))}</td>
+              <td>${statusCell(statusModel(r, today, qty))}</td>
+            </tr>`,
+          )
+          .join("")}</tbody>
+      </table></div>
+      <p class="hint">${esc(PROMISED_FOOTNOTE)}</p>
+    </div>`;
+}
+
+/*
  * The two cover tiles of the item page (1.3), each with its working on the
  * line underneath, so the figure can be checked by hand: excl. on order is
  * free stock ÷ weekly, incl. on order is Available (free stock + on order) ÷
@@ -2393,7 +2629,7 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">On hand</span><span class="f-value">${qty(i.qtyOnHand)}</span></div>
       <div class="fact src-platform"><span class="f-label">Committed</span><span class="f-value">${qty(i.qtyCommitted)}</span></div>
       <div class="fact src-platform"><span class="f-label">Free stock</span><span class="f-value">${qty(i.qtyFreeStock)}</span></div>
-      <div class="fact src-platform"><span class="f-label">On order</span><span class="f-value">${qty(i.qtyOnOrder)}</span></div>
+      <div class="fact src-platform"><span class="f-label">On order</span><span class="f-value">${qty(i.qtyOnOrder)}</span>${nextDeliveryHtml(d)}</div>
       <div class="fact src-platform"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
       ${coverTilesHtml(i)}
@@ -2423,6 +2659,8 @@ async function renderItem(uid) {
     <p class="src-legend"><span class="sw myob"></span>MYOB fact &nbsp; <span class="sw platform"></span>Platform analysis
       ${i.potential.qtyWindow > 0 ? '&nbsp; <span class="sw inferred"></span>Inferred (not a MYOB movement)' : ""}
       (synced ${ago(i.syncedAt)}) · MYOB "Available" includes stock on order; free stock = on hand − committed</p>
+
+    ${Array.isArray(d.incomingSchedule) ? incomingScheduleHtml(d) : ""}
 
     <div class="two-col" style="margin-top:1.1rem">
       <div>
@@ -2627,27 +2865,7 @@ async function renderItem(uid) {
           <div id="item-kit-body"></div>
         </section>
 
-        <section class="panel">
-          <h2>Commitments &amp; incoming</h2>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Type</th><th>Doc</th><th>Date</th><th class="num">Qty</th><th>With</th></tr></thead>
-            <tbody>
-              ${d.commitments
-                .map(
-                  (c) => `<tr><td><span class="badge fail">SO open</span></td><td>${esc(c.number ?? "—")}</td>
-                  <td>${dateFmt(c.promised_date ?? c.date)}</td><td class="num">${qty(c.qty)}</td>
-                  <td class="muted">${esc(c.customer_name ?? "")}</td></tr>`,
-                )
-                .join("")}
-              ${incomingRows(d.incoming)}
-              ${
-                !d.commitments.length && !d.incoming.length
-                  ? '<tr><td colspan="5" class="muted">No open sales orders or purchase orders.</td></tr>'
-                  : ""
-              }
-            </tbody>
-          </table></div>
-        </section>
+        ${commitmentsHtml(d)}
       </div>
     </div>`;
 
@@ -3936,13 +4154,36 @@ function renderOnOrderCheck(d) {
       docsEl.outerHTML = `${docsHint}<p class="muted">No purchase orders are open in MYOB.</p>`;
     } else {
       const counted = docs.filter((x) => x.counted).length;
+      // 1.9: when each counted PO is expected, and which have no Promised
+      // Date for Allied to fill in. A server before 1.9 sends no `expected`,
+      // and the table is 1.2's.
+      const gaps = promisedDateGaps(docs);
+      const today = todayLocal();
+      const etaCells = (x) => {
+        if (!x.expected) return '<td class="muted">—</td><td></td><td></td>';
+        const e = { ...x.expected, supplier: x.supplier, raised: x.date };
+        const undated = e.etaBasis !== "promised";
+        return `<td class="nowrap">${esc(expectedText(e, today))}${
+          undated ? '<br /><span class="badge warn">No Promised Date</span>' : ""
+        }</td>
+          <td class="incoming-basis">${esc(basisText(e, today))}</td>
+          <td>${statusCell(statusModel(e, today, qty))}</td>`;
+      };
       docsEl.outerHTML = `${docsHint}<p class="hint">${qty(docs.length)} open in MYOB: ${qty(counted)} counted,
         ${qty(docs.length - counted)} not counted${ruleLive ? "" : " under the proposed rule"}.</p>
-        <div class="table-wrap"><table>
+        ${
+          gaps && gaps.total
+            ? `<p class="hint"><strong>${esc(promisedDateGapsText(gaps))}</strong>
+                ${gaps.missing ? "Until then each is estimated from its PO date and its supplier's lead time. " : ""}${esc(PROMISED_FOOTNOTE)}</p>
+              ${gaps.missing ? `<p class="open-docs-filter"><button type="button" class="chip-btn" id="open-docs-undated" aria-pressed="false">No Promised Date only (${qty(gaps.missing)})</button></p>` : ""}`
+            : ""
+        }
+        <div class="table-wrap"><table class="incoming-table" id="open-docs-table">
           <thead><tr><th>PO</th><th>Supplier</th><th>Date</th><th class="num">Total</th>
             <th class="num">Adds to On order today</th>
-            <th class="num">${ruleLive ? "Still to receive on its lines" : "Outstanding (proposed rule)"}</th><th>Counted</th></tr></thead>
-          <tbody>${docs.map((x) => `<tr>
+            <th class="num">${ruleLive ? "Still to receive on its lines" : "Outstanding (proposed rule)"}</th><th>Counted</th>
+            ${gaps ? `<th title="${esc(TERMS.expected.short)}">Expected</th><th>Basis</th><th>Status</th>` : ""}</tr></thead>
+          <tbody>${docs.map((x) => `<tr${x.expected && x.expected.etaBasis !== "promised" ? ' data-undated="1"' : ""}>
             <td><strong>${esc(x.number ?? "—")}</strong></td>
             <td>${esc(x.supplier ?? "—")}</td>
             <td>${x.date ? dateFmt(`${x.date}T12:00:00`) : "—"}</td>
@@ -3951,8 +4192,19 @@ function renderOnOrderCheck(d) {
             <td class="num">${qty(x.outstanding)}</td>
             <td><span class="badge ${x.counted ? "ok" : "warn"}">${x.counted ? "Yes" : "No"}</span>
               ${x.counted ? "" : `<span class="muted">${esc((OPEN_DOC_REASON[x.reason] ?? x.reason ?? "").replace(/^Not counted: /, ""))}</span>`}</td>
+            ${gaps ? etaCells(x) : ""}
           </tr>`).join("")}</tbody>
         </table></div>`;
+      // The filter only hides rows: the counts above stay the whole list's.
+      const chip = document.getElementById("open-docs-undated");
+      chip?.addEventListener("click", () => {
+        const on = chip.getAttribute("aria-pressed") !== "true";
+        chip.setAttribute("aria-pressed", String(on));
+        chip.classList.toggle("active", on);
+        document.querySelectorAll("#open-docs-table tbody tr").forEach((tr) => {
+          tr.hidden = on && !tr.dataset.undated;
+        });
+      });
     }
   }
 }

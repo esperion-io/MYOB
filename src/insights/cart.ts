@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { cartStateAll, cartStateOf, inTransaction, logChange } from "./changeLog.js";
+import { supplierLeadTimes } from "./leadTimes.js";
 import { computedItems, resolveWindow, snapshotState, type DemandWindow, type ItemComputed } from "./queries.js";
 
 /**
@@ -604,25 +605,11 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   }
   const uids = needing.map((i) => i.uid);
 
-  const [sourcing, leadTimes, lastCosts] = await Promise.all([
+  const [sourcing, supplierLead, lastCosts] = await Promise.all([
     loadSourcing(pool, uids),
-    /*
-     * Allied's figure on the supplier wins over the measured one, the same
-     * precedence the item set uses. The cart used to show the measured median
-     * here even after Allied had overridden it on the Suppliers page, so the
-     * card could name one wait while the order quantity was built on another.
-     */
-    pool.query(
-      `SELECT s.uid AS supplier_uid,
-              COALESCE(m.lead_time_days, l.median_lead_days)::float8 AS days,
-              (m.lead_time_days IS NOT NULL) AS set_by_allied,
-              COALESCE(l.orders_measured, 0)::int AS orders_measured,
-              COALESCE(l.same_day_excluded, 0)::int AS same_day_excluded
-       FROM myob_suppliers s
-       LEFT JOIN supplier_lead_time l ON l.supplier_uid = s.uid
-       LEFT JOIN platform_supplier_meta m ON m.supplier_uid = s.uid
-       WHERE m.lead_time_days IS NOT NULL OR l.median_lead_days IS NOT NULL`,
-    ),
+    // Allied's figure on the supplier, else the measured median (leadTimes.ts,
+    // shared with the expected dates of open purchase orders since 1.9).
+    supplierLeadTimes(pool),
     pool.query(
       `SELECT DISTINCT ON (l.item_uid, b.supplier_uid)
               l.item_uid, b.supplier_uid, l.unit_price, b.date::date::text AS last_bought
@@ -635,17 +622,6 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
   ]);
   const { optionsFor, savedFor, ackFor, takenOff, supplierName } = sourcing;
 
-  const supplierLead = new Map(
-    leadTimes.rows.map((r) => [
-      r.supplier_uid as string,
-      {
-        days: r.days as number | null,
-        setByAllied: r.set_by_allied as boolean,
-        orders: r.orders_measured as number,
-        sameDayExcluded: r.same_day_excluded as number,
-      },
-    ]),
-  );
   /*
    * A lead time Allied set on the item itself applies under every supplier it
    * is offered from: it is a statement about how long this item takes, not

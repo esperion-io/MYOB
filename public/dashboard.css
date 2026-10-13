@@ -1428,3 +1428,22 @@ ul.plain { margin: 0.3rem 0 0.8rem; padding-left: 1rem; display: grid; gap: 0.2r
 
 /* Cover incl. on order below the lead time (1.3): the item page's red note. */
 .fact .f-note.fail { color: var(--fail); }
+
+/* Incoming purchase orders with expected dates (1.9). The next delivery sits
+   under On order (red when a PO is overdue, amber when late against an
+   estimate); the Basis column wraps rather than widening the table. */
+.fact .f-note.warn { color: var(--warn); }
+.kv span.next-note { display: block; font-size: 0.66rem; font-weight: 400; color: var(--muted); }
+.kv span.next-note.fail { color: var(--fail); }
+.kv span.next-note.warn { color: var(--warn); }
+.incoming-table td.incoming-basis { font-size: 0.72rem; color: var(--muted); min-width: 16rem; max-width: 30rem; }
+.expand-incoming { margin-top: 0.9rem; }
+.expand-incoming table { font-size: 0.72rem; }
+.open-docs-filter { margin: 0 0 0.6rem; }
+.open-docs-filter .chip-btn.active { border-color: var(--brand); color: var(--brand-deep); background: var(--brand-soft); }
+#item-incoming { margin-top: 1.1rem; }
+#open-docs-table td.incoming-basis { min-width: 11rem; max-width: 18rem; font-size: 0.68rem; }
+/* Ten columns on Data & Sync's Open purchase orders: headings and status
+   badges wrap so the list fits the panel at 1366 px instead of scrolling. */
+#open-docs-table th { white-space: normal; }
+#open-docs-table td .badge { white-space: normal; }
