@@ -13,6 +13,7 @@
  *   DASHBOARD_KEY=… node scripts/stage-check.mjs capture <dir> [--base local|prod|URL]
  *   node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]
  *   node scripts/stage-check.mjs expect <before> <after> [--stage "…"]   (1.2: generate an allow-list)
+ *   node scripts/stage-check.mjs cover <after> [--before <before>] [--base …]   (1.3: the cover identities)
  *
  * SAFE BY CONSTRUCTION. It sends GET requests and nothing else: the one
  * function that reaches the network refuses any other method, so it can be
@@ -522,6 +523,135 @@ export function proposeAllow(beforeDir, afterDir, { version = null, stage = null
   };
 }
 
+/* ---------- 1.3: cover excl. / incl. on order ---------- */
+
+/*
+ * `stage-check cover`: the identities 1.3's new figure must satisfy on every
+ * item, checked from a capture (and, given --base, two GET lists the capture
+ * does not hold). The golden diff proves no existing figure moved; this proves
+ * the new one is the figure it claims to be.
+ *
+ * The identity uses the unrounded weekly rate, rebuilt from the demand fields
+ * the capture carries, not `demand.weekly`, which is served to 3 dp. With the
+ * served rate a slow mover with years of cover fails on that rounding alone
+ * (on the 26 Aug copy 114 items, e.g. 5,007 free at 0.767/wk; coverWeeks
+ * fails identically), which says nothing about either figure.
+ */
+const CSV_COVER_INCL = "Cover incl. on order (weeks)";
+
+function unroundedWeekly(d) {
+  const weeksIn = (months) => (months * 365.25) / 12 / 7;
+  if (d?.basis === "window") return ((d.directWindow ?? 0) + (d.componentWindow ?? 0)) / weeksIn(d.windowMonths);
+  if (d?.basis === "long") return ((d.directLong ?? 0) + (d.componentLong ?? 0)) / weeksIn(d.longMonths);
+  return 0;
+}
+
+/**
+ * Every 1.3 check as { check, ok, detail }. `belowLead` and `sortedIncl` are
+ * the /items lists for filter=below_lead and sort=cover_incl (rows in served
+ * order, plus the `dir` it reported); a check whose input is missing is
+ * skipped, not passed.
+ */
+export function coverChecks({ items, csv, beforeCsv = null, belowLead = null, sortedIncl = null }) {
+  const out = [];
+  const add = (check, bad, detail) =>
+    out.push({ check, ok: bad.length === 0, detail: bad.length ? `${bad.length}: ${bad.slice(0, 5).join("; ")}` : detail });
+  const name = (i) => i.number ?? i.uid;
+
+  add("every item carries coverWeeksInclOnOrder (a 1.3 server)", items.filter((i) => !("coverWeeksInclOnOrder" in i)).map(name), `${items.length} items`);
+  const identity = [];
+  const below = [];
+  const unequal = [];
+  const notNull = [];
+  for (const i of items) {
+    const incl = i.coverWeeksInclOnOrder ?? null;
+    const excl = i.coverWeeks ?? null;
+    const w = unroundedWeekly(i.demand);
+    if (w > 0 && incl != null) {
+      const err = Math.abs(incl * w - Math.max(i.qtyAvailable ?? 0, 0));
+      if (err > 0.05 * w + 1e-9) identity.push(`${name(i)} ${incl}w × ${w.toFixed(3)} vs ${i.qtyAvailable}`);
+    }
+    if ((incl == null) !== (excl == null)) unequal.push(`${name(i)} incl ${incl} excl ${excl}`);
+    if (incl != null && excl != null && incl < excl) below.push(`${name(i)} ${incl} < ${excl}`);
+    if (!(i.qtyOnOrder > 0) && incl !== excl) unequal.push(`${name(i)} on order ${i.qtyOnOrder}: ${incl} ≠ ${excl}`);
+    if (!(w > 0) && (incl != null || excl != null)) notNull.push(`${name(i)} no demand: ${excl} / ${incl}`);
+  }
+  const withDemand = items.filter((i) => unroundedWeekly(i.demand) > 0).length;
+  add("|incl × weekly − max(Available, 0)| ≤ 0.05 × weekly", identity, `${withDemand} items with demand`);
+  add("incl ≥ excl", below, "holds on every item");
+  add("incl = excl with nothing on order, and both null or neither", unequal, "holds on every item");
+  add("weekly 0 gives null for both", notNull, `${items.length - withDemand} items with no demand`);
+
+  if (csv != null) {
+    const { rows } = csvRecords(csv);
+    const header = parseCsv(csv.replace(/^﻿/, ""))[0] ?? [];
+    const byNumber = new Map(items.map((i) => [i.number, i]));
+    const cells = [];
+    if (header.at(-1) !== CSV_COVER_INCL) cells.push(`last column is "${header.at(-1)}"`);
+    for (const r of Object.values(rows)) {
+      const i = byNumber.get(r["Item number"]);
+      const want = i?.coverWeeksInclOnOrder == null ? "" : String(Number(i.coverWeeksInclOnOrder.toFixed(4)));
+      if (!i || r[CSV_COVER_INCL] !== want) cells.push(`${r["Item number"]}: ${r[CSV_COVER_INCL]} vs ${want}`);
+    }
+    add(`items.csv ends with "${CSV_COVER_INCL}", equal to the items list`, cells, `${Object.keys(rows).length} rows`);
+  }
+  if (beforeCsv != null && csv != null) {
+    // Byte for byte: each line of the 1.3 file is the earlier line, a comma,
+    // and the new cell. Both captures must be of the same data.
+    const a = beforeCsv.split("\r\n");
+    const b = csv.split("\r\n");
+    const bad = a.length === b.length ? [] : [`${a.length} lines before, ${b.length} after`];
+    if (!bad.length)
+      a.forEach((line, k) => {
+        if (line === "" && b[k] === "") return;
+        if (!b[k].startsWith(`${line},`) || /[",]/.test(b[k].slice(line.length + 1))) bad.push(`line ${k + 1}`);
+      });
+    add("every existing items.csv column byte-identical", bad, `${a.length - 2} rows`);
+  }
+
+  if (belowLead) {
+    const flagged = items.filter((i) => i.coverBelowLeadTime).length;
+    const bad = belowLead.rows.filter((r) => !r.coverBelowLeadTime).map(name);
+    if (belowLead.rows.length !== flagged) bad.unshift(`filter lists ${belowLead.rows.length}, ${flagged} flagged`);
+    add("filter=below_lead lists exactly the coverBelowLeadTime items", bad, `${flagged} items`);
+  }
+  if (sortedIncl) {
+    const v = sortedIncl.rows.map((r) => r.coverWeeksInclOnOrder ?? null);
+    const firstNull = v.indexOf(null);
+    const head = firstNull < 0 ? v : v.slice(0, firstNull);
+    const bad = [];
+    if (sortedIncl.dir !== "asc") bad.push(`first click sorts ${sortedIncl.dir}`);
+    head.forEach((x, k) => k && head[k - 1] > x && bad.push(`row ${k + 1}: ${head[k - 1]} then ${x}`));
+    if (firstNull >= 0 && v.slice(firstNull).some((x) => x != null)) bad.push("a figure after the first blank");
+    if (sortedIncl.rows.length !== items.length) bad.push(`${sortedIncl.rows.length} rows of ${items.length}`);
+    add("sort=cover_incl: lowest first, non-decreasing, blanks last", bad, `${head.length} figures, ${v.length - head.length} blank`);
+  }
+  return out;
+}
+
+/** One /items list in served order, every page. GET only. */
+async function servedList(get, query) {
+  const pageSize = 200;
+  const first = await get(`/items?${query}&pageSize=${pageSize}&page=1`);
+  const rows = [...first.items];
+  for (let page = 2; rows.length < first.total; page++) {
+    const next = await get(`/items?${query}&pageSize=${pageSize}&page=${page}`);
+    if (!next.items?.length) break;
+    rows.push(...next.items);
+  }
+  return { rows, dir: first.dir ?? null };
+}
+
+/** `cover <capture> [--before <capture>] [--base …]`: read the capture, fetch the two lists if asked. */
+export async function coverCheck(dir, { get = null, beforeDir = null } = {}) {
+  const items = JSON.parse(readFileSync(join(dir, "items.json"), "utf8")).items;
+  const csv = existsSync(join(dir, "items.csv")) ? readFileSync(join(dir, "items.csv"), "utf8") : null;
+  const beforeCsv = beforeDir ? readFileSync(join(beforeDir, "items.csv"), "utf8") : null;
+  const belowLead = get ? await servedList(get, "filter=below_lead&sort=number&dir=asc") : null;
+  const sortedIncl = get ? await servedList(get, "sort=cover_incl") : null;
+  return coverChecks({ items, csv, beforeCsv, belowLead, sortedIncl });
+}
+
 /* ---------- command line ---------- */
 
 function show(v) {
@@ -545,12 +675,24 @@ async function main() {
       continue;
     }
     const name = argv[i].slice(2);
-    if (!["base", "allow", "stage"].includes(name)) fail(`Unknown option --${name}.`);
+    if (!["base", "allow", "stage", "before"].includes(name)) fail(`Unknown option --${name}.`);
     const v = argv[++i];
     if (v === undefined || v.startsWith("--")) fail(`--${name} needs a value.`);
     options[name] = v;
   }
   const [command, ...args] = positional;
+
+  if (command === "cover" && args.length === 1 && !options.allow) {
+    // GET only, like capture: the two lists come through the same getter.
+    const get = options.base
+      ? makeGetter({ base: resolveBase(options.base), key: process.env.DASHBOARD_KEY?.trim() ?? "" })
+      : null;
+    const checks = await coverCheck(args[0], { get, beforeDir: options.before ?? null });
+    for (const c of checks) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.check}  (${c.detail})`);
+    if (!get) console.log("note: filter=below_lead and sort=cover_incl not checked; pass --base to fetch them (GET only).");
+    if (!options.before) console.log("note: existing items.csv columns not compared; pass --before <the 1.2 capture>.");
+    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+  }
 
   if (command === "capture" && args.length === 1 && !options.allow) {
     const base = resolveBase(options.base);
@@ -590,7 +732,8 @@ async function main() {
     "Usage:\n" +
       "  DASHBOARD_KEY=… node scripts/stage-check.mjs capture <dir> [--base local|prod|URL]\n" +
       "  node scripts/stage-check.mjs diff <before> <after> [--allow scripts/expected/<version>.json]\n" +
-      "  node scripts/stage-check.mjs expect <before> <after> [--stage \"Stage N: …\"] > scripts/expected/<version>.json",
+      "  node scripts/stage-check.mjs expect <before> <after> [--stage \"Stage N: …\"] > scripts/expected/<version>.json\n" +
+      "  node scripts/stage-check.mjs cover <after> [--before <before>] [--base local|prod|URL]",
   );
 }
 

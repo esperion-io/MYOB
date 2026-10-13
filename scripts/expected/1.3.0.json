@@ -1,0 +1,33 @@
+{
+  "version": "1.3.0",
+  "stage": "Stage 3: Cover excl. / incl. on order",
+  "note": "1.3 moves no figure. It adds one field, coverWeeksInclOnOrder, wherever a whole computed item is served (the items list, the Overview's attention list, item pages) and one last column to items.csv. Anything else, above all any existing field or CSV cell changing, is a failure.",
+  "reviewed": "Generated on the 26 Aug local copy (allied_dev) with stage-check expect from two in-process captures on the same data, the 1.2 tree (1deb265) then this tree: 6,236 differences, every one an addition (before absent) apart from release.version 1.2.0 -> 1.3.0. They were 3,103 items[uid].coverWeeksInclOnOrder in items.json, 3,103 rows[number|supplier].Cover incl. on order (weeks) in items.csv, 15 attention[uid].coverWeeksInclOnOrder in overview.json and item.coverWeeksInclOnOrder on the 14 watched item pages. Nothing changed in cart.json, cart.csv, suppliers.json, divergence.json, kits-availability.json or any kit page. Per-record entries would fail on production, which has items the copy lacks, so they are kept here as the four record-wildcard entries below: a UI release lists only what it adds (RELEASING.md, Cutting a release, step 4). Each entry covers only the new field or column, so an existing figure moving on any record still fails.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.2.0 -> 1.3.0) and commit"
+    },
+    {
+      "file": "items.json",
+      "path": "items[*].coverWeeksInclOnOrder",
+      "why": "1.3 adds Cover incl. on order: Available ÷ weekly, 1 dp; null exactly where coverWeeks is"
+    },
+    {
+      "file": "items.csv",
+      "path": "rows[*].Cover incl. on order (weeks)",
+      "why": "1.3 appends the column Cover incl. on order (weeks) as the last column"
+    },
+    {
+      "file": "overview.json",
+      "path": "attention[*].coverWeeksInclOnOrder",
+      "why": "the Overview's attention list carries whole computed items, so it gains the field too; the Overview shows nothing new"
+    },
+    {
+      "file": "*",
+      "path": "item.coverWeeksInclOnOrder",
+      "why": "every item page (the watched items and the split item, if any) carries the computed item, so it gains the field"
+    }
+  ]
+}

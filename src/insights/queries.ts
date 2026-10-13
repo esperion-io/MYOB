@@ -493,6 +493,19 @@ export interface ItemComputed {
   };
   coverWeeks: number | null;
   /**
+   * Cover counting everything on order as if it were already on the shelf:
+   * Available (free stock + on order) ÷ weekly demand, to 1 dp. Allied asked
+   * to see it beside free-stock cover (1.3): BN1665G read 1.9w on free stock
+   * alone and 14.0w with its 2,000 on order (live, 13 Oct). It says nothing
+   * about WHEN that stock lands, so it is only ever compared with lead time
+   * (coverBelowLeadTime, which reads the unrounded value and adds the 30-point
+   * "below lead time" risk factor). Free-stock cover still drives the colours,
+   * the low-cover risk points and the order of "Reorder now"; the suggestion
+   * uses no cover figure, netting free stock and on order once each. Null
+   * exactly when coverWeeks is.
+   */
+  coverWeeksInclOnOrder: number | null;
+  /**
    * Measured wait between raising a purchase order and the goods being billed,
    * for this item's effective supplier. Allied's own override wins; null means
    * it has never been measured, and lead time then contributes nothing to any
@@ -535,7 +548,8 @@ export interface ItemComputed {
   kit: KitFacts | null;
 }
 
-function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemComputed {
+/** Exported for test/cover-incl.test.ts (1.3); the screens reach it through computedItems. */
+export function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemComputed {
   const n = (v: unknown): number | null =>
     v == null ? null : Number.isFinite(Number(v)) ? Number(v) : null;
   const directWindow = n(row.direct_window) ?? 0;
@@ -932,6 +946,8 @@ function computeItem(row: Record<string, unknown>, win: DemandWindow): ItemCompu
       understatesMeasured,
     },
     coverWeeks: coverWeeks == null ? null : Number(coverWeeks.toFixed(1)),
+    coverWeeksInclOnOrder:
+      coverIncludingIncoming == null ? null : Number(coverIncludingIncoming.toFixed(1)),
     leadTimeDays: leadDays,
     leadTimeWeeks: leadWeeks > 0 ? Number(leadWeeks.toFixed(1)) : null,
     leadTimeSource:
@@ -1063,9 +1079,16 @@ const SORT_VALUES: Record<string, (i: ItemComputed) => number | string | null> =
   name: (i) => i.name ?? "",
   on_hand: (i) => i.qtyOnHand,
   committed: (i) => i.qtyCommitted,
+  /*
+   * `available` sorts by FREE STOCK (on hand − committed), not by Available
+   * (free stock + on order). The key predates the distinction and is in
+   * bookmarks and open tabs, so it is never renamed, and no `free` alias is
+   * added beside it: two names for one key is a trap of its own.
+   */
   available: (i) => i.qtyFreeStock,
   incoming: (i) => i.incomingQty,
   cover: (i) => i.coverWeeks,
+  cover_incl: (i) => i.coverWeeksInclOnOrder,
   weekly: (i) => i.demand.weekly,
   value: (i) => i.currentValue,
   min_level: (i) => i.minLevel,
@@ -1079,6 +1102,7 @@ const SORT_DEFAULT_DIR: Record<string, "asc" | "desc"> = {
   number: "asc",
   name: "asc",
   cover: "asc",
+  cover_incl: "asc",
   available: "asc",
   on_hand: "asc",
 };
@@ -1162,6 +1186,11 @@ export async function listItems(params: ListParams) {
       break;
     case "low_cover":
       rows = rows.filter((r) => r.coverWeeks != null && r.coverWeeks < 4);
+      break;
+    // Short even counting everything on order (1.3): exactly the items
+    // carrying the cover_below_lead_time flag, 119 on the 26 Aug copy.
+    case "below_lead":
+      rows = rows.filter((r) => r.coverBelowLeadTime);
       break;
     case "negative":
       rows = rows.filter((r) => r.flags.includes("negative_stock"));
@@ -3175,6 +3204,10 @@ export async function itemsCsv(params: ListParams): Promise<string> {
     "Weekly demand", "Demand window (months)", "Demand basis", "Cover (weeks)",
     "Suggested order qty", "Risk score", "Flags",
     "Reference point", "Reference date", "MYOB on hand", "Difference vs MYOB",
+    // Appended, never inserted beside Cover (weeks) (1.3): columns are only
+    // ever added at the end, so a sheet built on an earlier export still
+    // lines up column for column.
+    "Cover incl. on order (weeks)",
   ];
   const lines = [header.join(",")];
   for (const i of data.items) {
@@ -3190,6 +3223,7 @@ export async function itemsCsv(params: ListParams): Promise<string> {
       esc(i.coverWeeks), esc(i.suggestion?.qty ?? 0), esc(i.risk.score),
       esc(i.flags.join(" ")),
       esc(i.anchorSource), esc(i.anchorDate), esc(i.myobOnHand), esc(i.divergence),
+      esc(i.coverWeeksInclOnOrder),
     ].join(","));
   }
   return `﻿${lines.join("\r\n")}\r\n`;

@@ -26,6 +26,14 @@ How a change gets from a branch to Allied's screen, how to prove it moved only w
 - **`stage-check` captures kit pages** (`kits/<number>.json`: every watched kit and every kit a watched item goes into), because buildable incl. incoming lives only there. Take both captures of a release with the same checkout of the script, or the kit files show as added.
 - **`stage-check expect <before> <after>`** generates a numbers release's allow-list from two captures of the same data. Review it before committing; never hand-write it.
 
+## What 1.3 added
+
+- **Cover incl. on order.** `ItemComputed` gains `coverWeeksInclOnOrder`: Available (free stock + on order) ÷ weekly, to 1 dp, null exactly where `coverWeeks` is. It is the figure `cover_below_lead_time` was already computed from; the flag keeps reading the unrounded value. It reaches every response that carries a whole computed item: `/items`, `/items/:uid` `item`, and the Overview's `attention` list.
+- **Additive keys.** `sort=cover_incl` (lowest first on the first click) and `filter=below_lead` (exactly the `coverBelowLeadTime` items). On a 1.2 server the sort falls back to risk and the filter lists everything; the 1.3 page follows the server's `sort` (arrow and summary say risk) and leaves Below lead time out of the summary when the items carry no `coverWeeksInclOnOrder`. The `available` sort key still means free stock; it is commented, never renamed.
+- **`items.csv`** gains "Cover incl. on order (weeks)" as its last column. Every earlier column is byte-identical.
+- **`stage-check cover <after> [--before <before>] [--base local|prod]`** checks the 1.3 identities on a capture: incl × weekly within 0.05 × weekly of max(Available, 0) (using the unrounded weekly, rebuilt from the demand fields, because `demand.weekly` is served to 3 dp), incl ≥ excl, equal with nothing on order, null with no demand, and the new CSV column against the items list. `--before` compares every existing CSV column byte for byte; `--base` fetches the `below_lead` and `cover_incl` lists (GET only) and checks the filter count and the sort order.
+- **Stage 3 deploy:** as any UI release. Capture before and after, `diff --allow scripts/expected/1.3.0.json` (0 not allowed), then `cover ../captures/1.3.0-after --before ../captures/1.3.0-before --base prod` (all ok). Open BN1665G and the Inventory filter Below lead time (even with on order) in the browser; expand a row on that filter and on All items and check it spans the whole table.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:

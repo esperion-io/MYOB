@@ -18,9 +18,28 @@ import { displayVersion, releaseBanner } from "./release-banner.js";
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.2.0";
+const UI_VERSION = "1.3.0";
 
 const RELEASES = [
+  {
+    version: "1.3.0",
+    // Set to the ship date, and re-derive the live example from that
+    // evening's capture: BN1665G's figures drift with every sync.
+    date: "2026-10-14",
+    stage: "Stage 3: Cover excl. / incl. on order",
+    changes: [
+      "Cover is now shown two ways, as you asked. Cover excl. on order is the figure you already know: free stock ÷ weekly demand. Cover incl. on order also counts everything on order as if it had already arrived: (free stock + on order) ÷ weekly demand.",
+      "On an item page, the Cover tile becomes two tiles, each with its working underneath (\"323 free ÷ 166.4/wk\"). Under Cover incl. on order is the lead time, in red as \"below 17.1w lead time\" when even counting what is on order the stock runs out before a new order could arrive.",
+      "On Inventory, the Cover column is now called Cover excl. on order and keeps its red (under 2 weeks) and amber (under 4 weeks). A new Cover incl. on order column follows it: click it to sort lowest first. It is red only when it is below the item's lead time. The Incoming column is now called On order; it is the same figure.",
+      "The tag that read cover_below_lead_time now reads Below lead time, and a new filter, Below lead time (even with on order), lists those items.",
+      "Expanding a row on Inventory shows both covers, with the lead time beside the second. The row that read \"MYOB available (incl. on order)\" now reads \"Available (free stock + on order)\": it was always our own figure, not MYOB's.",
+      "Cover incl. on order says nothing about when the stock arrives: a PO due in four months counts the same as one due tomorrow. So free-stock cover still decides what it decided before: the red and amber on the Cover excl. column, the low-cover risk points, the order of Reorder now and the Overview. Suggested orders are unchanged too: they count free stock and on order once each. Cover incl. on order is only ever compared with the lead time; below it the item is tagged Below lead time, which adds 30 risk points, as it did before.",
+      "The weeks / months switch at the top of the page applies to both covers.",
+      "Export this list gains one column at the end, Cover incl. on order (weeks). The existing columns are unchanged and in the same order.",
+    ],
+    numbers: "None. No existing figure changes; Cover incl. on order is a new figure. Example, BN1665G as at 13 Oct: Cover excl. on order 1.9w (323 free ÷ 166.4/wk), Cover incl. on order 14w (2,323 ÷ 166.4/wk), in red because Hanova's lead time is 17.1w. On the 26 Aug copy this version was tested on, the same item reads 8.5w and 26.5w (946 free and 2,946 ÷ 111.2/wk) against an 11.9w lead, so not red there.",
+    check: "Open BN1665G: the two Cover tiles read 1.9w and 14w, and the second says below 17.1w lead time. On Inventory, choose the filter Below lead time (even with on order): every item listed carries the Below lead time tag. Click Cover incl. on order: lowest first.",
+  },
   {
     version: "1.2.0",
     // The ship date, not the build date: historicalNotice reads it to say
@@ -114,9 +133,9 @@ const TERMS = {
     long: "Counted here from your own open sales orders, not read from MYOB — the two currently disagree on a handful of items, which the Divergence panel on Data & Sync lists and prices. Sorting by this shows what is most spoken for.",
   },
   incoming: {
-    label: "Incoming",
-    short: "Quantity still to arrive on open purchase orders.",
-    long: "Outstanding quantity on open purchase orders (ordered − received). A purchase order MYOB still shows as Open after it was billed and reversed is not counted, so this matches MYOB's own on-order figure. Subtracted once when suggesting an order.",
+    label: "On order",
+    short: "Quantity still to arrive on open purchase orders (also called incoming).",
+    long: "Also called incoming. Outstanding quantity on open purchase orders (ordered − received). A purchase order MYOB still shows as Open after it was billed and reversed is not counted, so this matches MYOB's own on-order figure. Subtracted once when suggesting an order.",
   },
   weekly_demand: {
     label: "Weekly demand",
@@ -124,9 +143,14 @@ const TERMS = {
     long: "Units sold plus units used building other products, averaged per week over the period set at the top of the page (6 months by default) and up to the date set beside it. If an item did not move at all in that period but did earlier, we fall back to a longer period so it still gets a rate — those items are tagged \"slow mover\".",
   },
   cover: {
-    label: "Cover",
-    short: "How long the free stock lasts at the current demand rate — in weeks, or months once there is a month or more of it.",
-    long: "Free stock ÷ weekly demand. The toggle at the top of the page shows it in weeks or months (52 weeks to 12 months); the choice changes the label only, never the figure, and anything under a month is always shown in weeks so short cover is never rounded to zero months. Under 2 weeks is shown red, under 4 amber. Blank means no demand was recorded, so cover cannot be calculated.",
+    label: "Cover excl. on order",
+    short: "How long the free stock lasts at the current demand rate — in weeks, or months once there is a month or more of it. Stock on order is not counted.",
+    long: "Free stock ÷ weekly demand. Stock on order is not counted, so this is how long the shelf lasts if nothing arrives; it is the cover the red and amber, the low-cover risk points, the order of Reorder now and the Overview work from. Suggested orders do not use a cover figure: they count free stock and on order once each. The toggle at the top of the page shows it in weeks or months (52 weeks to 12 months); the choice changes the label only, never the figure, and anything under a month is always shown in weeks so short cover is never rounded to zero months. Under 2 weeks is shown red, under 4 amber. Blank means no demand was recorded, so cover cannot be calculated.",
+  },
+  cover_incl: {
+    label: "Cover incl. on order",
+    short: "How long free stock plus everything on order lasts at the current demand rate. Red when it is below the lead time.",
+    long: "Available (free stock + on order) ÷ weekly demand. Cover incl. on order counts everything on order as if it were already here; it says nothing about when it arrives, so a PO due in four months counts the same as one due tomorrow. That is why it is only ever compared with the lead time: below it, even counting everything on order, stock runs out before a new order could arrive, and the item is tagged Below lead time, which adds 30 points to its risk score. Nothing else is decided on it. The weeks / months toggle applies to it as to Cover excl. on order. Blank means no demand was recorded.",
   },
   risk: {
     label: "Risk score",
@@ -191,6 +215,7 @@ const FLAG_HELP = {
   dead_stock: "There is stock on the shelf and none of it has moved in 12 months — not sold, not used building anything. Money sitting still. If you look back further than a year, anything that did move in that longer period counts as a slow mover instead.",
   understated_demand: "Packs holding this item sold without being rebuilt, so the demand and cover figures shown for it are lower than the real usage. Open the item to see which packs and how many units.",
   min_above_demand: "The minimum stock level set for this item is far higher than its current demand justifies, so it is being suggested for reorder while it already has too much on the shelf. Usually a figure set by hand, or from a window when it was selling faster. The minimum is what needs looking at, not the stock.",
+  cover_below_lead_time: "Even counting everything on order, stock runs out before a new order could arrive.",
   kit_double_order: "This item and something it is made of are both on the order list. That can be right when Allied genuinely buy both, but it is also how one requirement gets bought twice. Needs a decision.",
 };
 
@@ -205,6 +230,7 @@ const FLAG_LABELS = {
   understated_demand: ["Demand understated", "brand"],
   min_above_demand: ["Min stock too high", "warn"],
   kit_double_order: ["Kit + parts both ordered", "warn"],
+  cover_below_lead_time: ["Below lead time", "fail"],
 };
 
 /*
@@ -240,6 +266,7 @@ const INVENTORY_FILTERS = [
   ["suggested", "Suggested orders"],
   ["below_min", "Below min stock"],
   ["low_cover", "Cover under 4 weeks (about a month)"],
+  ["below_lead", "Below lead time (even with on order)"],
   ["excess", "Excess stock"],
   ["slow_mover", "Slow movers (still selling, just slowly)"],
   ["dead_stock", "Dead stock (nothing in 12 months or more)"],
@@ -257,13 +284,14 @@ const INVENTORY_FILTERS = [
 
 const INVENTORY_SORTS = [
   ["risk", "Risk"],
-  ["cover", "Cover"],
+  ["cover", "Cover excl. on order"],
+  ["cover_incl", "Cover incl. on order"],
   ["weekly", "Weekly demand"],
   ["committed", "Committed"],
   ["on_hand", "On hand"],
   ["available", "Free stock"],
   ["min_level", "Minimum stock"],
-  ["incoming", "Incoming"],
+  ["incoming", "On order"],
   ["value", "Stock value"],
   ["excess", "Excess value"],
   ["potential", "Potential pack pull"],
@@ -451,6 +479,25 @@ function coverFmt(cover, basis) {
   if (cover < 2) return `<span class="badge fail">${label}${suffix}</span>`;
   if (cover < 4) return `<span class="badge warn">${label}${suffix}</span>`;
   return `${label}${suffix}`;
+}
+
+/*
+ * Cover incl. on order (1.3), for a table cell or a panel row.
+ *
+ * Deliberately NOT coloured like coverFmt. Counting a PO due in four months as
+ * if it were on the shelf, 3 weeks of it is no comfort and 30 may be none: the
+ * figure means something only against the lead time, so it turns red exactly
+ * where the server set cover_below_lead_time and nowhere else. The browser
+ * never compares the two itself. A server before 1.3 sends no figure at all,
+ * which reads "—", not "no demand".
+ */
+function coverInclFmt(i) {
+  if (!("coverWeeksInclOnOrder" in i)) return '<span class="muted">—</span>';
+  const weeks = i.coverWeeksInclOnOrder ?? null;
+  if (weeks == null) return '<span class="muted">no demand</span>';
+  if (!i.coverBelowLeadTime) return coverLabel(weeks);
+  const lead = i.leadTimeWeeks != null ? ` ${coverLabel(i.leadTimeWeeks)}` : "";
+  return `<span class="badge fail" title="${esc(`Below the${lead} lead time, even counting everything on order`)}">${coverLabel(weeks)}</span>`;
 }
 
 /*
@@ -1221,7 +1268,7 @@ async function renderOverview() {
         <h2>Needs attention</h2>
         <p class="hint">Ranked by risk: cover vs demand, minimum stock levels, dependency breadth, data quality. Click for evidence.</p>
         <div class="table-wrap"><table>
-          <thead><tr><th>Risk</th><th>Item</th><th class="num">Free stock</th><th>Cover</th><th>Why</th></tr></thead>
+          <thead><tr><th>Risk</th><th>Item</th><th class="num">Free stock</th><th>Cover excl. on order</th><th>Why</th></tr></thead>
           <tbody>
             ${data.attention
               .map(
@@ -1384,6 +1431,7 @@ async function renderInventory() {
     })();
     const a = document.createElement("a");
     a.className = "btn";
+    a.id = "inv-export";
     a.download = "";
     a.textContent = "Export this list";
     a.title = "Every item currently shown, with the filters applied";
@@ -1444,9 +1492,11 @@ function currentDir() {
 }
 
 /** Plain-English description of the list currently on screen. */
-function activeViewSummary(total) {
+function activeViewSummary(total, filterIgnored = false) {
   const bits = [];
-  const filterLabel = INVENTORY_FILTERS.find(([v]) => v === invState.filter)?.[1];
+  const filterLabel = filterIgnored
+    ? null
+    : INVENTORY_FILTERS.find(([v]) => v === invState.filter)?.[1];
   if (invState.filter && invState.filter !== "all" && filterLabel) bits.push(filterLabel.toLowerCase());
   if (invState.region)
     bits.push(invState.region === "none" ? "unlabelled region" : `from ${invState.region}`);
@@ -1475,29 +1525,51 @@ async function loadInventoryTable() {
   invItems = new Map(data.items.map((i) => [i.uid, i]));
   invTargetCover = data.targetCoverWeeks ?? null;
   invLastDir = data.dir ?? "desc";
+  // A server that does not know the requested sort (cover_incl on 1.2) falls
+  // back to risk and says so in data.sort; follow it, so the arrow and the
+  // summary describe the order actually on screen.
+  if (data.sort && data.sort !== invState.sort) {
+    invState.sort = data.sort;
+    invState.dir = "";
+  }
+  // Likewise a filter it does not know (below_lead on 1.2) lists everything.
+  // No echo of the filter comes back, so the tell is a 1.2 item shape.
+  const filterIgnored =
+    invState.filter === "below_lead" &&
+    data.items.length > 0 &&
+    !("coverWeeksInclOnOrder" in data.items[0]);
 
   syncInventoryUrl();
+  // Built once in renderInventory, so it went stale on every filter, sort or
+  // page change made here and exported the previous view.
+  const exportLink = document.getElementById("inv-export");
+  if (exportLink) exportLink.href = inventoryCsvUrl();
 
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
+  // One list, so the empty row and the expand row (which counts these
+  // headers) always span the whole table. Both were typed by hand, as 13 and
+  // 12, so the expand row stopped one column short of a 13-column table.
+  const headers = [
+    '<th class="caret-h"></th>',
+    sortTh("risk", "risk", "Risk"),
+    sortTh("number", null, "Item"),
+    sortTh("on_hand", null, "On hand", "num"),
+    sortTh("committed", "committed", "Committed", "num"),
+    sortTh("available", "free_stock", "Free stock", "num"),
+    sortTh("min_level", "min_stock", "Min stock", "num"),
+    sortTh("incoming", "incoming", "On order", "num"),
+    sortTh("weekly", "weekly_demand", "Weekly demand", "num"),
+    sortTh("cover", "cover", "Cover excl. on order"),
+    sortTh("cover_incl", "cover_incl", "Cover incl. on order"),
+    sortTh("value", null, "Stock value", "num"),
+    sortTh("used_in", "used_in", "Used in", "num"),
+    "<th>Tags</th>",
+  ];
   container.innerHTML = `
     ${historicalNotice(data)}
-    <p class="view-summary">${esc(activeViewSummary(data.total))}</p>
+    <p class="view-summary">${esc(activeViewSummary(data.total, filterIgnored))}</p>
     <div class="table-wrap"><table>
-      <thead><tr>
-        <th class="caret-h"></th>
-        ${sortTh("risk", "risk", "Risk")}
-        ${sortTh("number", null, "Item")}
-        ${sortTh("on_hand", null, "On hand", "num")}
-        ${sortTh("committed", "committed", "Committed", "num")}
-        ${sortTh("available", "free_stock", "Free stock", "num")}
-        ${sortTh("min_level", "min_stock", "Min stock", "num")}
-        ${sortTh("incoming", "incoming", "Incoming", "num")}
-        ${sortTh("weekly", "weekly_demand", "Weekly demand", "num")}
-        ${sortTh("cover", "cover", "Cover")}
-        ${sortTh("value", null, "Stock value", "num")}
-        ${sortTh("used_in", "used_in", "Used in", "num")}
-        <th>Tags</th>
-      </tr></thead>
+      <thead><tr>${headers.join("")}</tr></thead>
       <tbody>
         ${
           data.items.length
@@ -1514,13 +1586,14 @@ async function loadInventoryTable() {
                     <td class="num">${qty(i.incomingQty)}</td>
                     <td class="num">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "—"}</td>
                     <td>${coverFmt(i.coverWeeks, i.demand.basis)}</td>
+                    <td>${coverInclFmt(i)}</td>
                     <td class="num">${money(i.currentValue)}</td>
                     <td class="num">${i.parentCount || "—"}</td>
                     <td>${flagChips(i.flags)}</td>
                   </tr>`,
                 )
                 .join("")
-            : `<tr><td colspan="13" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
+            : `<tr><td colspan="${headers.length}" class="muted">No items match this view. <button class="linkish" id="inv-empty-clear">Clear filters</button></td></tr>`
         }
       </tbody>
     </table></div>
@@ -1605,9 +1678,10 @@ function toggleExpandRow(tr) {
   }
   const item = invItems.get(tr.dataset.uid);
   if (!item) return;
+  const cols = tr.closest("table")?.tHead?.rows[0]?.cells.length || tr.cells.length;
   tr.insertAdjacentHTML(
     "afterend",
-    `<tr class="expand-row"><td colspan="12">${expandPanelHtml(item)}</td></tr>`,
+    `<tr class="expand-row"><td colspan="${cols}">${expandPanelHtml(item)}</td></tr>`,
   );
   tr.classList.add("expanded");
   tr.querySelector(".caret").textContent = "▾";
@@ -1798,8 +1872,8 @@ function expandPanelHtml(i) {
     ${kvRow("On hand", `${qty(i.qtyOnHand)}${derivationNote(i)}`)}
     ${kvRow("Committed", `${qty(i.qtyCommitted)}${committedNote(i)}`)}
     ${kvRow("Free stock (on hand − committed)", `<strong>${qty(i.qtyFreeStock)}</strong>`)}
-    ${kvRow("Incoming (open POs)", qty(i.incomingQty))}
-    ${kvRow("MYOB available (incl. on order)", qty(i.qtyAvailable), "muted-row")}
+    ${kvRow("On order (open POs)", qty(i.incomingQty))}
+    ${kvRow("Available (free stock + on order)", qty(i.qtyAvailable))}
     ${kvRow(
       "Minimum stock",
       i.minLevel == null
@@ -1821,7 +1895,8 @@ function expandPanelHtml(i) {
   const demand = `
     <h3>Demand &amp; cover</h3>
     ${kvRow("Weekly demand", `${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"} <span class="muted">(${i.demand.basis === "none" ? "no activity" : i.demand.basis + " basis"})</span>`)}
-    ${kvRow(`Cover${invTargetCover ? ` (target ${coverLabel(invTargetCover)})` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
+    ${kvRow(`Cover excl. on order${invTargetCover ? ` (target ${coverLabel(invTargetCover)})` : ""}`, coverFmt(i.coverWeeks, i.demand.basis))}
+    ${kvRow(`Cover incl. on order${i.leadTimeWeeks ? ` (lead ${coverLabel(i.leadTimeWeeks)})` : ""}`, coverInclFmt(i))}
     ${kvRow(`Direct sales · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.directWindow)} / ${qty(i.demand.directLong)}`)}
     ${kvRow(`Via builds · last ${i.demand.windowMonths}m / ${i.demand.longMonths}m`, `${qty(i.demand.componentWindow)} / ${qty(i.demand.componentLong)}`)}
     ${packPullCallout(i)}
@@ -2058,6 +2133,47 @@ function incomingRows(incoming) {
       : ""}`;
 }
 
+/*
+ * The two cover tiles of the item page (1.3), each with its working on the
+ * line underneath, so the figure can be checked by hand: excl. on order is
+ * free stock ÷ weekly, incl. on order is Available (free stock + on order) ÷
+ * weekly. The second also states the lead time, which is the only thing it is
+ * ever compared with, red where the server flagged it as below. Both follow
+ * the weeks / months toggle through coverLabel. Against a server before 1.3
+ * the second tile reads "—" with no working.
+ */
+function coverTilesHtml(i) {
+  // The divisor keeps three significant figures below 10/wk: at 1 dp 3THR24G
+  // (188 free, 0.038/wk) read "÷ 0.0/wk" under 4904.8w. The numerator is
+  // floored at 0 as the figure is, with the negative position beside it:
+  // DSG150NP's -2 free shows 0w, not -0.5w.
+  const w = i.demand.weekly;
+  const weekly = w ? `${w >= 10 ? w.toFixed(1) : String(Number(w.toPrecision(3)))}/wk` : null;
+  const over = (x) => (x != null && x < 0 ? `0 (${qty(x)})` : qty(x));
+  const incl = i.coverWeeksInclOnOrder ?? null;
+  const lead = i.leadTimeWeeks ?? null;
+  const leadNote =
+    incl == null
+      ? ""
+      : i.coverBelowLeadTime
+        ? `<span class="f-note fail">below ${lead != null ? `${coverLabel(lead)} ` : ""}lead time</span>`
+        : lead != null
+          ? `<span class="f-note">lead time ${coverLabel(lead)}</span>`
+          : "";
+  return `
+      <div class="fact src-platform" title="${esc(TERMS.cover.short)}">
+        <span class="f-label">Cover excl. on order</span>
+        <span class="f-value">${coverLabel(i.coverWeeks)}</span>
+        ${i.coverWeeks != null && weekly ? `<span class="f-note">${over(i.qtyFreeStock)} free ÷ ${weekly}</span>` : ""}
+      </div>
+      <div class="fact src-platform" title="${esc(TERMS.cover_incl.short)}">
+        <span class="f-label">Cover incl. on order</span>
+        <span class="f-value">${coverLabel(incl)}</span>
+        ${incl != null && weekly ? `<span class="f-note">${over(i.qtyAvailable)} ÷ ${weekly}</span>` : ""}
+        ${leadNote}
+      </div>`;
+}
+
 async function renderItem(uid) {
   main.innerHTML = '<p class="loading">Loading item…</p>';
   const d = await fetchJson(withWindow(`/api/insights/items/${encodeURIComponent(uid)}`));
@@ -2096,7 +2212,7 @@ async function renderItem(uid) {
       <div class="fact src-platform"><span class="f-label">On order</span><span class="f-value">${qty(i.qtyOnOrder)}</span></div>
       <div class="fact src-platform"><span class="f-label">Available</span><span class="f-value">${qty(i.qtyAvailable)}</span></div>
       <div class="fact src-platform"><span class="f-label">Weekly demand</span><span class="f-value">${i.demand.weekly ? i.demand.weekly.toFixed(1) : "0"}</span></div>
-      <div class="fact src-platform"><span class="f-label">Cover</span><span class="f-value">${coverLabel(i.coverWeeks)}</span></div>
+      ${coverTilesHtml(i)}
       <div class="fact src-platform" title="${esc(i.minLevel == null ? "No minimum stock level set" : minStockBasis(i.minStock))}">
         <span class="f-label">Min stock</span>
         <span class="f-value">${i.minLevel == null ? '<span class="muted">—</span>' : qty(i.minLevel)}</span>
