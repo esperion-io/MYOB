@@ -126,13 +126,47 @@ body {
 }
 .release-banner[hidden] { display: none; }
 
-.release-entry { padding: 0.55rem 0 0.7rem; border-bottom: 1px solid var(--line); font-size: 0.74rem; line-height: 1.55; }
-.release-entry:last-child { border-bottom: 0; }
-.release-entry ul { margin: 0.35rem 0; padding-left: 1.1rem; }
-.release-entry p { margin: 0.3rem 0 0; color: var(--muted); }
-.release-entry.withdrawn { opacity: 0.7; }
-.release-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 0.6rem; color: var(--ink-deep); }
-.release-meta { color: var(--muted); font-size: 0.7rem; }
+/* What's new (1.17): a card per release, grouped by day, details folded away. */
+.release-intro { margin: 0 0 0.9rem; color: var(--muted); font-size: 0.74rem; line-height: 1.55; }
+.release-day { margin: 0 0 1.1rem; }
+.release-day-head {
+  margin: 0 0 0.5rem;
+  color: var(--ink-deep);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.release-day-head span { color: var(--muted); font-weight: 400; }
+.release-card {
+  margin: 0 0 0.55rem;
+  padding: 0.7rem 0.8rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+.release-card.withdrawn { opacity: 0.7; }
+.release-card.quiet { background: transparent; border-style: dashed; }
+.release-card.quiet .release-title { color: var(--muted); }
+.release-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.5rem; }
+.release-title { margin: 0; color: var(--ink-deep); font-size: 0.8rem; font-weight: 700; line-height: 1.4; }
+.release-summary { margin: 0.35rem 0 0; color: var(--ink); }
+.release-figures { margin: 0.4rem 0 0; font-size: 0.72rem; color: var(--muted); }
+.release-figures strong { font-weight: 600; }
+.release-figures.ok strong { color: var(--ok); }
+.release-figures.warn strong { color: var(--warn); }
+.release-dot { display: inline-block; width: 0.5rem; height: 0.5rem; margin-right: 0.35rem; border-radius: 50%; vertical-align: 0.05rem; }
+.release-figures.ok .release-dot { background: var(--ok); }
+.release-figures.warn .release-dot { background: var(--warn); }
+.release-more { margin: 0.45rem 0 0; }
+.release-more summary { cursor: pointer; color: var(--brand-deep); font-size: 0.72rem; }
+.release-more summary:hover { text-decoration: underline; }
+.release-more h5 { margin: 0.65rem 0 0.2rem; color: var(--ink-deep); font-size: 0.72rem; font-weight: 700; }
+.release-more ul { margin: 0.2rem 0; padding-left: 1.1rem; }
+.release-more li + li { margin-top: 0.3rem; }
+.release-more p { margin: 0.2rem 0 0; color: var(--ink); }
+.release-more .release-ref { margin-top: 0.6rem; color: var(--muted); font-size: 0.68rem; }
+.whats-new-flag { margin-left: 0.15rem; font-size: 0.62rem; }
 
 /* ---------- main ---------- */
 

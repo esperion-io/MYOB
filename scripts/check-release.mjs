@@ -30,6 +30,9 @@ import vm from "node:vm";
 import { compareVersions } from "../public/release-banner.js";
 
 const SEMVER = /^\d+\.\d+\.\d+$/;
+/** What's new limits (1.17): a headline that fits one or two lines of the drawer, a summary of a sentence or two. */
+export const TITLE_MAX = 70;
+export const SUMMARY_MAX = 260;
 
 /**
  * Pull UI_VERSION and RELEASES out of dashboard.js without running it — it
@@ -69,6 +72,16 @@ export function releaseProblems({ pkgVersion, uiVersion, releases, newestTag = u
     if (!SEMVER.test(r?.version ?? "")) problems.push(`${label} has no N.N.N version.`);
     if (typeof r?.stage !== "string" || !r.stage.trim()) problems.push(`${label} has no stage label.`);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(r?.date ?? "")) problems.push(`${label} has no yyyy-mm-dd date.`);
+    // What's new leads with these (1.17): a plain headline, a short summary,
+    // and whether any figure Allied see changed. Kept short so the panel
+    // stays readable at a glance; the full notes go in changes/numbers/check.
+    if (typeof r?.title !== "string" || !r.title.trim()) problems.push(`${label} has no title (What's new headline).`);
+    else if (r.title.length > TITLE_MAX) problems.push(`${label} title is ${r.title.length} characters; keep it to ${TITLE_MAX}.`);
+    if (typeof r?.summary !== "string" || !r.summary.trim()) problems.push(`${label} has no summary.`);
+    else if (r.summary.length > SUMMARY_MAX) problems.push(`${label} summary is ${r.summary.length} characters; keep it to ${SUMMARY_MAX}.`);
+    if (typeof r?.numbersChanged !== "boolean") problems.push(`${label} has no numbersChanged (true or false).`);
+    else if (r.numbersChanged && !(typeof r.numbersShort === "string" && r.numbersShort.trim()))
+      problems.push(`${label} changes figures but has no numbersShort saying which.`);
     if (i > 0 && SEMVER.test(r?.version ?? "") && SEMVER.test(versions[i - 1] ?? "")) {
       if (compareVersions(versions[i - 1], r.version) <= 0)
         problems.push(`RELEASES is not strictly newest first: ${versions[i - 1]} is listed above ${r.version}.`);

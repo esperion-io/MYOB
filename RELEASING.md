@@ -191,6 +191,17 @@ Allied's question of 17 Oct 2026: why did PO 00023248 (Steel & Tube, 600 × BN12
 - **Sale orders' first full read corrects committed** (found by the pre-deploy review, 18 Oct): MYOB does not bump a sale order's LastModified when it converts it to an invoice, so an incremental fetch never saw some conversions and those orders stayed Open here. The first 1.16 sync re-reads every sale order and their status lands as MYOB's; committed moves to MYOB's figure on those items on that first sync, not the second. On the 26 Aug copy: 12 such orders, 34 items, 2,430 units, exactly the copy's committed divergence. On prod, 18 Oct: `/divergence` committed lists BN12150LTG 800 vs 650, FG 2 vs 0, DS 3 vs 0, BP 8 vs 0. Converted orders are still sent by MYOB, so they are never flagged absent.
 - **Stage 18 deploy:** see "Stage 18 deploy" below.
 
+## What 1.17 changed
+
+Allied asked for What's new to be easier to read. Before, it was every release's full notes in one column: 17 releases, about 6,000 words, 13,909 px in the 460 px drawer, each headed by its internal stage label. Browser only; no `src/` change.
+
+- **Every `RELEASES` entry gains** `title`, `summary`, `numbersChanged`, `numbersShort` (when figures moved) and, for groundwork, `visible: false`. The 17 existing ones were written from each entry's own notes and fact-checked against them and Part 5 (writer, three checkers by slice, a plain-language reader, an editor; 30 fixes). The full notes (`changes`, `numbers`, `check`) are unchanged.
+- **`public/whats-new.js`** (pure, tested): `releaseDays` groups by ship day ("Sunday 18 October 2026"), `releaseTitle` (falls back to the stage without "Stage N:"), `figuresLine` (green No figures change / amber Figures change and the gist), `newVersions` / `hasUnseen` (newer than the version this browser last showed What's new for; a first look marks only the newest day).
+- **The panel:** an intro line, then one card per release under its day: headline, New badge, summary, figures line, and "Full details and how to check" folding away what's different, the figures, how to check and the version and stage reference. 4,005 px on the copy. Groundwork cards are dashed and muted.
+- **New marks** live in browser storage (`afWhatsNewSeen`, read and written in try/catch): opening the help drawer or What's new records the newest version; the footer shows New until then. A private window simply shows no marks.
+- **`check-release`** refuses an entry with no `title` (max 70), `summary` (max 260) or boolean `numbersChanged`, or with figures changed and no `numbersShort`; `test/release.test.ts`'s fixture carries them.
+- **Deploy:** as any UI release; nothing is written. Capture before and after, `diff --allow scripts/expected/1.17.0.json` (0 not allowed). In the browser: open What's new, check the groups, the New marks and one card's details. Rollback is a pure revert.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -228,7 +239,7 @@ These cannot be done from a development machine: production Postgres and Render 
 3. **Set the version in three places**, which the build checks agree:
    - `package.json` `version`;
    - `UI_VERSION` in `public/dashboard.js`;
-   - a new entry at the **top** of `RELEASES`: `{ version, date, stage, changes, numbers, check }`. Write it for Allied, in three parts: what you'll see, numbers that changed (with an example item, or "None"), and how to check it. Set `date` to the day it ships.
+   - a new entry at the **top** of `RELEASES`: `{ version, date, stage, title, summary, numbersChanged, numbersShort, changes, numbers, check }`. Write it for Allied. What's new leads with `title` (a plain headline, at most 70 characters, starting with the screen: "Purchasing: …"), `summary` (a sentence or two, at most 260, on what they'll notice) and `numbersChanged` (true when any figure they see moves; then `numbersShort`, the gist with one example). No internal words in those three: no stage, server, endpoint, UID. The full notes stay in three parts: what you'll see (`changes`), numbers that changed (`numbers`, with an example item, or "None") and how to check it (`check`). Add `visible: false` only for groundwork with nothing on screen. Set `date` to the day it ships. `check-release` refuses an entry without `title`, `summary` or `numbersChanged`.
 4. **Allow-list.** Write `scripts/expected/<version>.json`. List every path the release is meant to change, with a `why`. A UI release lists only what it adds. Paths look like `items[*].coverWeeks`, `suppliers[*].lines[*].qty` or `rows[*].Order qty` (CSV). `*` is one name, `[*]` is any one record, and a path covers everything beneath it.
 5. **Check:**
    ```sh

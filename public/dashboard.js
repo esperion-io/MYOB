@@ -45,6 +45,7 @@ import {
   statusModel,
 } from "./incoming.js";
 import { gapCell, gapSentence, gapTile, hasGapFields, outlookModel } from "./gaps.js";
+import { figuresLine, hasUnseen, newVersions, releaseDays, releaseTitle } from "./whats-new.js";
 import { inventoryHashFor, overviewTileHash, overviewTileState, usedInCount, usedInTitle } from "./inventory.js";
 
 /*
@@ -63,9 +64,29 @@ import { inventoryHashFor, overviewTileHash, overviewTileState, usedInCount, use
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.16.0";
+const UI_VERSION = "1.17.0";
 
 const RELEASES = [
+  {
+    version: "1.17.0",
+    // Set to the ship date. The headlines and summaries of every earlier
+    // release were written on 18 Oct 2026 from each entry's own notes and
+    // fact-checked against them and FIX-PLAN Part 5 (one writer, three
+    // checkers by slice, one plain-language reader, one editor).
+    date: "2026-10-18",
+    stage: "Stage 19: What's new, easier to read",
+    title: "What's new: shorter updates, easier to read",
+    summary: "Each update now opens with a headline and a sentence or two on what you'll notice, and says whether any figures change. The full detail is one click away, and updates since you last looked are marked New.",
+    numbersChanged: false,
+    changes: [
+      "What's new is grouped by the day each update went live, newest first.",
+      "Each update starts with a short headline and a sentence or two on what you'll notice. A green line says No figures change; an amber line says Figures change and gives the gist, with an example item.",
+      "The full notes for each update (what's different, the figures and how to check) are under Full details and how to check.",
+      "Updates you haven't seen yet are marked New, and the What's new link at the bottom of the left-hand menu shows New until you open it. This is remembered in your own browser, so each person sees their own.",
+    ],
+    numbers: "None. Only the What's new panel changes.",
+    check: "Click What's new at the bottom of the left-hand menu. Updates are grouped by day, each with a headline, a short summary and a green or amber figures line. Click Full details and how to check on any update to open the rest. Close the panel and open it again: the New marks have gone.",
+  },
   {
     version: "1.16.0",
     // Set to the ship date. The figures are production's on 17 Oct 2026 NZ
@@ -78,6 +99,10 @@ const RELEASES = [
     // 1.16 sync on Data & Sync, before anything is removed.
     date: "2026-10-18",
     stage: "Stage 18: Records deleted in MYOB leave the dashboard",
+    title: "All screens: POs and orders deleted in MYOB now drop off",
+    summary: "You asked why deleted PO 00023248 still counted as on order. Now a PO, bill, sales order, build or adjustment deleted in MYOB drops off once two syncs in a row can't find it. Data & Sync › Recent sync runs lists each one.",
+    numbersChanged: true,
+    numbersShort: "Committed falls on 4 items whose sales orders MYOB had invoiced. On order falls on 3, e.g. BN12150LTG 15,700 → 14,050. Cover and suggestions follow.",
     changes: [
       "You asked why PO 00023248 (Steel & Tube, 600 × BN12150LTG) still showed as on order after it was deleted in MYOB because the supplier couldn't supply. Until now the dashboard only ever added and updated what MYOB sent it: when something was deleted in MYOB, nothing told the dashboard, so it kept the PO as it last saw it, open with nothing received. From this version, every sync checks for records MYOB no longer has, and removes them.",
       "It covers purchase orders, bills, sales orders, builds and stock adjustments. A record goes only after two syncs in a row have not found it in MYOB, so one sync that comes back from MYOB incomplete can never remove anything. If a lot of records seem to be missing at once, nothing is removed and Data & Sync says so. Sales invoices are checked when you run a full sync.",
@@ -96,6 +121,9 @@ const RELEASES = [
     // `/items?filter=min_zero` and `filter=min_set` totals.
     date: "2026-10-18",
     stage: "Stage 17: Purchasing by item filters, minimum stock quick views",
+    title: "Purchasing: filter By item the same way as Inventory",
+    summary: "As you asked, By item now has Inventory's quick views, search and filters. Both screens also get Min stock 0 (or not set) and Min stock above 0 views. The totals at the top and the order sheets still cover the whole order list.",
+    numbersChanged: false,
     changes: [
       "Purchasing › By item now has the same filters as Inventory, as Paul asked: the quick views, the search box, the filter list, supplier region, product type, finish and tag. They work exactly as they do on Inventory, because the dashboard picks the items with the same rules: filtering By item to, say, Needs attention from China shows every item on the order list that Inventory lists for Needs attention from China, and nothing else.",
       "The line above the table says how many of the order list's items are shown, for example \"61 of 128 items · needs attention, from China\". The figures at the top of the page (items to order, taken off, estimated cost) and the order sheets are still for the whole order list, whatever the filter.",
@@ -119,6 +147,10 @@ const RELEASES = [
     // 1.14.)
     date: "2026-10-14",
     stage: "Stage 15: Inventory small fixes",
+    title: "Overview: each tile opens a list matching its count",
+    summary: "Each Overview tile now opens Inventory with exactly the items it counts, clearing any old search or filter. Cover under 2 weeks no longer opens the under-4-weeks list. Used in on Inventory now counts sub-assemblies too.",
+    numbersChanged: true,
+    numbersShort: "Used in now counts sub-assemblies, e.g. BN1665G 2 → 13. Stock figures, suggestions and order sheets don't change.",
     changes: [
       "Each count on the Overview now opens a list of exactly that many items (and Excess stock value, exactly the items that make it up). Clicking Cover under 2 weeks used to open every item with less than 4 weeks of cover, a longer list than the number on the tile. It now opens a new filter, Cover under 2 weeks, which you can also choose on Inventory beside Cover under 4 weeks.",
       "Every Overview tile (Below min stock, Cover under 2 weeks, Suggested orders, Runs out before next delivery, Negative stock, Assembled products, Excess stock value) now opens Inventory fresh: only that tile's filter, with no search, region, product type, finish or tag left over from your last visit, sorted by risk. Before, a search or region you had set on Inventory stayed on, so the list could be shorter than the tile.",
@@ -147,6 +179,10 @@ const RELEASES = [
     // 1.13.)
     date: "2026-10-14",
     stage: "Stage 14: Suggested qty follows the chosen supplier",
+    title: "Purchasing: suggested qty follows the supplier you pick",
+    summary: "As you asked, choose a supplier other than the usual one and the suggested quantity now uses that supplier's lead time, unless the minimum was set by hand. Typed quantities stay; Compare shows each supplier's suggestion.",
+    numbersChanged: true,
+    numbersShort: "No Order list line moved on the day. Choosing another supplier now recalculates Suggested, Order qty and cost, unless you typed the qty.",
     changes: [
       "You told us that when you pick a different supplier, the suggested quantity should match the supplier you pick. From this version it does. When an item is ordered from a supplier other than its usual one, its suggested quantity is worked out again on that supplier's own lead time: a supplier who delivers in 3 weeks needs less stock to cover the wait than one who takes 4 months.",
       "How it is worked out. The rule is the one you already know (8 weeks of demand, plus the stock that covers the wait, less free stock and on order), with only the wait changed. If the item has a minimum set from a period of use, the minimum is worked out again for that supplier's lead time: monthly use × lead days ÷ 30.44. If the minimum was typed by hand, it stays as it is, because it doesn't depend on any lead time. With no minimum, it is weekly demand × the supplier's lead time.",
@@ -175,6 +211,10 @@ const RELEASES = [
     // 1.12.)
     date: "2026-10-14",
     stage: "Stage 13: Lead time per supplier in Purchasing",
+    title: "Purchasing: each supplier shows its own lead time",
+    summary: "A lead time you set on an item now shows only under its usual supplier; other suppliers show their own. For example, N24S16M under TONG MING reads 45 days, not 107. Suggested quantities don't change yet.",
+    numbersChanged: true,
+    numbersShort: "Lead time shown under other suppliers moves, e.g. N24S16M under TONG MING 107 → 45 days. Quantities, costs and totals don't change.",
     changes: [
       "You told us that when you pick a different supplier, the suggested quantity should match whichever supplier you pick. That means a lead time you set on an item belongs to its usual supplier, not to every supplier. This version does the first part: Purchasing now shows each supplier's own lead time.",
       "Where you have set a lead time on an item (on the item page), that figure now shows only under the item's usual supplier. Under any other supplier, Purchasing shows that supplier's own lead time: your figure from the Suppliers page, or else the time their orders have actually taken. For example, N24S16M carries 107 days on the item, for its usual supplier SHANDONG TENGDA; under TONG MING it now reads Tong Ming's 45 days, where before it read 107 under every supplier.",
@@ -195,6 +235,9 @@ const RELEASES = [
     // 1.11.)
     date: "2026-10-14",
     stage: "Stage 12: Stock gaps on screen",
+    title: "All screens: see if stock runs out before the next delivery",
+    summary: "See when free stock runs out before the next PO lands, and by about how much: a Stock gap tile on each item, a Gap before delivery column and an Overview tile. POs with no Promised Date are estimated; overdue ones aren't counted.",
+    numbersChanged: false,
     changes: [
       "You asked us to \"show what gaps might exist between current stock levels, current demand, and incoming stock\". This version does. A gap is the stretch of time between free stock running out and the next delivery that brings it back: the days you would be short, and by about how much.",
       "How it is worked out: free stock today, used up at the weekly demand rate cover already uses, plus each purchase order on its expected date. That date is the Promised Date you enter on the PO in MYOB. A PO without one is placed on an estimate (the PO date plus that supplier's lead time), labelled as an estimate wherever it shows, so enter Promised Dates to replace them. A PO that is overdue, or late against its estimate, is not counted as arriving at all: we don't know when it will come, so a gap that is waiting on one shows its start and an end of \"unknown\".",
@@ -216,6 +259,10 @@ const RELEASES = [
     // versions follow ship order, so Stage 11 is 1.10.)
     date: "2026-10-14",
     stage: "Stage 11: Stock gaps (groundwork)",
+    title: "Behind the scenes: groundwork for stock gaps",
+    summary: "We laid the groundwork for showing stock gaps. Nothing on screen changes: suggested quantities, risk, cover, the Order list and the exports stay exactly as they were.",
+    numbersChanged: false,
+    visible: false,
     changes: [
       "Groundwork for stock gaps; nothing on screen changes.",
     ],
@@ -230,6 +277,9 @@ const RELEASES = [
     // Allied are entering Promised Dates.
     date: "2026-10-14",
     stage: "Stage 9: Incoming POs with expected dates",
+    title: "Item page: see when each incoming PO is expected",
+    summary: "Each item now lists its incoming POs with an Expected date: the Promised Date you enter in MYOB, or a clearly marked estimate. Overdue and late POs come first. Data & Sync lists POs with no Promised Date: enter one in MYOB.",
+    numbersChanged: false,
     changes: [
       "You asked whether an ETA on the purchase order could come through to the dashboard. It can: you'll enter it as the Promised Date on the PO in MYOB, and the dashboard picks it up at the next sync, within 6 hours. Until a PO has one, the dashboard estimates it, and says plainly that it is an estimate.",
       "On an item page, purchase orders now have their own panel, Incoming purchase orders: PO, supplier, the date it was raised, what is still to arrive, the Expected date, its basis and its status. The rows still add up to On order. Overdue and late POs are listed first, then the rest by date.",
@@ -252,6 +302,9 @@ const RELEASES = [
     // pre_s8_<date> comes first (RELEASING.md, "Stage 8 deploy").
     date: "2026-10-14",
     stage: "Stage 8: Choose the supplier on the row",
+    title: "Purchasing: choose the supplier right on the row",
+    summary: "On By item, the Supplier column is now a dropdown of the suppliers on file, with lead times and last prices. Your pick is for this order only; the preferred supplier stays. The quantity doesn't change until you say it should.",
+    numbersChanged: false,
     changes: [
       "On Purchasing (By item), you can now choose the supplier on the row, as you asked: the Supplier column is a dropdown of the suppliers on file for the item, preferred first, then MYOB primary, the supplier who has billed it most, the others tagged on the item page, and any you picked earlier. Each reads like \"HANOVA INTERNATIONAL LTD — preferred · 120 d · $0.42 last\": its role, lead time and what it last charged. It opens on the supplier the item is ordered from now. If you change it with the keyboard rather than the mouse, it asks you to confirm first.",
       "Choosing a different supplier is for this order only. It works exactly as Choose in Compare: the item moves to that supplier here, on By supplier and in the exported order sheets, and the Lead time and Est. cost columns show that supplier's figures. The preferred supplier doesn't change; you change that on the item page. As with any pick that differs from the preferred supplier, the row says \"your pick (preferred: HANOVA INTERNATIONAL LTD)\" with Use preferred and Keep buttons, and the item is listed under \"Earlier picks that differ from the preferred supplier\" until you press Keep.",
@@ -270,6 +323,9 @@ const RELEASES = [
     // below names no item, so there is nothing to re-derive.
     date: "2026-10-14",
     stage: "Stage 7: Purchasing sorting",
+    title: "Purchasing: sort By item by any column",
+    summary: "As you asked, click a column heading on By item to sort, as on Inventory; click again to reverse. Blanks always go last, and the sort stays when you reload or come back. Click \"back to highest risk first\" to reset it.",
+    numbersChanged: false,
     changes: [
       "On Purchasing, the By item list now sorts the way Inventory does, as you asked. Click a column heading to sort by it; click it again to reverse. The column in use shows ▲ (lowest first) or ▼ (highest first), and a faint ↕ appears when you point at any other heading. Items with nothing to compare in that column, such as no demand (so no cover), no supplier or no lead time, always go to the bottom, whichever way you sort.",
       "The first click goes the most useful way. Item, Supplier, On hand, Free stock and both covers start lowest first (A first for Item and Supplier). Suggested, Order qty, Committed, On order, Weekly demand, Lead time and Est. cost start highest first. Every column that is also on Inventory starts the same way there. Items that tie are listed by item number.",
@@ -287,6 +343,9 @@ const RELEASES = [
     // snapshot pre_s6_<date> comes first (RELEASING.md, "Stage 6 deploy").
     date: "2026-10-14",
     stage: "Stage 6: Purchasing by item",
+    title: "Purchasing: new By item view of the order list",
+    summary: "Purchasing now opens on By item: one row per item, with Suggested and Order qty beside On hand, Free stock, On order and both Cover columns. Change quantities here; By supplier is one click away for raising POs.",
+    numbersChanged: false,
     changes: [
       "Purchasing now opens on the Order list by item, as you asked: one row per item, with the suggested quantity, the quantity on the order, and the item's current position beside it: on hand, committed, free stock, on order, weekly demand, cover excl. on order and cover incl. on order. The supplier, its lead time and the estimated cost are on the same row. Items most at risk come first (the same risk score as Inventory), then by item number.",
       "The top of the page says how many items are on the order, how many you have taken off, and the estimated cost: \"N items to order · M taken off · $X estimated\". The two counts add up to By supplier's \"items need an order\", and the cost is the total the order sheets add up to.",
@@ -305,6 +364,9 @@ const RELEASES = [
     // snapshot start date the note names still reads 21 Aug.
     date: "2026-10-14",
     stage: "Stage 5: Purchasing groundwork",
+    title: "Purchasing: on a past date, see where the figures come from",
+    summary: "Mostly groundwork: the Order list works exactly as before. Pick a past date and Purchasing now says whether Committed and On order come from that day's snapshot, or are understated because snapshots hadn't started.",
+    numbersChanged: false,
     changes: [
       "Behind-the-scenes groundwork for the Order list by item, which comes in a later version. The Order list looks and works exactly as before: every quantity, supplier, button and total is unchanged, and so is the exported order sheet.",
       "One small visible change: when you pick a past date at the top of the page, the note on Purchasing now says where its figures come from, as the one on Inventory does. On a day with a stored daily snapshot, committed and on order are the figures recorded that day. On an earlier day they are understated, and the note says when the daily snapshots began.",
@@ -321,6 +383,10 @@ const RELEASES = [
     // send Allied the same before/after as a heads-up before the deploy.
     date: "2026-10-14",
     stage: "Stage 4: Order list total for split items",
+    title: "Purchasing: order total counts split items in full",
+    summary: "When you split an item between suppliers, the total at the top of the Order list now adds both parts, as the order sheets do, and shows one figure instead of a range. The kit note now counts kits, not lines.",
+    numbersChanged: true,
+    numbersShort: "Only the Order list total, for split items. FG250P was split on the day, so the range became one figure, about $2,100 to $2,500 higher.",
     changes: [
       "The total at the top of the Order list now counts a split item in full. When you split an item between suppliers, for example 142 from one and 142 from another, the total used to count only one of the two parts, and showed a range as if a choice were still to be made. It now adds the parts together, as the order sheets always have.",
       "The top of the Order list now shows a single figure, \"$X to order\", the same as the order sheets add up to.",
@@ -335,6 +401,9 @@ const RELEASES = [
     // evening's capture: BN1665G's figures drift with every sync.
     date: "2026-10-14",
     stage: "Stage 3: Cover excl. / incl. on order",
+    title: "Inventory: cover shown excl. and incl. on order",
+    summary: "Cover now shows two ways: Cover excl. on order (free stock ÷ weekly demand, as before) and Cover incl. on order, which counts all stock on order as if it were here, even months away. It turns red below the item's lead time.",
+    numbersChanged: false,
     changes: [
       "Cover is now shown two ways, as you asked. Cover excl. on order is the figure you already know: free stock ÷ weekly demand. Cover incl. on order also counts everything on order as if it had already arrived: (free stock + on order) ÷ weekly demand.",
       "On an item page, the Cover tile becomes two tiles, each with its working underneath (\"323 free ÷ 166.4/wk\"). Under Cover incl. on order is the lead time, in red as \"below 17.1w lead time\" when even counting what is on order the stock runs out before a new order could arrive.",
@@ -355,6 +424,10 @@ const RELEASES = [
     // deploys, with the figures below re-derived from that evening's capture.
     date: "2026-10-14",
     stage: "Stage 2: On order matches MYOB",
+    title: "Inventory: On order now matches MYOB",
+    summary: "POs that MYOB still shows as Open after they were billed and reversed no longer count as on order, so On order falls on six items and two suggested orders go up. Item pages list only POs with stock still to arrive.",
+    numbersChanged: true,
+    numbersShort: "On order falls on 6 items, e.g. WSBT450G 112,897 → 0, and suggested orders rise on 2 items.",
     changes: [
       "On order now matches MYOB. Some purchase orders MYOB still shows as Open are reversals of POs that were already billed, and until now we counted them as stock on order. They are no longer counted, so On order, and Available with it, drop on the six items listed below. Version 1.1 previewed exactly this change on Data & Sync as \"Proposed rule\".",
       "Suggested orders follow: SPW12G's suggestion goes up, and BN16110G gets one, because stock we thought was coming isn't. If you have typed a quantity on the Order list, it is kept.",
@@ -371,6 +444,9 @@ const RELEASES = [
     version: "1.1.0",
     date: "2026-10-14",
     stage: "Stage 1: Safety checks",
+    title: "Data & Sync: new checks of On order against MYOB",
+    summary: "Data & Sync now lists every item where On order differs from MYOB's, and every PO MYOB shows as Open. The sync status at the bottom left turns amber if On order is below MYOB's. Changes to Lead time and Min stock are now logged.",
+    numbersChanged: false,
     changes: [
       "Data & Sync has two new lists. \"On order vs MYOB\" shows every item where our On order differs from MYOB's, with a third figure, \"Proposed rule\", for what a coming update will show. \"Open purchase orders\" lists every PO MYOB shows as Open and says whether it is counted.",
       "Some POs MYOB still shows as Open are reversals of POs that were already billed. Today we count them as stock on order, so a few items show far more on order than is really coming. For example WSBT450G shows 112,897 on order where MYOB shows none. This version only lists them. The fix comes in a later update, announced before it ships.",
@@ -384,6 +460,9 @@ const RELEASES = [
     version: "1.0.0",
     date: "2026-10-14",
     stage: "Stage 0: Release plumbing",
+    title: "All screens: see your version and What's new",
+    summary: "The left-hand menu now shows your version and a What's new link to this list. If the dashboard is updated while it's open, a bar asks you to reload; until you do, that page won't save changes. It never reloads by itself.",
+    numbersChanged: false,
     changes: [
       "The bottom of the left-hand menu now shows which version of the dashboard you are using, with a What's new link that opens this list.",
       "Every update from now on is listed here: its date, what changed, any figures that moved (with an example item), and how to check it.",
@@ -1070,19 +1149,72 @@ keyForm.addEventListener("submit", async (e) => {
 
 const helpDrawer = document.getElementById("help-drawer");
 
-/** One version in What's new: what changed, numbers that moved, how to check. */
-function releaseEntryHtml(r) {
+/*
+ * What's new (1.17): one card per release, grouped by the day it shipped. The
+ * card leads with a plain headline, a short summary and whether any figure
+ * changed; the full notes (what's different, the figures, how to check) and
+ * the internal stage reference fold away under "Full details". Releases this
+ * browser hasn't shown What's new for are marked New (whats-new.js).
+ */
+function releaseEntryHtml(r, isNew = false) {
   const changes = Array.isArray(r.changes) ? r.changes : [r.changes].filter(Boolean);
-  return `<div class="release-entry${r.withdrawn ? " withdrawn" : ""}">
+  const fig = figuresLine(r);
+  return `<article class="release-card${r.withdrawn ? " withdrawn" : ""}${r.visible === false ? " quiet" : ""}">
     <div class="release-head">
-      <strong>Version ${esc(displayVersion(r.version))}</strong>
-      <span class="release-meta">${esc(dateFmt(`${r.date}T12:00:00`))} · ${esc(r.stage)}</span>
+      <h4 class="release-title">${esc(releaseTitle(r))}</h4>
+      ${isNew ? '<span class="badge brand">New</span>' : ""}
       ${r.withdrawn ? `<span class="badge idle">withdrawn in ${esc(displayVersion(r.withdrawn))}</span>` : ""}
     </div>
-    ${changes.length ? `<ul>${changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
-    ${r.numbers ? `<p><strong>Numbers that changed:</strong> ${esc(r.numbers)}</p>` : ""}
-    ${r.check ? `<p><strong>How to check:</strong> ${esc(r.check)}</p>` : ""}
-  </div>`;
+    ${r.summary ? `<p class="release-summary">${esc(r.summary)}</p>` : ""}
+    ${
+      fig
+        ? `<p class="release-figures ${fig.tone}"><span class="release-dot" aria-hidden="true"></span><strong>${esc(fig.label)}</strong>${
+            fig.text ? `: ${esc(fig.text)}` : ""
+          }</p>`
+        : ""
+    }
+    <details class="release-more"${r.summary ? "" : " open"}>
+      <summary>Full details and how to check</summary>
+      ${changes.length ? `<h5>What's different</h5><ul>${changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
+      ${r.numbers ? `<h5>Figures</h5><p>${esc(r.numbers)}</p>` : ""}
+      ${r.check ? `<h5>How to check</h5><p>${esc(r.check)}</p>` : ""}
+      <p class="release-ref">Version ${esc(displayVersion(r.version))} · ${esc(r.stage)}</p>
+    </details>
+  </article>`;
+}
+
+/** What's new, grouped by the day each release shipped; `fresh` are the versions marked New. */
+function whatsNewHtml(fresh) {
+  return releaseDays(RELEASES)
+    .map(
+      (day) => `<section class="release-day">
+        <h4 class="release-day-head">${esc(day.label)}<span> · ${day.releases.length} update${day.releases.length === 1 ? "" : "s"}</span></h4>
+        ${day.releases.map((r) => releaseEntryHtml(r, fresh.has(r.version))).join("")}
+      </section>`,
+    )
+    .join("");
+}
+
+/*
+ * The last version this browser showed What's new for, so the footer can say
+ * there is something new and the panel can mark it. Browser storage only: it
+ * is a convenience for one person, and a private window simply sees no marks.
+ */
+const WHATS_NEW_SEEN = "afWhatsNewSeen";
+function whatsNewSeen() {
+  try {
+    return localStorage.getItem(WHATS_NEW_SEEN);
+  } catch {
+    return null;
+  }
+}
+function markWhatsNewSeen() {
+  try {
+    localStorage.setItem(WHATS_NEW_SEEN, RELEASES[0]?.version ?? "");
+  } catch {
+    // Nothing to remember in a browser that keeps nothing.
+  }
+  renderVersionFooter();
 }
 
 function renderHelp() {
@@ -1090,7 +1222,9 @@ function renderHelp() {
   if (!body || body.dataset.filled) return;
   body.innerHTML = `
     <h3 class="sub-h" id="whats-new">What's new</h3>
-    <div class="release-list">${RELEASES.map(releaseEntryHtml).join("")}</div>
+    <p class="release-intro">The latest changes to your dashboard, newest first. Each update says in a line or two
+    what you'll notice and whether any figures change. Open "Full details and how to check" for the rest.</p>
+    <div class="release-list">${whatsNewHtml(newVersions(RELEASES, whatsNewSeen()))}</div>
     <h3 class="sub-h">What the terms mean</h3>
     <dl class="glossary">
       ${Object.values(TERMS)
@@ -1132,6 +1266,7 @@ function renderHelp() {
 document.getElementById("help-open")?.addEventListener("click", () => {
   renderHelp();
   helpDrawer.hidden = false;
+  markWhatsNewSeen();
 });
 
 /** Open the help drawer at What's new, from the footer link. */
@@ -1139,6 +1274,7 @@ function openWhatsNew() {
   renderHelp();
   helpDrawer.hidden = false;
   document.getElementById("whats-new")?.scrollIntoView({ block: "start" });
+  markWhatsNewSeen();
 }
 
 /* ---------- release: footer and reload banner (1.0) ---------- */
@@ -1156,8 +1292,11 @@ const releaseState = { seenRelease: false, firstCommit: null, banner: null };
 function renderVersionFooter() {
   const el = document.getElementById("side-version");
   if (!el) return;
+  const unseen = hasUnseen(RELEASES, whatsNewSeen());
   el.innerHTML = `Version ${esc(displayVersion(UI_VERSION))} · ${esc(releaseState.firstCommit ?? "—")} ·
-    <button class="side-link help-btn" id="whats-new-open" type="button">What's new</button>`;
+    <button class="side-link help-btn" id="whats-new-open" type="button">What's new</button>${
+      unseen ? ' <span class="badge brand whats-new-flag" title="Updates since you last looked at What\'s new">New</span>' : ""
+    }`;
   document.getElementById("whats-new-open")?.addEventListener("click", openWhatsNew);
 }
 

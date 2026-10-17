@@ -182,6 +182,9 @@ const entry = (version: string, over: Record<string, unknown> = {}) => ({
   version,
   date: "2026-10-13",
   stage: `Stage for ${version}`,
+  title: `Headline for ${version}`,
+  summary: "What you will notice.",
+  numbersChanged: false,
   changes: ["x"],
   ...over,
 });

@@ -1,0 +1,13 @@
+{
+  "version": "1.17.0",
+  "stage": "Stage 19: What's new, easier to read",
+  "note": "1.17 changes only the What's new panel, in the browser: RELEASES entries gain title, summary, numbersChanged, numbersShort and (groundwork only) visible; public/whats-new.js groups them by day and marks New; scripts/check-release.mjs requires the first three. No src/ file changes, so every capture must be identical apart from the release block /sync/status reports.",
+  "reviewed": "Written by hand from two in-process captures (stage-check capture through each tree's real router, GET only) on the local copy (allied_dev), the 1.16 tree plus rollout log (8ecf574) then this tree, 18 Oct: 1 difference, release.version. The 17 headlines and summaries were written by one agent from each RELEASES entry, fact-checked by three agents by slice against the entries and FIX-PLAN Part 5, read by a plain-language reviewer, and merged by an editor (30 fixes applied). In the browser on the copy: What's new 13,909 -> 4,005 px tall, two day groups (3 + 15 updates), the newest day marked New on a first look, the footer New flag cleared on opening, no New marks on the next open.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.16.0 -> 1.17.0) and commit"
+    }
+  ]
+}
