@@ -74,6 +74,14 @@ export const config = {
      * midnight, where an overrun would land the snapshot on the wrong date.
      */
     syncCloseTime: optional("SYNC_CLOSE_TIME") || "23:45",
+    /*
+     * Remove records MYOB no longer sends (1.16, sync/reconcile.ts). Set
+     * SYNC_REMOVE_DELETED=off (or 0 / false) on Render to make the check
+     * report only: it still lists what is missing on Data & Sync, removes
+     * nothing, and leaves no list for a later sync to confirm. The lever for
+     * a list nobody expected, without a code release.
+     */
+    removeDeleted: !/^(0|false|off|no)$/i.test(process.env.SYNC_REMOVE_DELETED ?? ""),
     /** Cover beyond which stock counts as excess. */
     excessCoverWeeks: Number(process.env.EXCESS_COVER_WEEKS || 26),
     /** Ignore excess worth less than this (NZD) to avoid noise. */

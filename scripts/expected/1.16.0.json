@@ -1,0 +1,13 @@
+{
+  "version": "1.16.0",
+  "stage": "Stage 18: Records deleted in MYOB leave the dashboard",
+  "note": "1.16 changes the sync, not how any figure is computed. Until a sync runs, every capture is identical apart from the release block: the only boot change is one additive table (myob_removed_docs). The first 1.16 sync records what MYOB no longer sends under stats.<entity>.reconcile and removes nothing, and its full read of sale orders corrects the status of orders MYOB invoiced without bumping their LastModified, so committed moves to MYOB's figure on those items then (prod, 18 Oct: BN12150LTG 800 -> 650, FG 2 -> 0, DS 3 -> 0, BP 8 -> 0); the second removes what is still missing (two POs on prod on 17 Oct: 00023248, 00023268; one bill). Nothing moves at the deploy. So the deploy diff is release only, and the post-sync diff is a numbers diff, generated with `stage-check expect` from a capture taken after the second sync and checked against the list in RELEASING.md \"Stage 18 deploy\".",
+  "reviewed": "Written by hand from two in-process captures (stage-check capture through each tree's real router, GET only) on the local copy (allied_dev), the 1.15 tree (dfbac26) then this tree, 17 Oct: 1 difference, release.version. Removal checked end to end with reconcileAbsent on a scratch copy of allied_dev_pristine_20261012: two Open, unbilled POs (00023130, 00023128) left out of MYOB's answer were flagged and kept by the first check, removed and archived (header and lines) by the second, with a failed run between them; On order moved on exactly their 2 items, by exactly their outstanding 650 units, and on no other item; an empty answer from MYOB removed nothing (skipped, 1,295 of 1,295 over the limit of 26). Scratch copy dropped. Pre-deploy review (18 Oct, 3 reviewers + 2 skeptics per finding): no data-safety defect in the removal; found the first-sync committed correction above (now announced) and the missing off-switch (now SYNC_REMOVE_DELETED).",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.15.0 -> 1.16.0) and commit"
+    }
+  ]
+}

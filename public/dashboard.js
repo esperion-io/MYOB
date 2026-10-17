@@ -63,9 +63,30 @@ import { inventoryHashFor, overviewTileHash, overviewTileState, usedInCount, use
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.15.0";
+const UI_VERSION = "1.16.0";
 
 const RELEASES = [
+  {
+    version: "1.16.0",
+    // Set to the ship date. The figures are production's on 17 Oct 2026 NZ
+    // (GET only): /divergence onOrder lists exactly BN12150LTG 15,700 vs
+    // MYOB 14,050, N24S16M 450 vs 225 and WR16301.5S16 190,000 vs 170,000,
+    // and the differences are 00023248 (600 BN12150LTG) and 00023268 (1,050
+    // BN12150LTG, 225 N24S16M, 20,000 WR16301.5S16), the two POs MYOB no
+    // longer sends (1,377 held, 1,375 fetched). Re-derive them from the
+    // ship-day capture; the bill and any sale orders are named by the first
+    // 1.16 sync on Data & Sync, before anything is removed.
+    date: "2026-10-18",
+    stage: "Stage 18: Records deleted in MYOB leave the dashboard",
+    changes: [
+      "You asked why PO 00023248 (Steel & Tube, 600 × BN12150LTG) still showed as on order after it was deleted in MYOB because the supplier couldn't supply. Until now the dashboard only ever added and updated what MYOB sent it: when something was deleted in MYOB, nothing told the dashboard, so it kept the PO as it last saw it, open with nothing received. From this version, every sync checks for records MYOB no longer has, and removes them.",
+      "It covers purchase orders, bills, sales orders, builds and stock adjustments. A record goes only after two syncs in a row have not found it in MYOB, so one sync that comes back from MYOB incomplete can never remove anything. If a lot of records seem to be missing at once, nothing is removed and Data & Sync says so. Sales invoices are checked when you run a full sync.",
+      "Data & Sync › Recent sync runs lists what each sync found: records missing from MYOB (\"removed if still missing next sync\") and records removed, by number. Items deleted in MYOB are listed there too, but kept on the dashboard.",
+      "Sales orders are now read in full on every sync (about 2,500 orders), so a sales order deleted in MYOB stops counting as committed in the same way. Reading them in full also catches sales orders MYOB has invoiced since we last read them: MYOB doesn't mark an order as changed when it invoices it, so until now a few still counted as committed here after they were invoiced.",
+    ],
+    numbers: "Two kinds of change, both to MYOB's own figure. On the first sync after the update, committed is corrected where a sales order MYOB has since invoiced still counted here as open: on 18 Oct that is BN12150LTG 800 → 650, FG 2 → 0 (its suggested order 86 → about 84), DS 3 → 0 and BP 8 → 0. On the sync after that, On order falls where a PO was deleted in MYOB: BN12150LTG 15,700 → 14,050 (00023248, 600, and 00023268, 1,050), N24S16M 450 → 225 and WR16301.5S16 190,000 → 170,000 (00023268). Cover incl. on order falls with it (BN12150LTG 30.1 → 26.8 weeks, N24S16M 4.4 → 2.9, WR16301.5S16 35.3 → 31.9), and N24S16M's suggested order rises by 225, to about 3,097. One bill MYOB no longer has is removed at the same time: Data & Sync names it on the first sync.",
+    check: "After the first sync, Data & Sync › Recent sync runs reads \"purchase_orders: 2 (00023248, 00023268) missing from MYOB, removed if still missing next sync\". After the next one it reads \"removed 2 (00023248, 00023268), deleted in MYOB\", and On order vs MYOB on the same page no longer lists BN12150LTG, N24S16M or WR16301.5S16. Open BN12150LTG: On order reads 14,050, and Incoming purchase orders no longer lists 00023248 or 00023268.",
+  },
   {
     version: "1.15.0",
     // Set to the ship date. The counts below are from production as at
@@ -4858,6 +4879,26 @@ function summariseStats(stats) {
   const parts = [];
   for (const [k, v] of Object.entries(stats)) {
     if (v && typeof v === "object" && "fetched" in v) parts.push(`${k}: ${v.fetched}`);
+  }
+  // 1.16: records MYOB no longer sends, removed once two complete fetches agree.
+  for (const [k, v] of Object.entries(stats)) {
+    const r = v && typeof v === "object" ? v.reconcile : null;
+    if (!r) continue;
+    if (r.error) {
+      parts.push(`${k}: check for records deleted in MYOB failed: ${r.error}`);
+      continue;
+    }
+    const named = (n, list) => `${n}${list?.length ? ` (${list.join(", ")}${n > list.length ? ", …" : ""})` : ""}`;
+    if (r.removed) parts.push(`${k}: removed ${named(r.removed, r.removedNumbers)}, deleted in MYOB`);
+    if (r.skipped) parts.push(`${k}: ${r.skipped}`);
+    else if (r.reportOnly && r.absentCount)
+      parts.push(`${k}: ${named(r.absentCount, r.absentNumbers)} missing from MYOB (removal switched off)`);
+    else if (r.absentCount > (r.removed ?? 0))
+      parts.push(
+        k === "items"
+          ? `items no longer in MYOB: ${named(r.absentCount, r.absentNumbers)}`
+          : `${k}: ${named(r.absentCount - (r.removed ?? 0), (r.absentNumbers ?? []).filter((n) => !(r.removedNumbers ?? []).includes(n)))} missing from MYOB, removed if still missing next sync`,
+      );
   }
   // 1.1: recorded at the end of each sync; absent on older runs.
   const below = stats.on_order_below_myob;

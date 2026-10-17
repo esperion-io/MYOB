@@ -275,6 +275,23 @@ const DDL: string[] = [
     PRIMARY KEY (adjustment_uid, idx)
   )`,
 
+  /*
+   * Records the sync removed because MYOB no longer sends them (1.16,
+   * sync/reconcile.ts): the header and its lines as they were, kept so a
+   * removal can always be read back. Nothing reads it to compute a figure.
+   */
+  `CREATE TABLE IF NOT EXISTS myob_removed_docs (
+    id BIGSERIAL PRIMARY KEY,
+    entity TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    number TEXT,
+    doc_date TIMESTAMPTZ,
+    header JSONB NOT NULL,
+    lines JSONB NOT NULL DEFAULT '[]'::jsonb,
+    run_id BIGINT,
+    removed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`,
+
   // Product relationships. source='derived' rows are regenerated from MYOB
   // Build transactions each sync; source='user' rows are Allied-provided and
   // never touched by the sync.

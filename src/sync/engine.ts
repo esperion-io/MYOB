@@ -5,6 +5,7 @@ import { MyobApiError, myobGetAllPages } from "../myob/client.js";
 import type { CompanyConnection } from "../myob/types.js";
 import { getActiveConnection } from "../store/connections.js";
 import { ensureInsightsSchema } from "./schema.js";
+import { completeFetch, planRemoval, previousAbsent, type ReconcileSpec, type ReconcileStats } from "./reconcile.js";
 import { establishOpeningBalance, onOrderBelowMyobNow, snapshotPositions } from "../insights/ledger.js";
 
 type Raw = Record<string, unknown>;
@@ -158,6 +159,12 @@ interface EntitySpec {
   alwaysFull?: boolean;
   /** OData $expand passed through to the collection request. */
   expand?: string;
+  /**
+   * Check, after a complete fetch, for records held here that MYOB no longer
+   * sends (1.16, reconcile.ts). Documents are removed once confirmed; items
+   * are only reported.
+   */
+  reconcile?: ReconcileSpec;
   upsertPage: (client: pg.PoolClient, items: Raw[]) => Promise<void>;
 }
 
@@ -274,6 +281,8 @@ const ENTITIES: EntitySpec[] = [
      * ~3,100 rows / ~8 pages.
      */
     alwaysFull: true,
+    // Reported, never removed: minimums, suppliers, tags and the Order list refer to items.
+    reconcile: { table: "myob_items", windowed: false, remove: false },
     // Pulls MYOB's real recipes, including auto-build items that never appear
     // as Build transactions and so can never be derived from observed builds.
     expand: "BillOfMaterials",
@@ -372,6 +381,8 @@ const ENTITIES: EntitySpec[] = [
     entity: "sale_invoices",
     path: "Sale/Invoice/Item",
     windowed: true,
+    // Incremental on a scheduled sync, so checked only on a full one.
+    reconcile: { table: "myob_sale_invoices", lineTable: "myob_sale_invoice_lines", lineKey: "invoice_uid", windowed: true, remove: true },
     upsertPage: (client, docs) =>
       upsertDocs({
         client,
@@ -404,6 +415,14 @@ const ENTITIES: EntitySpec[] = [
     entity: "sale_orders",
     path: "Sale/Order/Item",
     windowed: true,
+    /*
+     * Fetched whole on every sync from 1.16 (about 2,500 orders, 7 pages), so
+     * a sale order deleted in MYOB stops counting as committed within two
+     * syncs, as a deleted purchase order stops counting as on order. An
+     * incremental fetch never sees a deletion.
+     */
+    alwaysFull: true,
+    reconcile: { table: "myob_sale_orders", lineTable: "myob_sale_order_lines", lineKey: "order_uid", windowed: true, remove: true },
     upsertPage: (client, docs) =>
       upsertDocs({
         client,
@@ -436,6 +455,7 @@ const ENTITIES: EntitySpec[] = [
     entity: "purchase_bills",
     path: "Purchase/Bill/Item",
     windowed: true,
+    reconcile: { table: "myob_purchase_bills", lineTable: "myob_purchase_bill_lines", lineKey: "bill_uid", windowed: true, remove: true },
     upsertPage: (client, docs) =>
       upsertDocs({
         client,
@@ -468,6 +488,7 @@ const ENTITIES: EntitySpec[] = [
     entity: "purchase_orders",
     path: "Purchase/Order/Item",
     windowed: true,
+    reconcile: { table: "myob_purchase_orders", lineTable: "myob_purchase_order_lines", lineKey: "order_uid", windowed: true, remove: true },
     upsertPage: (client, docs) =>
       upsertDocs({
         client,
@@ -501,6 +522,7 @@ const ENTITIES: EntitySpec[] = [
     entity: "builds",
     path: "Inventory/Build",
     windowed: true,
+    reconcile: { table: "myob_builds", lineTable: "myob_build_lines", lineKey: "build_uid", windowed: true, remove: true },
     upsertPage: (client, docs) =>
       upsertDocs({
         client,
@@ -523,6 +545,7 @@ const ENTITIES: EntitySpec[] = [
     entity: "adjustments",
     path: "Inventory/Adjustment",
     windowed: true,
+    reconcile: { table: "myob_adjustments", lineTable: "myob_adjustment_lines", lineKey: "adjustment_uid", windowed: true, remove: true },
     upsertPage: (client, docs) =>
       upsertDocs({
         client,
@@ -696,7 +719,7 @@ export async function runSync(
 
   try {
     for (const spec of ENTITIES) {
-      stats[spec.entity] = await syncEntity(pool, connection, spec, mode);
+      stats[spec.entity] = await syncEntity(pool, connection, spec, mode, runId);
       await pool.query(`UPDATE sync_runs SET stats = $2 WHERE id = $1`, [
         runId,
         JSON.stringify(stats),
@@ -780,6 +803,7 @@ async function syncEntity(
   connection: CompanyConnection,
   spec: EntitySpec,
   mode: "full" | "incremental",
+  runId: number,
 ): Promise<Record<string, unknown>> {
   const state = await pool.query(
     `SELECT last_modified_high FROM sync_state WHERE entity = $1`,
@@ -798,6 +822,8 @@ async function syncEntity(
 
   let rows = 0;
   let maxModified: string | null = null;
+  // Every uid MYOB sent this run, for the absence check (1.16).
+  const seen = new Set<string>();
 
   const onPage = async (items: Raw[]): Promise<void> => {
     const client = await pool.connect();
@@ -813,6 +839,8 @@ async function syncEntity(
     }
     rows += items.length;
     for (const it of items) {
+      const uid = str(it.UID);
+      if (uid) seen.add(uid);
       const lm = typeof it.LastModified === "string" ? it.LastModified : null;
       if (lm && (!maxModified || lm > maxModified)) maxModified = lm;
     }
@@ -836,7 +864,25 @@ async function syncEntity(
     expandError = err instanceof Error ? err.message : String(err);
     rows = 0;
     maxModified = null;
+    seen.clear();
     ({ pages } = await myobGetAllPages(connection, spec.path, { filter, onPage }));
+  }
+
+  /*
+   * Records MYOB no longer sends (1.16). Only after a complete fetch: no
+   * filter, or the sync floor's Date filter. A LastModified fetch carries
+   * only what changed, so it says nothing about what was deleted. Before
+   * sync_state, so its row count is the count after any removal. A check,
+   * never a gate: a failure is recorded and the sync goes on with the rows
+   * as they were (the removal is one transaction, so nothing is half done).
+   */
+  let reconcile: ReconcileStats | { error: string } | null = null;
+  if (spec.reconcile && completeFetch(filter)) {
+    try {
+      reconcile = await reconcileAbsent(pool, spec.entity, spec.reconcile, seen, runId);
+    } catch (err) {
+      reconcile = { error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   await pool.query(
@@ -857,6 +903,79 @@ async function syncEntity(
     filter: filter ?? "none",
     ...(spec.expand ? { expand: expandError ? "rejected — retried without" : spec.expand } : {}),
     ...(expandError ? { expandError } : {}),
+    ...(reconcile ? { reconcile } : {}),
+  };
+}
+
+/*
+ * The absence check for one entity (1.16; the rules are in reconcile.ts).
+ * Exported for scripts and checks; the sync calls it from syncEntity.
+ * Reads the rows held in the range MYOB was asked for, and the absent list
+ * the last complete check left; removes what both say is gone, header and
+ * lines, copying each to myob_removed_docs in the same transaction.
+ */
+export async function reconcileAbsent(
+  pool: pg.Pool,
+  entity: string,
+  rc: ReconcileSpec,
+  seen: Set<string>,
+  runId: number,
+): Promise<ReconcileStats> {
+  // A day's margin above the floor, so a time zone can't put a row on the wrong side of it.
+  const floor = rc.windowed ? historyFloor().toISOString() : null;
+  const held = await pool.query(
+    `SELECT uid, number FROM ${rc.table}
+     ${floor ? `WHERE date >= $1::timestamptz + INTERVAL '1 day'` : ""}`,
+    floor ? [floor] : [],
+  );
+  const numberOf = new Map<string, string>(
+    held.rows.map((r) => [String(r.uid), (r.number as string | null) ?? String(r.uid)]),
+  );
+  const last = await pool.query(
+    `SELECT stats FROM sync_runs
+     WHERE status = 'success' AND stats -> $1 -> 'reconcile' IS NOT NULL
+     ORDER BY id DESC LIMIT 1`,
+    [entity],
+  );
+  // Report only while SYNC_REMOVE_DELETED is off: nothing removed, and no list left to confirm.
+  const removing = rc.remove && config.insights.removeDeleted;
+  const plan = planRemoval([...numberOf.keys()], seen, previousAbsent(last.rows[0]?.stats ?? null, entity), removing);
+
+  if (plan.remove.length) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const lines = rc.lineTable
+        ? `COALESCE((SELECT jsonb_agg(to_jsonb(l)) FROM ${rc.lineTable} l WHERE l.${rc.lineKey} = h.uid), '[]'::jsonb)`
+        : `'[]'::jsonb`;
+      await client.query(
+        `INSERT INTO myob_removed_docs (entity, uid, number, doc_date, header, lines, run_id)
+         SELECT $1, h.uid, h.number, ${rc.windowed ? "h.date" : "NULL"}, to_jsonb(h), ${lines}, $3
+         FROM ${rc.table} h WHERE h.uid = ANY($2)`,
+        [entity, plan.remove, runId],
+      );
+      if (rc.lineTable) await client.query(`DELETE FROM ${rc.lineTable} WHERE ${rc.lineKey} = ANY($1)`, [plan.remove]);
+      await client.query(`DELETE FROM ${rc.table} WHERE uid = ANY($1)`, [plan.remove]);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  const names = (uids: string[]) => uids.slice(0, 50).map((u) => numberOf.get(u) ?? u);
+  return {
+    checked: numberOf.size,
+    // Left for the next sync to confirm, unless this check was skipped or
+    // removal is switched off (a list from then must not confirm one later).
+    ...(plan.skipped ? { skipped: plan.skipped } : removing ? { absent: plan.absent } : {}),
+    ...(rc.remove && !removing ? { reportOnly: true } : {}),
+    absentCount: plan.absent.length,
+    absentNumbers: names(plan.absent),
+    removed: plan.remove.length,
+    removedNumbers: names(plan.remove),
   };
 }
 

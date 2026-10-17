@@ -179,6 +179,18 @@ Allied's requests of 17 Oct 2026: Paul's "filtering in the purchasing by item ta
 - **Purchasing › By item:** a filter bar under the notices, the same as Inventory's: quick views, search, filter list, region, product type, finish and tag, plus the facet note and Clear. The page asks `/items/match` (window applied) when a choice changes and beside every `/cart` reload, and keeps the rows whose item is in the answer (`order-list.js` `rowsInView`); it has no filter rule of its own. Quick views take Inventory's sort where By item has that column (`presetOrderSort`), else the default; stock value has none, so Slow movers, Dead stock and From China sort by risk there. The header (items to order, taken off, estimated) and the order sheets stay whole-list; the line above the table reads "N of M items · <filter>". A failed match shows a notice and every row. Choices are in the address on Inventory's keys before the sort (`#/purchasing?filter=attention&region=China&sort=cover&dir=asc`, `orderViewQuery` / `parseOrderFilter`), on Inventory's rules: a query sets the whole view, none keeps the view on screen. `drawOrderByItem` now draws the page and `drawOrderByItemList` the summary and table, so a sort, search or filter redraws only the rows and the search box keeps its focus; a write still redraws the whole page.
 - **Stage 17 deploy:** as any UI release; no snapshot (nothing is written). Capture before and after, `diff --allow scripts/expected/1.15.0.json` (0 not allowed). In the browser (GET only): on Inventory, Min stock 0 + Min stock above 0 = all items; on By item, Needs attention + Region: China lists exactly Inventory's list for it intersected with the order list, the search narrows as you type, reload keeps it, Clear restores the whole list. Rollback is a pure revert: a `?filter=` bookmark on #/purchasing then opens the 1.14 order list, ignoring the filter.
 
+## What 1.16 changed
+
+Allied's question of 17 Oct 2026: why did PO 00023248 (Steel & Tube, 600 × BN12150LTG), deleted in MYOB when the supplier couldn't supply, keep counting as on order? Because the sync only ever upserted: nothing removed a record MYOB stopped sending (26 Aug review D11). On prod, 17 Oct NZ: 1,377 POs held vs 1,375 fetched (00023248 and the Hobson duplicate 00023268, whose number MYOB now shows on an Office Max order), 2,053 bills vs 2,052, 3,105 items vs 3,101. `/divergence` onOrder lists exactly the three items those two POs carry.
+
+- **`src/sync/reconcile.ts`** (pure, tested): `completeFetch(filter)` (no filter, or the floor's `Date ge` filter; a `LastModified` fetch proves nothing about absence), `planRemoval` (absent = held in the fetched range, not sent; removed = absent now and at the last complete check; more absent than max(10, 2%) removes nothing and says why) and `previousAbsent`.
+- **`engine.ts`:** `syncEntity` collects every UID MYOB sends (cleared with the rows on an `$expand` retry), and after a complete fetch, before `sync_state`, calls `reconcileAbsent`: rows dated at least a day after the floor (windowed entities) or all rows (items); the last absent list from the newest successful run whose stats carry one; then, in one transaction, archive header and lines to `myob_removed_docs`, delete lines, delete headers. Its result is `stats.<entity>.reconcile` (`checked`, `absent` uids unless skipped, `absentCount`, `absentNumbers`, `removed`, `removedNumbers`, `skipped`), shown in Recent sync runs.
+- **Which entities:** purchase orders, bills, builds and adjustments (fetched whole every sync already), sale orders (**now `alwaysFull`**: ~2,530 orders, 7 pages; an incremental fetch never sees a deletion, and a deleted sale order kept counting as committed), sale invoices (incremental on a schedule, so checked on a full sync only). Items are checked and reported, never removed: platform tables refer to them.
+- **`myob_removed_docs`** (additive DDL): entity, uid, number, doc_date, header and lines as JSON, run_id, removed_at. Nothing reads it for a figure. A record removed in error comes back by itself: the next complete fetch that sends it upserts it.
+- **Off-switch `SYNC_REMOVE_DELETED`** (`config.insights.removeDeleted`): `off`, `0`, `false` or `no` on Render makes every check report only (`reconcile.reportOnly`), removes nothing and leaves no absent list, so turning it back on starts the two-sync confirmation afresh. Unset means on.
+- **Sale orders' first full read corrects committed** (found by the pre-deploy review, 18 Oct): MYOB does not bump a sale order's LastModified when it converts it to an invoice, so an incremental fetch never saw some conversions and those orders stayed Open here. The first 1.16 sync re-reads every sale order and their status lands as MYOB's; committed moves to MYOB's figure on those items on that first sync, not the second. On the 26 Aug copy: 12 such orders, 34 items, 2,430 units, exactly the copy's committed divergence. On prod, 18 Oct: `/divergence` committed lists BN12150LTG 800 vs 650, FG 2 vs 0, DS 3 vs 0, BP 8 vs 0. Converted orders are still sent by MYOB, so they are never flagged absent.
+- **Stage 18 deploy:** see "Stage 18 deploy" below.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -570,6 +582,21 @@ On the evening, or the day before (pre-flight and window as for any deploy):
 5. [ ] Send the release note.
 
 If rolled back: nothing to restore.
+
+## Stage 18 deploy: Records deleted in MYOB leave the dashboard
+
+A sync release: the deploy itself moves nothing (golden diff: release only). The **first** sync after it corrects committed where a sale order MYOB has since invoiced still read Open here (see What 1.16 changed); the **second** removes what the first listed as missing. Announce it as a numbers release (§4.5): the table below goes to Allied before the deploy evening. No snapshot needed for the cart tables (none are written); the removed rows are kept in `myob_removed_docs`.
+
+Before the evening:
+- [ ] Re-derive the table from a prod capture (GET only): `/divergence` `onOrder` and committed rows, and each item's incoming POs. On 18 Oct NZ: On order BN12150LTG 15,700 → 14,050, N24S16M 450 → 225 (suggested ~2,872 → ~3,097), WR16301.5S16 190,000 → 170,000; committed BN12150LTG 800 → 650, FG 2 → 0 (suggested 86 → ~84), DS 3 → 0, BP 8 → 0. Send it.
+
+On the evening (pre-flight and window as for any deploy):
+1. [ ] Capture before, push, wait for `release.version` = `1.16.0`, capture after, `diff --allow scripts/expected/1.16.0.json`: 0 not allowed.
+2. [ ] After the next scheduled sync: Recent sync runs lists `purchase_orders: 2 (00023248, 00023268) missing from MYOB`, one bill, items no longer in MYOB, and any sale orders; nothing removed. `/divergence` committed no longer lists BN12150LTG, FG, DS or BP (or lists fewer). **If anything is listed that Allied did not delete, set `SYNC_REMOVE_DELETED=off` on Render before the next sync** (nothing has been removed yet). Even unchecked, a record MYOB still has cannot stay removed: the next complete fetch sends it and it is upserted back.
+3. [ ] After the sync after that: the same records read "removed … deleted in MYOB"; capture, then `stage-check expect` against the step-1 after-capture and check every moved path is one of the listed items (the three PO items, the four committed items and the bill's item); `/divergence` onOrder no longer lists the three items; `positionParity` is 0; the sync chip has no "On order below MYOB".
+4. [ ] Send the release note.
+
+Rollback: revert the code (a 1.16.1 that withdraws it). Rows already removed stay removed (MYOB no longer has them; the next complete fetch would not bring them back); read them from `myob_removed_docs` if needed. Sale orders go back to incremental fetches.
 
 ## Snapshots and data changes
 
