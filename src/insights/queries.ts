@@ -1344,9 +1344,21 @@ export async function snapshotState(asAt: string) {
   };
 }
 
-export async function listItems(params: ListParams) {
-  const win = resolveWindow(params);
-  const all = await computedItems(win);
+/** What narrows a list of items: everything in ListParams but the order and the page. */
+export type ItemSelection = Pick<ListParams, "q" | "productType" | "productFinish" | "tag" | "region" | "filter">;
+
+/**
+ * The items a view holds (1.15): the search, the facets, the region and then
+ * the filter, in that order, moved verbatim out of listItems. Inventory's list
+ * (listItems, and items.csv through it) and Purchasing's By item filter
+ * (matchItems) both select through here, so the order list can never hold a
+ * different set of items from the Inventory view with the same choices.
+ * Pure: a test can run it without a database.
+ */
+export function selectItems(
+  all: ItemComputed[],
+  params: ItemSelection,
+): { rows: ItemComputed[]; applied: string } {
   const q = params.q?.trim().toLowerCase();
   let rows = all;
 
@@ -1392,8 +1404,14 @@ export async function listItems(params: ListParams) {
         : rows.filter((r) => r.supplierRegion === params.region);
   }
 
-  const filtered = applyFilter(rows, params.filter);
-  rows = filtered.rows;
+  return applyFilter(rows, params.filter);
+}
+
+export async function listItems(params: ListParams) {
+  const win = resolveWindow(params);
+  const all = await computedItems(win);
+  const filtered = selectItems(all, params);
+  let rows = filtered.rows;
 
   const sortKey = params.sort && SORT_VALUES[params.sort] ? params.sort : "risk";
   const dir =
@@ -1444,6 +1462,36 @@ export async function listItems(params: ListParams) {
   };
 }
 
+/**
+ * Which items a view holds, by uid only (1.15): what Purchasing's By item
+ * reads to narrow the order list to Inventory's search, filter, region and
+ * facets. The same selection as listItems (selectItems), from the same
+ * computed items at the same date and window, without the order, the page
+ * or the item bodies: 3,100 uids, not 3,100 items. `filter` is the key
+ * applied, "all" for an unknown one, as /items echoes it.
+ */
+export async function matchItems(params: ItemSelection & Partial<DemandWindow>) {
+  const win = resolveWindow(params);
+  const selected = selectItems(await computedItems(win), params);
+  return {
+    total: selected.rows.length,
+    window: win,
+    filter: selected.applied,
+    uids: selected.rows.map((r) => r.uid),
+  };
+}
+
+/*
+ * A minimum stock above zero (1.15). Allied's two quick views split every
+ * item on it: "Min stock 0" (min_zero) is every item without one, which is
+ * an item with no minimum set (the "—" in the Min stock column) or one set
+ * to 0, and "Min stock above 0" (min_set) is the rest. One predicate, so
+ * the two lists always add up to all items.
+ */
+export function hasMinAboveZero(i: Pick<ItemComputed, "minLevel">): boolean {
+  return i.minLevel != null && i.minLevel > 0;
+}
+
 /*
  * Cover under two weeks (1.14), on the served cover (excl. on order, 1 dp):
  * what the Overview's "Cover < 2 weeks" tile counts and the cover_lt2 filter
@@ -1476,6 +1524,13 @@ function applyFilter(
       break;
     case "below_min":
       rows = rows.filter((r) => r.flags.includes("below_min"));
+      break;
+    // Min stock 0 or not set, and above 0 (1.15): see hasMinAboveZero.
+    case "min_zero":
+      rows = rows.filter((r) => !hasMinAboveZero(r));
+      break;
+    case "min_set":
+      rows = rows.filter(hasMinAboveZero);
       break;
     case "cover_lt2":
       rows = rows.filter(coverUnderTwoWeeks);

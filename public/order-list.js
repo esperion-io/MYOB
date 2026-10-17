@@ -447,6 +447,83 @@ export function orderSortQuery(state) {
   return p.toString();
 }
 
+/*
+ * By item's filters (1.15): Allied asked for "filtering in the purchasing by
+ * item tab as an exact replica for what's on the inventory tab". The choices
+ * are Inventory's own: the search, the filter list, the supplier region and
+ * the product type, finish and tag, under Inventory's address keys. Which
+ * items a choice holds is never worked out here: the page asks the server
+ * (/items/match), which selects through the very function Inventory's list
+ * uses (queries.ts selectItems), and this module only keeps the rows whose
+ * item is in that answer. So By item filtered to "Below min stock, from
+ * China" lists exactly the items Inventory lists for it that are on the
+ * order list, and nothing can drift between the two.
+ */
+export const ORDER_FILTER_DEFAULTS = Object.freeze({
+  q: "", filter: "all", region: "", productType: "", productFinish: "", tag: "",
+});
+
+const FILTER_KEYS = Object.keys(ORDER_FILTER_DEFAULTS);
+
+/**
+ * The filter in an address, on Inventory's rules: an address with a query
+ * sets every choice (anything it leaves out is the default); the caller
+ * keeps the view on screen when there is no query at all. Values are passed
+ * through as given, as Inventory passes them: the server decides what a
+ * filter key means, and an unknown one lists everything.
+ */
+export function parseOrderFilter(query) {
+  const p = new URLSearchParams(query ?? "");
+  const out = { ...ORDER_FILTER_DEFAULTS };
+  for (const k of FILTER_KEYS) {
+    const v = p.get(k);
+    if (v != null && v !== "") out[k] = v;
+  }
+  return out;
+}
+
+/** The filter's query string: Inventory's key names, defaults left out, so no filter writes nothing. */
+export function orderFilterQuery(state) {
+  const p = new URLSearchParams();
+  for (const k of FILTER_KEYS) {
+    const v = state?.[k];
+    if (v != null && v !== "" && v !== ORDER_FILTER_DEFAULTS[k]) p.set(k, String(v));
+  }
+  return p.toString();
+}
+
+/** True when any filter is chosen, i.e. the list is narrowed at all. */
+export function orderFilterActive(state) {
+  return orderFilterQuery(state) !== "";
+}
+
+/** By item's whole address query: the filter, then the sort, each leaving out its default. */
+export function orderViewQuery(sortState, filterState) {
+  return [orderFilterQuery(filterState), orderSortQuery(sortState)].filter(Boolean).join("&");
+}
+
+/**
+ * The rows whose item is in `uids` (a Set from /items/match), in the order
+ * given; every row when there is no filter (`uids` null). Rows are never
+ * changed, so each row's quantities and costs are the cart's own.
+ */
+export function rowsInView(rows, uids) {
+  if (!uids) return [...(rows ?? [])];
+  return (rows ?? []).filter((r) => uids.has(r.itemUid));
+}
+
+/**
+ * The By item sort for an Inventory quick view's sort. A key By item shares
+ * with Inventory is used as it is; Inventory's others (stock value, excess,
+ * pack pull, used in, name, minimum) have no By item column, so the view
+ * opens in By item's default order, highest risk first.
+ */
+export function presetOrderSort(sort, dir) {
+  if (sort && Object.prototype.hasOwnProperty.call(PURCHASING_SORTS, sort))
+    return { sort, dir: dir === "asc" || dir === "desc" ? dir : "" };
+  return { sort: "risk", dir: "" };
+}
+
 /** "sorted by cover incl. on order, lowest first", for the line above the table. */
 export function orderSortSummary(state) {
   const key = state?.sort && Object.prototype.hasOwnProperty.call(PURCHASING_SORTS, state.sort) ? state.sort : "risk";

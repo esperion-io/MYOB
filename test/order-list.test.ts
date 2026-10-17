@@ -475,8 +475,10 @@ test("dashboard.js: Purchasing routes and both views share one way to save", () 
   assert.match(fnBody(src, "wireCartCards"), /wireCartQtyInput\(qtyInput, itemUid, supplierUid, tr\.dataset\.state\)/);
   assert.match(fnBody(src, "wireOrderByItem"), /wireCartQtyInput\(qtyInput, itemUid, tr\.dataset\.supplier, tr\.dataset\.state\)/);
   assert.match(fnBody(src, "wireOrderByItem"), /\/api\/insights\/cart\/take-off/);
-  assert.match(fnBody(src, "drawOrderByItem"), /const cols = BY_ITEM_COLUMNS\.length/);
+  // From 1.15 the rows are drawn by drawOrderByItemList, under the page drawOrderByItem draws.
+  assert.match(fnBody(src, "drawOrderByItemList"), /const cols = BY_ITEM_COLUMNS\.length/);
   assert.match(fnBody(src, "drawOrderByItem"), /cartRemovedItems\(d\)/);
+  assert.match(fnBody(src, "drawOrderByItem"), /drawOrderByItemList\(\);/);
 });
 
 /*
@@ -668,18 +670,21 @@ test("dashboard.js: Purchasing sorts with its own header and state; Inventory's 
   assert.doesNotMatch(header, /\binv(State|LastDir)\b|currentDir\(/);
   for (const cls of ["sortable", "sorted", "th-inner", "sort-arrow"]) assert.match(header, new RegExp(cls));
   assert.match(fnBody(src, "byItemTh"), /sortableHeader\(orderSort, c\.sort,/);
-  // Sorted in the browser, over the cart already loaded; header clicks redraw without a fetch.
-  assert.match(fnBody(src, "drawOrderByItem"), /sortRows\(orderByItemRows\(d\), orderSort\.sort, orderSort\.dir\)/);
+  // Sorted in the browser, over the cart already loaded (narrowed to the
+  // filter's items from 1.15); header clicks redraw the rows without a fetch.
+  const list = fnBody(src, "drawOrderByItemList");
+  assert.match(list, /const all = orderByItemRows\(d\);/);
+  assert.match(list, /sortRows\(rowsInView\(all, filtered \? orderMatch\.uids : null\), orderSort\.sort, orderSort\.dir\)/);
   const wire = fnBody(src, "wireOrderSort");
-  assert.doesNotMatch(wire, /fetchJson|reloadOrderList/);
-  assert.match(wire, /drawOrderByItem\(\)/);
+  assert.doesNotMatch(wire, /fetchJson|reloadOrderList|loadOrderMatch/);
+  assert.match(wire, /drawOrderByItemList\(\)/);
   // The address: route() reads it for By item only; the redraw writes it back.
   const route = fnBody(src, "route");
   assert.match(route, /if \(view === "inventory"\) applyInventoryQuery\(query\);/);
   assert.match(route, /if \(isOrderByItemRoute\(view, arg\)\) applyOrderSortQuery\(query\);/);
   assert.match(fnBody(src, "isOrderByItemRoute"), /view === "purchasing" && arg !== "suppliers" && arg !== "minimums"/);
   assert.match(fnBody(src, "syncOrderSortUrl"), /history\.replaceState/);
-  assert.match(fnBody(src, "drawOrderByItem"), /syncOrderSortUrl\(\)/);
+  assert.match(fnBody(src, "drawOrderByItemList"), /syncOrderSortUrl\(\)/);
   // By supplier's cards are not sorted by it.
   assert.doesNotMatch(fnBody(src, "drawCart"), /orderSort|sortRows/);
 });

@@ -87,8 +87,12 @@ test("cover_lt2 lists exactly what the Overview's Cover < 2 weeks counts", () =>
   const ov = queries.slice(queries.indexOf("export async function overview("), queries.indexOf("async function relationshipRows("));
   assert.match(ov, /const lowCover = items\.filter\(coverUnderTwoWeeks\);/);
   assert.match(ov, /coverUnder2w: lowCover\.length,/);
-  const list = queries.slice(queries.indexOf("export async function listItems("), queries.indexOf("export function coverUnderTwoWeeks("));
-  assert.match(list, /if \(params\.region\) \{[\s\S]*?\}\n\n  const filtered = applyFilter\(rows, params\.filter\);\n  rows = filtered\.rows;\n\n  const sortKey =/);
+  // From 1.15 the search, facets, region and filter run in selectItems,
+  // which listItems (and Purchasing's /items/match) select through.
+  const select = queries.slice(queries.indexOf("export function selectItems("), queries.indexOf("export async function listItems("));
+  assert.match(select, /if \(params\.region\) \{[\s\S]*?\}\n\n  return applyFilter\(rows, params\.filter\);\n\}/);
+  const list = queries.slice(queries.indexOf("export async function listItems("), queries.indexOf("export async function matchItems("));
+  assert.match(list, /const filtered = selectItems\(all, params\);\n  let rows = filtered\.rows;\n\n  const sortKey =/);
   // And says which filter it applied, which a 1.14 tab reads for cover_lt2.
   assert.match(list, /\n    filter: filtered\.applied,\n/);
   assert.match(queries, /    default:\n      return \{ rows, applied: "all" \};\n  \}\n  return \{ rows, applied: filter \};\n\}/);

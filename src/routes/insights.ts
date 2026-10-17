@@ -31,6 +31,7 @@ import {
   itemDetail,
   itemSuppliers,
   listItems,
+  matchItems,
   overview,
   productsList,
   relationships,
@@ -219,6 +220,31 @@ insightsRouter.get("/items", async (req, res) => {
         productType: typeof req.query.productType === "string" ? req.query.productType : undefined,
         productFinish: typeof req.query.productFinish === "string" ? req.query.productFinish : undefined,
         tag: typeof req.query.tag === "string" ? req.query.tag : undefined,
+        ...windowParams(req),
+      }),
+    );
+  } catch (err) {
+    send500(res, err);
+  }
+});
+
+/*
+ * Which items an Inventory view holds, uids only (1.15), for Purchasing's
+ * By item filter: the same query keys as /items bar the order and the page.
+ * Declared before /items/:uid, which would otherwise read "match" as a uid.
+ */
+insightsRouter.get("/items/match", async (req, res) => {
+  if (!requireDb(res)) return;
+  const text = (k: string) => (typeof req.query[k] === "string" ? (req.query[k] as string) : undefined);
+  try {
+    res.json(
+      await matchItems({
+        q: text("q"),
+        filter: text("filter"),
+        region: text("region"),
+        productType: text("productType"),
+        productFinish: text("productFinish"),
+        tag: text("tag"),
         ...windowParams(req),
       }),
     );

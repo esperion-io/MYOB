@@ -1,0 +1,13 @@
+{
+  "version": "1.15.0",
+  "stage": "Stage 17: Purchasing by item filters, minimum stock quick views",
+  "note": "1.15 moves no served figure. The server gains two filter keys, min_zero and min_set (hasMinAboveZero: minLevel > 0 or not), and one GET route, /items/match (uids only), which no capture requests. The search, facet, region and filter steps move verbatim out of listItems into the pure selectItems, which listItems and matchItems both select through. Everything else is in the browser: By item's filter bar (Inventory's quick views, search, filter list, region and facets), its address keys, and the two new quick views on Inventory. Every capture (items, items.csv, cart.json, cart.csv, suppliers, overview, divergence, item and kit pages) must be identical apart from the release block /sync/status reports; anything else changing is a failure.",
+  "reviewed": "Written by hand from two in-process captures (stage-check capture through each tree's real router, GET only) on the local copy (allied_dev), the 1.14 tree (4c1e764) then this tree, 17 Oct: 1 difference, release.version 1.14.0 -> 1.15.0. Also on the copy through the running 1.15 server: /items/match equals the uid set of every page of /items for all 24 filter keys x 4 regions (96 combinations, 0 mismatches); By item driven through its own controls (filter + region, + search, + finish, sort, reload, By supplier and back) lists exactly the cart items in /items/match every time. No database writes.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.14.0 -> 1.15.0) and commit"
+    }
+  ]
+}

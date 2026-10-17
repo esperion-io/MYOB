@@ -7,12 +7,19 @@ import {
   minLeadOwner,
   orderByItemRows,
   orderListSummary,
+  ORDER_FILTER_DEFAULTS,
+  orderFilterActive,
+  orderFilterQuery,
   orderSortQuery,
   orderSortSummary,
+  orderViewQuery,
+  parseOrderFilter,
   parseOrderSort,
+  presetOrderSort,
   PURCHASING_SORTS,
   qtyCell,
   rowLeadTimes,
+  rowsInView,
   sortDirection,
   leadBasisSentence,
   leadOwner,
@@ -56,9 +63,27 @@ import { inventoryHashFor, overviewTileHash, overviewTileState, usedInCount, use
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.14.0";
+const UI_VERSION = "1.15.0";
 
 const RELEASES = [
+  {
+    version: "1.15.0",
+    // Set to the ship date. The counts below are from production as at
+    // 17 Oct 2026 NZ (GET only): 2,807 of 3,105 items have no minimum set and
+    // none has a minimum of exactly 0, so Min stock 0 is those 2,807 and Min
+    // stock above 0 the other 298. Re-derive them from the ship-day capture:
+    // `/items?filter=min_zero` and `filter=min_set` totals.
+    date: "2026-10-18",
+    stage: "Stage 17: Purchasing by item filters, minimum stock quick views",
+    changes: [
+      "Purchasing › By item now has the same filters as Inventory, as Paul asked: the quick views, the search box, the filter list, supplier region, product type, finish and tag. They work exactly as they do on Inventory, because the dashboard picks the items with the same rules: filtering By item to, say, Needs attention from China shows every item on the order list that Inventory lists for Needs attention from China, and nothing else.",
+      "The line above the table says how many of the order list's items are shown, for example \"61 of 128 items · needs attention, from China\". The figures at the top of the page (items to order, taken off, estimated cost) and the order sheets are still for the whole order list, whatever the filter.",
+      "Two new quick views on both Inventory and Purchasing › By item: Min stock 0 lists every item whose minimum stock is 0 or not set (shown as — in the Min stock column), and Min stock above 0 lists every other item. Between them they hold every item. Both are also in the filter list, as Min stock 0 or not set and Min stock above 0.",
+      "The filters are kept in the page address, as on Inventory, so a reload, Back or a bookmark opens the same list. Quick views that sort Inventory by stock value (Slow movers, Dead stock, From China) sort By item by risk, because By item has no stock value column.",
+    ],
+    numbers: "None. No stock figure, suggestion, minimum or order sheet changes. Filters only choose which rows are shown.",
+    check: "On Inventory, click Min stock 0, then Min stock above 0: the two counts add up to all items. On Purchasing › By item, choose Needs attention and Region: China: the line above the table reads \"N of M items\", and every item shown is also on Inventory's Needs attention list from China. Type in the search box: the list narrows as you type, and the box keeps your cursor. Reload the page: the same filters are still chosen. Click Clear: every item on the order list is back.",
+  },
   {
     version: "1.14.0",
     // Set to the ship date, and re-derive the figures named here from that
@@ -530,6 +555,28 @@ const INVENTORY_PRESETS = [
   { id: "dead", label: "Dead stock", state: { filter: "dead_stock", sort: "value", dir: "desc" } },
   { id: "committed", label: "Most committed", state: { filter: "committed", sort: "committed", dir: "desc" } },
   { id: "china", label: "From China", state: { region: "China", sort: "value", dir: "desc" } },
+  // Allied's two (1.15): every item without a minimum stock above 0, and the rest.
+  { id: "min_zero", label: "Min stock 0", state: { filter: "min_zero" },
+    title: "Every item whose minimum stock is 0 or not set (shown as — in the Min stock column)" },
+  { id: "min_set", label: "Min stock above 0", state: { filter: "min_set" },
+    title: "Every item with a minimum stock above 0: all items except Min stock 0" },
+];
+
+/** The quick view buttons, shared by Inventory and Purchasing By item (1.15). */
+function presetButtonsHtml(attr) {
+  return INVENTORY_PRESETS.map(
+    (p) => `<button class="chip-btn" ${attr}="${p.id}"${p.title ? ` title="${esc(p.title)}"` : ""}>${esc(p.label)}</button>`,
+  ).join("");
+}
+
+/** The supplier region choices, shared by Inventory and Purchasing By item (1.15). */
+const INVENTORY_REGIONS = [
+  ["", "All regions"],
+  ["NZ", "Region: NZ"],
+  ["Australia", "Region: Australia"],
+  ["China", "Region: China"],
+  ["Overseas — other", "Region: Overseas — other"],
+  ["none", "Region: unlabelled"],
 ];
 
 const INVENTORY_FILTERS = [
@@ -537,6 +584,8 @@ const INVENTORY_FILTERS = [
   ["attention", "Needs attention"],
   ["suggested", "Suggested orders"],
   ["below_min", "Below min stock"],
+  ["min_zero", "Min stock 0 or not set"],
+  ["min_set", "Min stock above 0"],
   ["cover_lt2", "Cover under 2 weeks"],
   ["low_cover", "Cover under 4 weeks (about a month)"],
   ["below_lead", "Below lead time (even with on order)"],
@@ -556,6 +605,9 @@ const INVENTORY_FILTERS = [
   ["no_supplier", "No supplier set"],
   ["inactive_stock", "Inactive with stock"],
 ];
+
+/** The two minimum stock filters (1.15): a server before 1.15 lists everything for them. */
+const MIN_ZERO_FILTERS = new Set(["min_zero", "min_set"]);
 
 /** The filters that read today's PO schedule (1.11): empty at a past date. */
 const GAP_FILTERS = new Set(["gap", "incoming_overdue"]);
@@ -648,6 +700,16 @@ const MIN_STATUS_OPTIONS = [
  */
 let orderListView = "items";
 const orderSort = { sort: "risk", dir: "" };
+/*
+ * By item's filter (1.15): Inventory's search, filter, region and facets, in
+ * the address beside the sort. orderMatch is the server's answer for it
+ * (/items/match): { url, uids: Set, total, filter } or { url, error }, null
+ * when nothing is chosen. orderMatchSeq drops an answer a later choice has
+ * overtaken.
+ */
+const orderFilter = { ...ORDER_FILTER_DEFAULTS };
+let orderMatch = null;
+let orderMatchSeq = 0;
 const orderItemOpen = new Set();
 let orderItemRows = new Map();
 const orderItemDetails = new Map();
@@ -1239,13 +1301,15 @@ function isOrderByItemRoute(view, arg) {
 function applyOrderSortQuery(queryString) {
   if (!queryString) return;
   Object.assign(orderSort, parseOrderSort(queryString));
+  // The filter too (1.15), on the same rule: a query sets the whole view.
+  Object.assign(orderFilter, parseOrderFilter(queryString));
 }
 
 function syncOrderSortUrl() {
   const [path] = location.hash.replace(/^#\//, "").split("?");
   const [view, arg] = path.split("/");
   if (!isOrderByItemRoute(view, arg)) return;
-  const qs = orderSortQuery(orderSort);
+  const qs = orderViewQuery(orderSort, orderFilter);
   const next = `#/purchasing${qs ? `?${qs}` : ""}`;
   if (location.hash === next) return;
   suppressRoute = true;
@@ -1755,9 +1819,7 @@ async function renderInventory() {
     </div>
     <div class="presets">
       <span class="presets-label">Quick views</span>
-      ${INVENTORY_PRESETS.map(
-        (p) => `<button class="chip-btn" data-preset="${p.id}">${esc(p.label)}</button>`,
-      ).join("")}
+      ${presetButtonsHtml("data-preset")}
       <button class="chip-btn clear" id="inv-clear">Clear</button>
     </div>
     <div class="toolbar">
@@ -1766,12 +1828,7 @@ async function renderInventory() {
         ${INVENTORY_FILTERS.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}
       </select>
       <select id="inv-region" aria-label="Supplier region">
-        <option value="">All regions</option>
-        <option value="NZ">Region: NZ</option>
-        <option value="Australia">Region: Australia</option>
-        <option value="China">Region: China</option>
-        <option value="Overseas — other">Region: Overseas — other</option>
-        <option value="none">Region: unlabelled</option>
+        ${INVENTORY_REGIONS.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}
       </select>
       <select id="inv-type" aria-label="Product type"><option value="">All product types</option></select>
       <select id="inv-finish" aria-label="Product finish"><option value="">All finishes</option></select>
@@ -1909,7 +1966,9 @@ async function loadInventoryTable() {
     // echoes the filter it applied and anything earlier sends none. A guess
     // from the page missed a Cover-sorted list, whose first page is all under
     // 2 weeks even unfiltered.
-    (invState.filter === "cover_lt2" && data.filter !== "cover_lt2");
+    (invState.filter === "cover_lt2" && data.filter !== "cover_lt2") ||
+    // min_zero / min_set (1.15) on a server before 1.15, which echoes "all".
+    (MIN_ZERO_FILTERS.has(invState.filter) && data.filter !== invState.filter);
 
   syncInventoryUrl();
   // Built once in renderInventory, so it went stale on every filter, sort or
@@ -5198,6 +5257,18 @@ const LEDGER_KIND_LABEL = {
  * live; the data says otherwise (ZINC PLATED is on 381 items, 108 of them
  * holding stock), so the counts are shown and Allied decide what matters.
  */
+/** One facet menu's options, with each value's item count (Inventory's, and By item's from 1.15). */
+function fillFacetSelect(el, values, allLabel, prefix) {
+  el.innerHTML =
+    `<option value="">${allLabel}</option>` +
+    values
+      .map(
+        (v) =>
+          `<option value="${esc(v.value)}">${prefix}${esc(v.value)} (${qty(v.items)})</option>`,
+      )
+      .join("");
+}
+
 async function loadFacetMenus() {
   const type = document.getElementById("inv-type");
   const finish = document.getElementById("inv-finish");
@@ -5205,16 +5276,7 @@ async function loadFacetMenus() {
   if (!type || !finish || !tag) return;
   try {
     facetCache = facetCache ?? (await fetchJson("/api/insights/facets"));
-    const fill = (el, values, allLabel, prefix) => {
-      el.innerHTML =
-        `<option value="">${allLabel}</option>` +
-        values
-          .map(
-            (v) =>
-              `<option value="${esc(v.value)}">${prefix}${esc(v.value)} (${qty(v.items)})</option>`,
-          )
-          .join("");
-    };
+    const fill = fillFacetSelect;
     fill(type, facetCache.productType, "All product types", "");
     fill(finish, facetCache.productFinish, "All finishes", "");
     fill(
@@ -5398,8 +5460,32 @@ async function renderPurchasing(tab) {
  * view the write was made from, By item or By supplier.
  */
 async function reloadOrderList() {
-  cartData = await fetchJson(withWindow("/api/insights/cart"));
+  // By item's filter is asked again beside the cart (1.15), so a write that
+  // moved an item in or out of the view (a minimum, a supplier) shows at once.
+  const [cart] = await Promise.all([
+    fetchJson(withWindow("/api/insights/cart")),
+    orderListView === "items" ? loadOrderMatch() : null,
+  ]);
+  cartData = cart;
   drawOrderList();
+}
+
+/** The server's answer for By item's filter (1.15); see orderMatch. */
+async function loadOrderMatch() {
+  const seq = ++orderMatchSeq;
+  if (!orderFilterActive(orderFilter)) {
+    orderMatch = null;
+    return;
+  }
+  const url = withWindow(`/api/insights/items/match?${orderFilterQuery(orderFilter)}`);
+  let next;
+  try {
+    const data = await fetchJson(url);
+    next = { url, uids: new Set(data.uids ?? []), total: data.total ?? null, filter: data.filter ?? null };
+  } catch (err) {
+    next = { url, error: err.message };
+  }
+  if (seq === orderMatchSeq) orderMatch = next;
 }
 
 /** Draw whichever Order list view is active. */
@@ -5577,17 +5663,20 @@ function wireOrderListCommon() {
  * suppliers on file that sends Compare → Choose's own request; splits are
  * still made in Compare, which every row links to.
  */
-function drawOrderByItem() {
+function drawOrderByItem(rebuildBar = false) {
   const d = cartData;
-  // Sorted here, over the cart already loaded (1.7): a header click redraws
-  // from cartData without a fetch, and a redraw after a write keeps the order.
-  const rows = sortRows(orderByItemRows(d), orderSort.sort, orderSort.dir);
-  const sortIsDefault = orderSortQuery(orderSort) === "";
-  const sum = orderListSummary(d, rows);
-  orderItemRows = new Map(rows.map((r) => [r.itemUid, r]));
-  const cols = BY_ITEM_COLUMNS.length;
-  // Forget drill-downs for items no longer on the list (taken off, or settled).
-  for (const uid of [...orderItemOpen]) if (!orderItemRows.has(uid)) orderItemOpen.delete(uid);
+  // The header counts the whole order list, whatever the filter shows (1.15).
+  const sum = orderListSummary(d, orderByItemRows(d));
+  /*
+   * The filter bar on screen is moved into the new page rather than drawn
+   * again, so a write that lands while someone types in the search box (a
+   * qty saved on blur, say) keeps their text, their cursor and the pending
+   * search. It is drawn afresh on a new visit, and when a quick view or
+   * Clear has changed what it should show.
+   */
+  const bar = rebuildBar ? null : document.getElementById("obi-bar");
+  const focus = bar?.contains(document.activeElement) ? document.activeElement : null;
+  const caret = focus && "selectionStart" in focus ? [focus.selectionStart, focus.selectionEnd] : null;
 
   main.innerHTML = `
     ${historicalNotice(d)}
@@ -5609,7 +5698,59 @@ function drawOrderByItem() {
     ${cartDecisionsMade(d)}
     ${cartRemovedItems(d)}
 
-    <p class="view-summary">${qty(rows.length)} item${rows.length === 1 ? "" : "s"} · ${esc(orderSortSummary(orderSort))}${
+    ${bar ? '<div id="obi-bar-slot"></div>' : orderFilterBarHtml()}
+    <div id="obi-list"></div>`;
+
+  wireOrderListCommon();
+  if (bar) {
+    main.querySelector("#obi-bar-slot").replaceWith(bar);
+    if (focus) {
+      focus.focus();
+      if (caret) focus.setSelectionRange(caret[0], caret[1]);
+    }
+  } else {
+    wireOrderFilterBar();
+  }
+  drawOrderByItemList();
+}
+
+/*
+ * By item's rows: the summary line and the table (1.15 split this out of
+ * drawOrderByItem). A sort, a search or a filter redraws only this, so the
+ * search box keeps its focus while you type; a write redraws the whole page
+ * through drawOrderList, as before.
+ */
+function drawOrderByItemList() {
+  const el = document.getElementById("obi-list");
+  if (!el) return;
+  const d = cartData;
+  const all = orderByItemRows(d);
+  const filtered = orderMatch && !orderMatch.error;
+  // Sorted here, over the cart already loaded (1.7): a header click redraws
+  // from cartData without a fetch, and a redraw after a write keeps the order.
+  const rows = sortRows(rowsInView(all, filtered ? orderMatch.uids : null), orderSort.sort, orderSort.dir);
+  const sortIsDefault = orderSortQuery(orderSort) === "";
+  const sum = orderListSummary(d, all);
+  orderItemRows = new Map(rows.map((r) => [r.itemUid, r]));
+  const cols = BY_ITEM_COLUMNS.length;
+  // Forget drill-downs for items no longer on the list (taken off, settled or filtered out).
+  for (const uid of [...orderItemOpen]) if (!orderItemRows.has(uid)) orderItemOpen.delete(uid);
+
+  const bits = orderFilterBits();
+  const count = filtered
+    ? `${qty(rows.length)} of ${qty(all.length)} item${all.length === 1 ? "" : "s"}${bits.length ? ` · ${esc(bits.join(", "))}` : ""}`
+    : `${qty(rows.length)} item${rows.length === 1 ? "" : "s"}`;
+  const empty = filtered
+    ? `No items on the order list match this view.${
+        GAP_FILTERS.has(orderFilter.filter) && isHistorical()
+          ? " Gaps and overdue POs are worked out for today only: MYOB keeps no history of open POs or their dates."
+          : ""
+      } <button class="linkish" id="obi-empty-clear" type="button">Clear filters</button>`
+    : `Nothing needs an order${sum.takenOff ? "; the items taken off are listed above" : ""}.`;
+
+  el.innerHTML = `
+    ${orderMatch?.error ? `<div class="notice fail">The filter could not be applied, so every item on the order list is shown: ${esc(orderMatch.error)}</div>` : ""}
+    <p class="view-summary">${count} · ${esc(orderSortSummary(orderSort))}${
       sortIsDefault
         ? " (Inventory's risk score), then item number"
         : ' · <button class="linkish" id="obi-sort-reset" type="button">back to highest risk first</button>'
@@ -5618,20 +5759,177 @@ function drawOrderByItem() {
     <div class="table-wrap obi-wrap"><table class="obi-table">
       <thead><tr>${BY_ITEM_COLUMNS.map(byItemTh).join("")}</tr></thead>
       <tbody>
-        ${
-          rows.length
-            ? rows.map(orderItemRowHtml).join("")
-            : `<tr><td colspan="${cols}" class="muted">Nothing needs an order${
-                sum.takenOff ? "; the items taken off are listed above" : ""
-              }.</td></tr>`
-        }
+        ${rows.length ? rows.map(orderItemRowHtml).join("") : `<tr><td colspan="${cols}" class="muted">${empty}</td></tr>`}
       </tbody>
     </table></div>`;
 
-  wireOrderListCommon();
+  el.querySelector("#obi-empty-clear")?.addEventListener("click", () => clearOrderFilter());
+  // The rows' own Use preferred / Keep: wireOrderListCommon wired the panel
+  // above before these rows existed, so the rows are wired here, once each.
+  wirePickConflictButtons(el);
   wireOrderByItem(cols);
   wireOrderSort();
   syncOrderSortUrl();
+}
+
+/*
+ * By item's filter bar (1.15): Inventory's quick views, search, filter list,
+ * region and facets, with Inventory's labels and options (the same
+ * constants), drawn from orderFilter. The facet menus are filled from the
+ * same /facets answer Inventory caches.
+ */
+function orderFilterBarHtml() {
+  const option = (v, l, current) => `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(l)}</option>`;
+  // Until /facets has loaded, a facet menu holds only its choice on screen.
+  const facet = (key, allLabel) =>
+    `<option value="">${esc(allLabel)}</option>${orderFilter[key] ? option(orderFilter[key], orderFilter[key], orderFilter[key]) : ""}`;
+  return `
+    <div id="obi-bar">
+    <div class="presets">
+      <span class="presets-label">Quick views</span>
+      ${presetButtonsHtml("data-obi-preset")}
+      <button class="chip-btn clear" id="obi-clear" type="button">Clear</button>
+    </div>
+    <div class="toolbar">
+      <input type="search" id="obi-q" placeholder="Search number, name, supplier…" value="${esc(orderFilter.q)}" />
+      <select id="obi-filter" aria-label="Filter">
+        ${INVENTORY_FILTERS.map(([v, l]) => option(v, l, orderFilter.filter)).join("")}
+      </select>
+      <select id="obi-region" aria-label="Supplier region">
+        ${INVENTORY_REGIONS.map(([v, l]) => option(v, l, orderFilter.region)).join("")}
+      </select>
+      <select id="obi-type" aria-label="Product type">${facet("productType", "All product types")}</select>
+      <select id="obi-finish" aria-label="Product finish">${facet("productFinish", "All finishes")}</select>
+      <select id="obi-tag" aria-label="Tag">${facet("tag", "All tags")}</select>
+    </div>
+    <div id="obi-facet-note" class="hint" hidden></div>
+    </div>`;
+}
+
+/** The filter on screen in words, as Inventory's summary line says it: filter, region, search. */
+function orderFilterBits() {
+  const bits = [];
+  // The filter the server applied: an unknown key lists everything and says "all".
+  const applied = orderMatch?.filter ?? orderFilter.filter;
+  const label = applied === orderFilter.filter ? INVENTORY_FILTERS.find(([v]) => v === applied)?.[1] : null;
+  if (applied && applied !== "all" && label) bits.push(label.toLowerCase());
+  if (orderFilter.region) bits.push(orderFilter.region === "none" ? "unlabelled region" : `from ${orderFilter.region}`);
+  if (orderFilter.q) bits.push(`matching “${orderFilter.q}”`);
+  return bits;
+}
+
+/*
+ * Ask the server which items the filter holds, then redraw: the rows only
+ * for a choice made in the bar (so the search box keeps its focus), the
+ * whole page when a quick view or Clear has changed what the bar shows.
+ */
+async function applyOrderFilter(whole = false) {
+  await loadOrderMatch();
+  if (orderListView !== "items" || !document.getElementById("obi-list")) return;
+  if (whole) return drawOrderByItem(true);
+  showOrderFacetNote();
+  drawOrderByItemList();
+}
+
+/** Inventory's Clear: search, filter, region and sort back to the default; the facets keep. */
+function clearOrderFilter() {
+  Object.assign(orderFilter, { q: "", filter: "all", region: "" });
+  Object.assign(orderSort, { sort: "risk", dir: "" });
+  applyOrderFilter(true);
+}
+
+function wireOrderFilterBar() {
+  main.querySelectorAll("[data-obi-preset]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const preset = INVENTORY_PRESETS.find((p) => p.id === btn.dataset.obiPreset);
+      if (!preset) return;
+      // As on Inventory: a quick view sets only what it names, anything else
+      // returns to default, and the facets keep. Its sort, where By item has
+      // that column; otherwise By item's default order.
+      Object.assign(orderFilter, { q: "", filter: "all", region: "" });
+      for (const k of ["q", "filter", "region"]) if (k in preset.state) orderFilter[k] = preset.state[k];
+      Object.assign(orderSort, presetOrderSort(preset.state.sort, preset.state.dir));
+      applyOrderFilter(true);
+    }),
+  );
+  document.getElementById("obi-clear")?.addEventListener("click", clearOrderFilter);
+
+  const q = document.getElementById("obi-q");
+  let debounce;
+  q?.addEventListener("input", () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      // A box a quick view or Clear has since replaced has nothing to say.
+      if (!q.isConnected) return;
+      orderFilter.q = q.value;
+      applyOrderFilter();
+    }, 300);
+  });
+  for (const [id, key] of [["obi-filter", "filter"], ["obi-region", "region"], ["obi-type", "productType"], ["obi-finish", "productFinish"], ["obi-tag", "tag"]]) {
+    const el = document.getElementById(id);
+    el?.addEventListener("change", () => {
+      orderFilter[key] = el.value;
+      applyOrderFilter();
+    });
+  }
+  fillOrderFacets();
+  showOrderFacetNote();
+}
+
+/** Fill By item's facet menus from Inventory's cached /facets answer, fetching it once if needed. */
+function fillOrderFacets() {
+  const els = { productType: "obi-type", productFinish: "obi-finish", tag: "obi-tag" };
+  const apply = () => {
+    const type = document.getElementById(els.productType);
+    const finish = document.getElementById(els.productFinish);
+    const tag = document.getElementById(els.tag);
+    if (!type || !finish || !tag) return;
+    fillFacetSelect(type, facetCache.productType, "All product types", "");
+    fillFacetSelect(finish, facetCache.productFinish, "All finishes", "");
+    fillFacetSelect(tag, facetCache.tags, facetCache.tags.length ? "All tags" : "No tags yet", "#");
+    type.value = orderFilter.productType;
+    finish.value = orderFilter.productFinish;
+    tag.value = orderFilter.tag;
+  };
+  if (facetCache) return apply();
+  fetchJson("/api/insights/facets")
+    .then((f) => {
+      facetCache = facetCache ?? f;
+      apply();
+    })
+    .catch((err) => {
+      console.error("Facet menus failed to load:", err);
+      const note = document.getElementById("obi-facet-note");
+      if (note) {
+        note.hidden = false;
+        note.innerHTML = `<span class="muted">Filter menus unavailable: ${esc(err.message)}</span>`;
+      }
+    });
+}
+
+/** Inventory's facet note, for By item: the facets chosen, and Clear facets. */
+function showOrderFacetNote() {
+  const el = document.getElementById("obi-facet-note");
+  if (!el) return;
+  const bits = [];
+  if (orderFilter.productFinish) bits.push(`<strong>${esc(orderFilter.productFinish)}</strong>`);
+  if (orderFilter.productType) bits.push(`<strong>${esc(orderFilter.productType)}</strong>`);
+  if (orderFilter.tag) bits.push(`tagged <strong>#${esc(orderFilter.tag)}</strong>`);
+  if (!bits.length) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = `Showing ${bits.join(" · ")} —
+    <button class="btn small" id="obi-facet-clear" type="button">Clear facets</button>`;
+  document.getElementById("obi-facet-clear").addEventListener("click", () => {
+    Object.assign(orderFilter, { productType: "", productFinish: "", tag: "" });
+    for (const id of ["obi-type", "obi-finish", "obi-tag"]) {
+      const sel = document.getElementById(id);
+      if (sel) sel.value = "";
+    }
+    applyOrderFilter();
+  });
 }
 
 /*
@@ -5649,12 +5947,12 @@ function wireOrderSort() {
         orderSort.sort = key;
         orderSort.dir = ""; // start in this column's most useful direction
       }
-      drawOrderByItem();
+      drawOrderByItemList();
     }),
   );
   main.querySelector("#obi-sort-reset")?.addEventListener("click", () => {
     Object.assign(orderSort, { sort: "risk", dir: "" });
-    drawOrderByItem();
+    drawOrderByItemList();
   });
 }
 
