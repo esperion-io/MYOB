@@ -212,8 +212,12 @@ async function loadStatus() {
   const status = await fetchJson("/auth/status");
 
   if (!status.configured) {
+    // 1.19: off Render MYOB is off on purpose, not missing (myobOffHere).
+    const offHere = status.myobOffHere ?? false;
     setupPanel.hidden = false;
-    metaStatus.textContent = "Credentials missing";
+    document.getElementById("setup-missing").hidden = offHere;
+    document.getElementById("setup-off-here").hidden = !offHere;
+    metaStatus.textContent = offHere ? "MYOB off on this machine" : "Credentials missing";
     renderActions(false);
     probeBtn.disabled = true;
     renderIdleGroups();

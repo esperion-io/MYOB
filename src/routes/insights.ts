@@ -2,8 +2,9 @@ import { businessToday } from "../insights/businessDate.js";
 import { Router } from "express";
 import { dashboardGuard } from "./guard.js";
 import type { NextFunction, Request, Response } from "express";
-import { config } from "../config.js";
+import { config, onRender } from "../config.js";
 import { hasDatabaseUrl } from "../db.js";
+import { MYOB_OFF_HERE } from "../localGuard.js";
 import { release, staleWriteError } from "../release.js";
 import type { CartState } from "../insights/cart.js";
 import {
@@ -171,6 +172,11 @@ insightsRouter.use((req, res, next) => {
 
 insightsRouter.post("/sync/run", async (req, res) => {
   if (!requireDb(res)) return;
+  // 1.19: Sync now, refused off Render before anything starts (localGuard.ts).
+  if (!onRender) {
+    res.status(503).json({ error: MYOB_OFF_HERE });
+    return;
+  }
   const mode = req.body?.mode === "full" ? "full" : "incremental";
   if (isSyncRunning()) {
     res.status(409).json({ error: "A sync is already running." });

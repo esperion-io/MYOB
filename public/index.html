@@ -35,9 +35,16 @@
       </header>
 
       <section class="setup" id="setup-panel" hidden>
-        <p>
+        <p id="setup-missing">
           Missing credentials. Set <code>MYOB_API_KEY</code> /
-          <code>MYOB_API_SECRET</code> in <code>.env</code>, then restart.
+          <code>MYOB_API_SECRET</code> on the Render service, then redeploy.
+        </p>
+        <p id="setup-off-here" hidden>
+          MYOB is off on this machine, on purpose. Only the dashboard on
+          Render uses the MYOB key: production's MYOB login is single-use,
+          and spending it from here would break production's MYOB
+          connection. Work on the local copy instead (see
+          <code>CLAUDE.md</code> in the folder above this repository).
         </p>
       </section>
 

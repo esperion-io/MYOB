@@ -1,7 +1,7 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { config, hasMyobCredentials } from "./config.js";
+import { config, hasMyobCredentials, onRender } from "./config.js";
 import { ensureSchema, hasDatabaseUrl } from "./db.js";
 import { apiRouter } from "./routes/api.js";
 import { authRouter } from "./routes/auth.js";
@@ -119,14 +119,26 @@ async function main() {
   });
 
   app.listen(config.port, () => {
-    const configured = hasMyobCredentials();
     console.log(`MYOB inventory app listening on ${config.appBaseUrl}`);
     console.log(`Connection store: ${storageBackend()}`);
-    console.log(
-      configured
-        ? "MYOB credentials detected — visit /auth/login to connect a company file."
-        : "MYOB credentials missing — copy .env.example to .env and add your API key/secret.",
-    );
+    if (!onRender) {
+      // localGuard.ts: off Render, local database only, no sync, no MYOB.
+      const ignored = ["SYNC_INTERVAL_HOURS", "MYOB_API_KEY", "MYOB_API_SECRET"].filter((name) => {
+        const value = process.env[name]?.trim();
+        return value && value !== "0";
+      });
+      console.log(
+        "Not on Render: MYOB is off on this machine, on purpose, and scheduled sync is off; " +
+          "only a database on this machine is accepted. See CLAUDE.md in the folder above this repository." +
+          (ignored.length ? ` Ignored here: ${ignored.join(", ")}.` : ""),
+      );
+    } else {
+      console.log(
+        hasMyobCredentials()
+          ? "MYOB credentials detected — visit /auth/login to connect a company file."
+          : "MYOB credentials missing — set MYOB_API_KEY and MYOB_API_SECRET on the Render service, then redeploy.",
+      );
+    }
   });
 }
 

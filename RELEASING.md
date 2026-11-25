@@ -212,6 +212,20 @@ The cart's last cost, and the item page's Last price for each supplier, were not
 - **The item page takes the same line.** `itemSuppliers` (`/items/:uid/suppliers`, the Last price in "Suppliers who have actually billed this item") had the same tie: `(ARRAY_AGG(l.unit_price ORDER BY b.date DESC))[1]`. It now reads every line of the item's bills (`ITEM_BILL_LINES_SQL`) and takes `latestLines`' line per supplier; the SQL keeps a `NULL AS last_unit_price` placeholder so the response's fields stay in the same order. It keeps its own line set, $0 lines included, so a free last line still reads $0.00 there; on the copy that differs from the cart only on the catch-all item NOTE (17 rows). The same 11 pairs were tied there and no others. Only B20140S16 (Bremick) and CTB12180S16 / CTB12220S16 (Jiaxing) are on screen (the table lists suppliers not yet recorded on the item); on the copy all three already read the 1.18 line ($4.14, $2.00, $2.29; the others could be $1.48 and $1.65). `stage-check capture` does not read this endpoint: a GET sweep of all 728 billed items, `main` then this tree, moved 4 rows, all hidden ones on tied pairs (PWMHT3L 29.33725 → 29.3369, 3 / Bremick 0.2319 → 0.1648, N24G8 0.2525 → 0.2657, FG / Specialised 2.24 → 5.16), and nothing else.
 - **Deploy:** as any numbers release; nothing is written. Re-derive the table from that day's prod capture and send it before the evening. Capture before and after, `diff --allow scripts/expected/1.18.0.json`: 0 not allowed. If prod still reads 25.34375 the cart entries print as "expected change did not appear" notes; that is the expected result. Item pages are not in the capture: before and after, GET `/items/<uid>/suppliers` for the 10 items (11 pairs) in `tiedPairs` and check that only their tied suppliers' `last_unit_price` moved, each to `from118`. Rollback is a pure revert (both go back to the query's arbitrary pick).
 
+## What 1.19 changed
+
+Safe by default off Render. Production's MYOB login is a single-use refresh token, so a development machine that boots on production's settings can break production's MYOB connection without anyone pressing anything: the boot catch-up sync, a scheduled sync, or a token refresh. `setup-local.sh` built exactly that `.env`. The local staging of 25 Nov 2026 moved production's settings out of the repo (`allied/CLAUDE.md`); from 1.19 the app also refuses them by itself. Nothing changes on Render, and nothing on screen for Allied.
+
+- **`src/localGuard.ts`** (pure, tested): `isRender` (`RENDER === "true"`; Render sets it on every service, at build and at run time: render.com/docs/environment-variables, "This value is always `true`"), `databaseHost` (the host node-postgres would use: a `host` query parameter wins, the last if repeated; an empty host falls back to PGHOST, then localhost; a leading `/` is a socket path; the tests check it against pg's own `ConnectionParameters`), `localDatabaseProblem`, `syncIntervalHoursFor`, `myobCredentialsUsable` and the message `MYOB_OFF_HERE`.
+- **`config.ts`** reads `RENDER` from the real environment before `.env` is loaded (`dotenv.config()` after it, in place of the `dotenv/config` import), so a `.env` cannot claim to be Render. Off Render: `syncIntervalHours` is 0, so neither the scheduled nor the boot catch-up sync is armed; `hasMyobCredentials()` is false; `config.myob.apiKey()` / `apiSecret()` throw `MYOB_OFF_HERE`. Every token request and MYOB call reads the key before its `fetch`, so none can be sent.
+- **`db.ts` `getPool`**, off Render, refuses any `DATABASE_URL` whose host isn't localhost, 127.0.0.1 or ::1, before the pool exists, naming the host and never the URL. Boot calls it first (`ensureSchema`), so the app exits 1 with `Failed to start server: Error: Refusing DATABASE_URL: its host is …` and never looks the host up. A socket path is refused too.
+- **Sync now** (`POST /api/insights/sync/run`) answers 503 with `MYOB_OFF_HERE` off Render, before anything starts. It used to answer 202 and fail in the background ("No MYOB company connected").
+- **Messages.** The boot log, the `/auth/login` 503, the missing-variable error and the connection console at `/` (through the additive `/auth/status` field `myobOffHere`) no longer say to copy `.env.example` to `.env`: off Render they say MYOB is off on this machine, on purpose; on Render, to set the key on the service. The boot log off Render also names any of `SYNC_INTERVAL_HOURS`, `MYOB_API_KEY`, `MYOB_API_SECRET` it ignored.
+- **Docs and scripts.** `setup-local.sh` prints where to look and exits 1. `.env.example` has `SYNC_INTERVAL_HOURS=0`, blank MYOB keys, and a local `DATABASE_URL` note in place of "paste the public DATABASE_URL". readme "Run locally" and Local safety follow `allied/CLAUDE.md`, and every production database step in this file is marked Render shell only.
+- **On Render nothing changes.** `RENDER=true` skips every check; the interval is `Number(SYNC_INTERVAL_HOURS || 0)` as before; the pool's options are untouched. If `RENDER` were ever missing there, the boot would refuse Render's database host and exit, the deploy would fail and the previous release would keep serving: loud, not silent. `test/local-guard.test.ts` runs the real `config.ts`, `db.ts` and `index.ts` in child processes with an environment built from nothing, on Render's shape (`RENDER=true`, an internal `dpg-…` host, a key, interval 6) and off it (with a `.env` claiming `RENDER=true`), so it reads the same in Render's build. Nothing in it connects anywhere.
+- **Not covered:** `scripts/supplier-rollback.mjs` opens its own pool on any `DATABASE_URL`; it is the Render-shell tool and is unchanged.
+- **Deploy:** as any UI release; nothing is written and no figure moves. Capture before and after, `diff --allow scripts/expected/1.19.0.json`: 0 not allowed. In the Render log for the new boot: "MYOB credentials detected" and "Next sync in … min", and no "Not on Render" line. After the next scheduled sync, `/sync/status` `recentRuns[0]` is `success`. Rollback is a pure revert.
+
 ## The live service
 
 The live service is **not** what `render.yaml` describes. `render.yaml` names `allied-myob-bridge` on the free plan with a partial env list; it is not applied to anything. The live service is:
@@ -224,16 +238,16 @@ Its environment lives in the Render dashboard. Change it there, not in `render.y
 
 ## Before the first deploy (Anthony, on Render)
 
-These cannot be done from a development machine: production Postgres and Render SSH are not reachable from it.
+These are done on Render, not from a development machine. Since 25 Nov 2026 production Postgres can be reached from a development machine, but only `.claude/refresh-local-db.sh` may connect to it, read-only (see Local safety). Every command in this file that names `DATABASE_URL=<prod>` or runs `supplier-rollback.mjs` against production is **Render shell only**.
 
 0. **Confirm the Build Command.** Render → the service → Settings: the Build Command must be `npm install && npm run build`. If it is anything else (e.g. `npm install && tsc`), `check-release` and `npm test` do not gate deploys, and the build guard above protects nothing. Record what it was in `FIX-PLAN.md` Part 5.
-1. **Check the f2148b2 boot backup.** From the Render shell, run `DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status`. Record in `FIX-PLAN.md` Part 5 that `pre_preferred_fix` exists and its row counts and checksums hold. It has never been checked.
-2. **Local setup.**
-   - Set `SYNC_INTERVAL_HOURS=0` in `.env.local`.
-   - Rename or remove the `myob-dashboard` entry in `/Users/anthonyxiao/Dev/allied/.claude/launch.json`. It runs `npm run dev`, which loads `.env`, the production database.
-   - Before Stage 2, refresh `allied_dev` from a prod dump: current POs, cart decisions and the f2148b2 tables. Run `DELETE FROM connections` on the copy before its first `npm run dev:local`.
+1. **Check the f2148b2 boot backup** (Render shell only). Run `DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status`. Record in `FIX-PLAN.md` Part 5 that `pre_preferred_fix` exists and its row counts and checksums hold. It has never been checked.
+2. **Local setup.** Done 25 Nov 2026; the rules are in `CLAUDE.md` in the folder above this repository (`allied/CLAUDE.md`), and Local safety below.
+   - The local copy is `allied_dev` on localhost, refreshed with `.claude/refresh-local-db.sh` (read-only; it never downloads the MYOB login, so the copy's `connections` table is empty and needs no `DELETE`).
+   - The app runs on it with the `allied-local-preview` launch config (`.claude/local-preview.sh`, port 3112): sync off, MYOB off, no access key.
+   - Production settings live only in `production.env` in that folder; nothing loads it. `MYOB/.env` and `.env.local` point at localhost. The `myob-dashboard` launch config is gone and `setup-local.sh` is retired (1.19).
 3. **Before any lead-time question goes to Allied** (Q2 and the MYOB tidy-up list):
-   - Copy the lead-time and minimum tables, which have no other backup:
+   - Copy the lead-time and minimum tables, which have no other backup (Render shell only, on production):
      ```sql
      CREATE TABLE bak_<yyyymmdd>_supplier_meta  AS TABLE platform_supplier_meta;
      CREATE TABLE bak_<yyyymmdd>_item_lead_time AS TABLE platform_item_lead_time;
@@ -329,13 +343,13 @@ Rollback is **strictly newest-first.**
 
 **R4. Confirm.** Check that `/sync/status` reports the new `release.version`. Open tabs show the banner and are refused (409) until they reload. Send Allied a one-line note.
 
-**R5. Stages 5, 6 and 8 only.** Run `node scripts/supplier-rollback.mjs status`, then `diff --from pre_s<n>_…`. By default nothing is restored, because rows use existing states.
+**R5. Stages 5, 6 and 8 only** (Render shell only). Run `node scripts/supplier-rollback.mjs status`, then `diff --from pre_s<n>_…`. By default nothing is restored, because rows use existing states.
 - Use `undo <id>` per item.
 - Use `restore` only on Allied's request, dry run first.
 
 ## Stage 1 deploy: rollback drill
 
-The 1.1 deploy is also the rehearsal of a real rollback, on a release that moves no figure and writes no decision data. Done by Anthony; nothing here can be done from a development machine. Allow about an hour inside one deploy window (18:00–23:15 NZ), and keep every deploy, rollback and redeploy at least 15 minutes from the last and from a sync.
+The 1.1 deploy is also the rehearsal of a real rollback, on a release that moves no figure and writes no decision data. Done by Anthony: the deploys, the rollback and the redeploy on Render; from a development machine, only the captures and the probe below. Allow about an hour inside one deploy window (18:00–23:15 NZ), and keep every deploy, rollback and redeploy at least 15 minutes from the last and from a sync.
 
 Before you start:
 - [ ] Pre-flight as for any deploy: the 17:45 NZ sync finished with `success`. A rollback and a redeploy are boots too, and each would start a catch-up sync otherwise.
@@ -379,8 +393,8 @@ Before you start:
 The only release in the plan that changes a function body (`item_position_at`), so "Failed deploy" above applies. It is never withdrawn: MYOB's figure is the spec, so a problem is fixed forward.
 
 Before the evening:
-- [ ] Refresh the local copy from production, `DELETE FROM connections` on it, and regenerate the allow-list on it, same data both times:
-  1. Check out the 1.1 commit in a separate worktree and start it on the copy (`npm run dev:local`; its boot puts the 1.1 body back). `node scripts/stage-check.mjs capture ../captures/1.2.0-local-before --base local`, using the 1.2 checkout's script.
+- [ ] Refresh the local copy (`.claude/refresh-local-db.sh`) and regenerate the allow-list on it, same data both times:
+  1. Check out the 1.1 commit in a separate worktree and start it on the copy (`.claude/local-preview.sh <that worktree>`; its boot puts the 1.1 body back). `node scripts/stage-check.mjs capture ../captures/1.2.0-local-before --base local`, using the 1.2 checkout's script.
   2. Stop it, start the 1.2 branch on the same copy, `capture ../captures/1.2.0-local-after --base local`.
   3. `node scripts/stage-check.mjs expect ../captures/1.2.0-local-before ../captures/1.2.0-local-after --stage "Stage 2: On order matches MYOB" > scripts/expected/1.2.0.json`. Read every entry. Expect the six items (WSBT450G, WQ16806G, BP1675G, SPW12G, BN16110G, BP1690G) and what follows from them, and nothing else. The committed file was generated on the 26 Aug copy, where no suggestion moves; on live data SPW12G and BN16110G suggestions, their cart lines and CSV cells, and the Overview suggested count also move.
   4. Leave the local copy on the 1.2 body.
@@ -398,13 +412,13 @@ On the evening (pre-flight, window and steps as for any deploy):
 
 ## Stage 5 deploy: Purchasing groundwork
 
-A UI release with no visible change apart from the past-date notice. It touches the path every Order list write takes, so the snapshot comes first (§4.10). Done by Anthony: production Postgres is reached only from the Render shell.
+A UI release with no visible change apart from the past-date notice. It touches the path every Order list write takes, so the snapshot comes first (§4.10). Done by Anthony: commands on production Postgres run in the Render shell only.
 
 Before the evening:
-- [ ] On the refreshed local copy (`npm run dev:local`), work through every By supplier action once on 1.4 and once on 1.5, same items, and compare `platform_purchase_cart`, `platform_cart_item_off`, `platform_cart_pick_ack` and the `platform_change_log` actions: edit a qty, ×, Put back, Use preferred, Keep, Compare → Choose, Split, Undo, Start again. They must match apart from `detail.release`. Put the copy back afterwards (`Start again`, then delete the test `cart` log rows).
+- [ ] On the refreshed local copy (the `allied-local-preview`), work through every By supplier action once on 1.4 and once on 1.5, same items, and compare `platform_purchase_cart`, `platform_cart_item_off`, `platform_cart_pick_ack` and the `platform_change_log` actions: edit a qty, ×, Put back, Use preferred, Keep, Compare → Choose, Split, Undo, Start again. They must match apart from `detail.release`. Put the copy back afterwards (`Start again`, then delete the test `cart` log rows).
 
 On the evening (pre-flight and window as for any deploy):
-1. [ ] **Snapshot**, from the Render shell, before pushing:
+1. [ ] **Snapshot** (Render shell only), before pushing:
    ```sh
    DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status        # note the database name it prints
    DATABASE_URL=<prod> node scripts/supplier-rollback.mjs snapshot pre_s5_<yyyymmdd> --apply --confirm <that database name>
@@ -416,19 +430,19 @@ On the evening (pre-flight and window as for any deploy):
 4. [ ] In the browser: Purchasing looks as it did on 1.4 (same header, cards and totals). Pick a date between 21 Aug and yesterday: the notice says committed and on order come from the snapshot stored that day. Pick a date before 21 Aug: it says they are understated and that daily snapshots began on 21 Aug. On Inventory, expand a row on All items and on Below lead time (even with on order): the panel spans the whole table and quotes the target cover.
 5. [ ] Send the release note: nothing changes on screen except the past-date note.
 
-If rolled back (R1–R5): R5 is `status`, then `diff --from pre_s5_<yyyymmdd>`. Nothing needs restoring, because 1.5 writes only through the existing endpoints and states; `undo <id>` handles any single bad write.
+If rolled back (R1–R5): R5 (Render shell only) is `status`, then `diff --from pre_s5_<yyyymmdd>`. Nothing needs restoring, because 1.5 writes only through the existing endpoints and states; `undo <id>` handles any single bad write.
 
 ## Stage 6 deploy: Purchasing by item
 
-A UI release: By item becomes Purchasing's default view. No figure moves and no server file changes, but every Order list write can now be made from a second view, so the snapshot comes first (§4.10). Done by Anthony: production Postgres is reached only from the Render shell.
+A UI release: By item becomes Purchasing's default view. No figure moves and no server file changes, but every Order list write can now be made from a second view, so the snapshot comes first (§4.10). Done by Anthony: commands on production Postgres run in the Render shell only.
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] Both views list the same (item, supplier, qty) set; By item's "N items to order · M taken off" adds up to By supplier's "items need an order", and its "$X estimated" equals By supplier's total (they part only while an item sits under two suppliers undecided; the duplicates notice says so).
 - [ ] Type a qty in By item: it shows on By supplier, marked Edited, with an `edit_line` change-log row carrying `detail.release = 1.6.0`. `supplier-rollback.mjs undo <id>` restores it. × then Put back round-trips. Use preferred / Keep and Compare → Choose / Split from By item behave as from By supplier. Put the copy back afterwards (`Start again`, then delete the test `cart` log rows).
 - [ ] On a checkout of `v1.5.0`, `#/purchasing` and `#/purchasing/suppliers` both open the Order list.
 
 On the evening (pre-flight and window as for any deploy):
-1. [ ] **Snapshot**, from the Render shell, before pushing:
+1. [ ] **Snapshot** (Render shell only), before pushing:
    ```sh
    DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status        # note the database name it prints
    DATABASE_URL=<prod> node scripts/supplier-rollback.mjs snapshot pre_s6_<yyyymmdd> --apply --confirm <that database name>
@@ -439,22 +453,22 @@ On the evening (pre-flight and window as for any deploy):
 3. [ ] Capture before, push, wait for `release.version` = `1.6.0`, capture after, then `diff --allow scripts/expected/1.6.0.json`: 0 not allowed. `/cart` and `cart.csv` must be identical.
 4. [ ] `positionParity` is 0.
 5. [ ] In the browser (GET only, no edits on prod): Purchasing opens on By item; the header's two counts add up to By supplier's "items need an order" and the totals agree; BN1665G's row matches step 2; ▸ on it opens the panel with why this quantity and its suppliers on file; By supplier looks exactly as on 1.5.
-6. [ ] Send the release note. Ask Allied to edit one agreed item in By item and check it on By supplier, then tell us which item. Put it back with `supplier-rollback.mjs log`, then `undo <id>` on that `edit_line` (dry run, then `--apply --confirm <db>`). Not by typing the suggested quantity back: that saves a lasting `edited` row fixed at that day's suggestion, and the UI has no Undo for a qty edit.
+6. [ ] Send the release note. Ask Allied to edit one agreed item in By item and check it on By supplier, then tell us which item. Put it back (Render shell only) with `supplier-rollback.mjs log`, then `undo <id>` on that `edit_line` (dry run, then `--apply --confirm <db>`). Not by typing the suggested quantity back: that saves a lasting `edited` row fixed at that day's suggestion, and the UI has no Undo for a qty edit.
 
-If rolled back (R1–R5): both new URLs open the 1.5 Order list. R5 is `status`, then `diff --from pre_s6_<yyyymmdd>`. Nothing needs restoring: rows written from By item are the same `edited` and `removed` rows and take-off markers By supplier writes, and `undo <id>` handles any single bad write. To withdraw By item later without a revert, ship a release that makes By supplier the default again (`orderListView`'s default and `renderPurchasing`'s mapping).
+If rolled back (R1–R5): both new URLs open the 1.5 Order list. R5 (Render shell only) is `status`, then `diff --from pre_s6_<yyyymmdd>`. Nothing needs restoring: rows written from By item are the same `edited` and `removed` rows and take-off markers By supplier writes, and `undo <id>` handles any single bad write. To withdraw By item later without a revert, ship a release that makes By supplier the default again (`orderListView`'s default and `renderPurchasing`'s mapping).
 
 ## Stage 8 deploy: Choose the supplier on the row
 
-A UI release with additive `/cart` fields and stricter validation on two writes. No figure moves. Allied's picks become one click on every row, so the snapshot comes first (§4.10). Done by Anthony: production Postgres is reached only from the Render shell.
+A UI release with additive `/cart` fields and stricter validation on two writes. No figure moves. Allied's picks become one click on every row, so the snapshot comes first (§4.10). Done by Anthony: commands on production Postgres run in the Render shell only.
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] In By item, choose another supplier for one item: it moves to that supplier on By supplier and in `cart.csv` (Chosen supplier, CHECK — preferred supplier is …), flagged on the row and in "Earlier picks", with one `select_supplier` log row carrying `detail.release = 1.8.0`. Keep clears the flag. Changing the preferred supplier on the item page brings it back. Type a qty, then choose the preferred supplier again in the dropdown: one `use_preferred` row, the qty kept. Pick again, Undo: the typed qty stays, Edited, under the default supplier. An item with no preferred supplier: choose its default again, it reads Chosen. The toast reads right for a window minimum, a hand-set one and none, says "the number you typed" for a typed qty, and, for an item with its own lead time set on the item page, names that lead and no supplier. Put the copy back afterwards (`Start again`, then delete the test `cart` log rows, and clear any test minimums).
 - [ ] A made-up supplier uid on `/cart/select`, and a split with one part, a repeated supplier or a negative qty, are refused 400 with nothing written. Compare → Choose and Split still work.
 - [ ] Fifteen columns fit at 1366 px and 1440 px with an open pick on screen.
 - [ ] A keyboard pass in Chrome on Windows (what Allied use): Tab onto a Supplier dropdown and press ↓. On Windows that changes a closed dropdown at once; it must ask "Order … for this order only?" first, and Cancel must leave the row and the change log untouched. Choosing with the mouse asks nothing.
 
 On the evening (pre-flight and window as for any deploy):
-1. [ ] **Snapshot**, from the Render shell, before pushing:
+1. [ ] **Snapshot** (Render shell only), before pushing:
    ```sh
    DATABASE_URL=<prod> node scripts/supplier-rollback.mjs status        # note the database name it prints
    DATABASE_URL=<prod> node scripts/supplier-rollback.mjs snapshot pre_s8_<yyyymmdd> --apply --confirm <that database name>
@@ -465,18 +479,18 @@ On the evening (pre-flight and window as for any deploy):
 3. [ ] Capture before, push, wait for `release.version` = `1.8.0`, capture after, then `diff --allow scripts/expected/1.8.0.json`: 0 not allowed. `cart.csv` must be identical.
 4. [ ] `positionParity` is 0.
 5. [ ] In the browser (GET only, no picks on prod): every By item row with suppliers on file shows the dropdown on its current supplier; BN1665G's drill-down says "Your minimum (2,771, from HANOVA INTERNATIONAL LTD's 120 days) sets the lead-time stock." (or that evening's figures); By supplier looks exactly as on 1.7.
-6. [ ] Send the release note. After Allied's first picks: `supplier-rollback.mjs log --limit 10` matches the rows they describe.
+6. [ ] Send the release note. After Allied's first picks: `supplier-rollback.mjs log --limit 10` (Render shell only) matches the rows they describe.
 7. [ ] Follow-up, not part of the deploy: the handbook (`info-pack.html`) is refreshed after Stage 3 (cover) and Stage 8 (Purchasing), FEEDBACK-PLAN §6. Both are still pending; note in the 1.8.0 row when done.
 
-If rolled back (R1–R5): picks made from the row are ordinary `selected` rows, which 1.7 shows as flagged picks, and an Undo's `edited` row is an ordinary typed qty. R5 is `status`, then `diff --from pre_s8_<yyyymmdd>`. Nothing is restored by default.
-- **One bad pick:** `supplier-rollback.mjs log --item <N>`, then `undo <id>` on that `select_supplier` (dry run, then `--apply --confirm <db>`). It puts back the rows the pick deleted, the typed qty included.
-- **Wholesale, only if Allied ask:** `diff --from pre_s8_<yyyymmdd>`, then `restore cart --from pre_s8_<yyyymmdd>` as a dry run, then `--apply --confirm <db>`. This also wipes every quantity typed since the snapshot, so say so to Allied first.
+If rolled back (R1–R5): picks made from the row are ordinary `selected` rows, which 1.7 shows as flagged picks, and an Undo's `edited` row is an ordinary typed qty. R5 (Render shell only) is `status`, then `diff --from pre_s8_<yyyymmdd>`. Nothing is restored by default.
+- **One bad pick** (Render shell only): `supplier-rollback.mjs log --item <N>`, then `undo <id>` on that `select_supplier` (dry run, then `--apply --confirm <db>`). It puts back the rows the pick deleted, the typed qty included.
+- **Wholesale, only if Allied ask** (Render shell only): `diff --from pre_s8_<yyyymmdd>`, then `restore cart --from pre_s8_<yyyymmdd>` as a dry run, then `--apply --confirm <db>`. This also wipes every quantity typed since the snapshot, so say so to Allied first.
 
 ## Stage 9 deploy: Incoming POs with expected dates
 
 A UI release with additive fields. No figure moves and nothing is written, so no snapshot (§4.10). Rollback is a pure revert: a 1.8 page ignores the new fields.
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] `stage-check capture` before (1.8 checkout) and after, `diff --allow scripts/expected/1.9.0.json`: 0 not allowed, `cart.json`/`cart.csv`/`items.json` unchanged. `stage-check schedule <after> --base local`: all ok.
 - [ ] The browser checks in the 1.9.0 `RELEASES` `check`, on the copy's figures.
 
@@ -508,7 +522,7 @@ On the evening (pre-flight and window as for any deploy):
 
 Groundwork with additive fields only. No figure moves, nothing is written, nothing on screen changes, so no snapshot (§4.10). Rollback is a pure revert while 1.10 is the newest release; after that, a release setting `GAP_ENABLED = false` (with its version and RELEASES entry; `npm run build` passes with the switch off).
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] `stage-check capture` before (1.9 checkout) and after, `diff --allow scripts/expected/1.10.0.json`: 0 not allowed; `items.csv`, `cart.csv`, `suppliers.json`, `divergence.json` and the kit pages byte-identical, `cart.json` apart from `generatedAt`.
 - [ ] `npx tsx scripts/stage-check.mjs gap <after> --base local`: all ok. Note the counts.
 - [ ] Fail-safe, on a scratch copy of the tree (never the repo): make `projectItem` throw. `/items`, `/cart`, `/min-stock`, `/overview` and an item page answer 200 with every gap field null, `filter=gap` lists nothing, `runsOutBeforeNextDelivery` is null, and one "Stock gaps left blank for this build" line is logged per cache build.
@@ -533,7 +547,7 @@ If rolled back: nothing to restore. A 1.9 page and server ignore the new fields;
 
 A UI release with additive fields. No figure moves and nothing is written, so no snapshot (§4.10). Rollback is a pure revert while 1.11 is the newest release (a `filter=gap` bookmark then lists the gap items on 1.10, which still knows the key); after that, a release hiding the column, tile and panel, or `GAP_ENABLED = false`, which every 1.11 screen already reads as "—".
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] `stage-check capture` before (1.10 checkout) and after, `diff --allow scripts/expected/1.11.0.json`: 0 not allowed, no existing value changed.
 - [ ] `node scripts/stage-check.mjs screen <after> --before <before> --base local` and `npx tsx scripts/stage-check.mjs gap <after> --base local`: all ok.
 - [ ] Browser at 1366 and 1440 px: Purchasing By item has no sideways scroll under any sort; the item page checks in the 1.11.0 `RELEASES` `check`, on the copy's figures.
@@ -552,7 +566,7 @@ If rolled back: nothing to restore. A 1.10 page ignores `gap.weeks` and `CartLin
 
 A UI release with displayed lead times moving and one additive field. No quantity moves and nothing is written, so no snapshot (§4.10). Rollback is a pure revert while 1.12 is the newest release: a 1.11 server puts the item's lead back on every line, and a 1.12 tab on it reads `leadTimeSource` as absent and words everything as 1.11 did.
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] `stage-check capture` before (1.11 checkout) and after, `diff --allow scripts/expected/1.12.0.json`: 0 not allowed. The copy has no item leads, so only `release` and `leadTimeSource` appear; to see leads move, set one or two on an item page first (logged; clear them afterwards).
 - [ ] `node scripts/stage-check.mjs leads <before> <after>`: all ok.
 
@@ -570,7 +584,7 @@ If rolled back: nothing to restore.
 
 A numbers release (§4.5): announce the before/after list to Allied **before** the deploy, then one business day plus the 23:45 closing sync of soak. Nothing is written, so no snapshot. Rollback is a pure revert while 1.13 is the newest release: a 1.12 server serves the item's own suggestion on every line again, so the lines move back to their 1.12 quantities (typed quantities never moved), and a 1.13 tab on it reads no `suggestionFor` and words everything as 1.12.
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] `stage-check capture` before (1.12 checkout) and after, `diff --allow scripts/expected/1.13.0.json`: 0 not allowed. The copy has no picks, so only additions appear; to see quantities move, pick a supplier on two or three rows (one with a window minimum, one without), type a qty on another and pick it too (logged; Undo or Use preferred afterwards, or restore the copy).
 - [ ] `node scripts/stage-check.mjs qty <before> <after>`: all ok.
 
@@ -588,7 +602,7 @@ If rolled back: nothing to restore; tell Allied the listed lines are back at the
 
 A UI release whose golden diff is the release block and the new `filter` echo on `/items` (items.json `filter`: absent -> "all"), but Allied see two things read differently (the Cover < 2 weeks list, the Used in cell), so the list goes to them before the deploy (§4.5). Nothing is written, so no snapshot. Rollback is a pure revert while 1.14 is the newest release: the tile opens `low_cover` again and Used in shows direct parents.
 
-Before the evening, on the refreshed local copy (`npm run dev:local`):
+Before the evening, on the refreshed local copy (the `allied-local-preview`):
 - [ ] `stage-check capture` before (1.13 checkout) and after, `diff --allow scripts/expected/1.14.0.json`: 0 not allowed (release, items.json `filter`).
 
 On the evening, or the day before (pre-flight and window as for any deploy):
@@ -621,7 +635,7 @@ Rollback: revert the code (a 1.16.1 that withdraws it). Rows already removed sta
 
 ## Snapshots and data changes
 
-- **Snapshots** are mandatory before Stages 5, 6 and 8:
+- **Snapshots** are mandatory before Stages 5, 6 and 8 (Render shell only):
   ```sh
   node scripts/supplier-rollback.mjs snapshot pre_s<n>_<yyyymmdd> --apply --confirm <current_database()>
   node scripts/supplier-rollback.mjs status
@@ -629,7 +643,7 @@ Rollback: revert the code (a 1.16.1 that withdraws it). Rows already removed sta
   Never add tables to `BACKUP_TABLES` / `TABLES`: that marks every existing backup as broken.
 - **Lead-time and minimum tables:** take `bak_<yyyymmdd>_*` copies (above) before sending lead-time questions and before any bulk change.
 - **An Allied answer that is data, not code** (e.g. Hanova 120 → 90 days) is not a release:
-  1. Before: `capture` and `bak_` copies.
+  1. Before: `capture` and `bak_` copies (Render shell only).
   2. Make the edit in the dashboard. Edits are logged from 1.1.
   3. A supplier-lead edit leaves window minimums as drift until "Recalculate" on the Minimum stock review, which is also logged. Run it, or tell Allied why not.
   4. After: `capture`, `diff`, a "data change" row in Part 5, and a note to Allied listing the items whose suggestion moved.
@@ -655,9 +669,10 @@ Rollback: revert the code (a 1.16.1 that withdraws it). Rows already removed sta
   - Every number is computed once, on the server.
 - **Labels and dates.** One label per concept on every tab (§4.6 of the plan). Schedules, expected dates and gaps are today-only.
 - **CSV.** Append columns only; never rename, reorder or add leading rows. `cart.csv` stays unchanged unless Allied ask.
-- **Local safety:**
-  - Use only `npm run dev:local` (port 3111, refuses a non-localhost database) with `SYNC_INTERVAL_HOURS=0`.
-  - Never use the `myob-dashboard` launch config, and never press "Sync now" locally.
-  - Every refreshed copy gets `DELETE FROM connections` before its first start.
+- **Local safety** (the full rules: `CLAUDE.md` in the folder above this repository):
+  - Run the app with the `allied-local-preview` launch config (`.claude/local-preview.sh`, port 3112): the local copy `allied_dev` only, sync off, MYOB off, no access key. For a branch in another worktree, `.claude/local-preview.sh <worktree path>`; one preview at a time. `stage-check … --base local` still means port 3111, so pass `--base http://localhost:3112`.
+  - Refresh the copy with `.claude/refresh-local-db.sh` (stop the preview first). It is the only thing on a development machine that may connect to production Postgres: read-only, and it never downloads the MYOB login, so no `DELETE FROM connections` is needed.
+  - Off Render the app enforces this itself (1.19, `src/localGuard.ts`): it refuses a `DATABASE_URL` whose host isn't localhost, 127.0.0.1 or ::1, schedules no sync, refuses Sync now, and treats the MYOB key and secret as absent. On Render (`RENDER=true`) none of it applies.
+  - Never point the app, a script or a test at production's database, never put a MYOB key in `.env` or `.env.local`, never press "Sync now" or connect a MYOB company file locally, and never run `setup-local.sh` (retired in 1.19).
   - `npm test` always runs with `DATABASE_URL=`. It is built into the script; keep it there.
 - **Telling Allied.** Every release note quotes the version and its stage, in three parts: what you'll see, numbers that changed (with an example item), and how to check it. It is the same text as the `RELEASES` entry.

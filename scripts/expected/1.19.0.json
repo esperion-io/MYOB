@@ -1,0 +1,13 @@
+{
+  "version": "1.19.0",
+  "stage": "Stage 21: Development copies can't reach the live dashboard",
+  "note": "1.19 changes nothing on Render (RENDER=true skips every new check) and nothing any capture reads: off Render the app refuses a DATABASE_URL whose host isn't localhost, 127.0.0.1 or ::1 (db.ts getPool), forces the sync interval to 0, treats the MYOB key and secret as absent, and refuses Sync now (src/localGuard.ts, config.ts, routes/insights.ts). The connection console and /auth/status (myobOffHere, additive) and the boot log change wording; stage-check reads none of them. Locally the preview already runs with SYNC_INTERVAL_HOURS=0 and no MYOB key, so /sync/status settings read the same before and after. Every capture must be identical apart from the release block /sync/status reports.",
+  "reviewed": "Written by hand from two captures (stage-check capture, GET only) on the local copy (allied_dev) through the allied-local-preview on port 3112, 26 Nov 2026: main (3822f40, 1.18.0) as ../captures/20261126-main-3822f40, then this tree as ../captures/20261126-stage21-1.19.0. diff with this list: 1 difference (release.version), allowed; 0 not allowed.",
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.18.0 -> 1.19.0) and commit"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import pg from "pg";
-import { config } from "./config.js";
+import { config, onRender } from "./config.js";
+import { localDatabaseProblem } from "./localGuard.js";
 
 const { Pool } = pg;
 
@@ -17,6 +18,15 @@ export function getPool(): pg.Pool {
     );
   }
   if (!pool) {
+    /*
+     * Off Render, only a database on this machine (localGuard.ts). Checked
+     * before the pool exists, so a refused URL is never looked up or
+     * connected to. Every query in the app comes through here, boot first.
+     */
+    if (!onRender) {
+      const problem = localDatabaseProblem(config.databaseUrl, process.env);
+      if (problem) throw new Error(problem);
+    }
     pool = new Pool({
       connectionString: config.databaseUrl,
       // Railway private networking uses SSL sometimes; public URL usually needs it.

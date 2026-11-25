@@ -64,9 +64,27 @@ import { inventoryHashFor, overviewTileHash, overviewTileState, usedInCount, use
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.18.0";
+const UI_VERSION = "1.19.0";
 
 const RELEASES = [
+  {
+    version: "1.19.0",
+    // Set to the ship date. Ships after 1.18.0. Nothing here names a live
+    // figure, so there is nothing to re-derive: off Render the app now refuses
+    // a database that isn't this machine's, schedules no sync and ignores the
+    // MYOB key (src/localGuard.ts); on Render (RENDER=true) nothing changes.
+    date: "2026-11-26",
+    stage: "Stage 21: Development copies can't reach the live dashboard",
+    title: "Behind the scenes: our test copies can't touch the live dashboard",
+    summary: "We made sure the copies of the dashboard we test changes on can never reach the live dashboard or its connection to MYOB. Nothing on screen changes: figures, the Order list and the exports stay exactly as they were.",
+    numbersChanged: false,
+    visible: false,
+    changes: [
+      "Safety work on our side; nothing on screen changes.",
+    ],
+    numbers: "None. Nothing you see changes: suggested quantities, risk, cover, the Order list and the exports are exactly as before.",
+    check: "Nothing to check on screen. The footer reads Version 1.19.",
+  },
   {
     version: "1.18.0",
     // Set to the ship date, and re-derive PWST15010T's figures from that

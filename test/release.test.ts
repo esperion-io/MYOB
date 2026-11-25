@@ -3,10 +3,12 @@
  * reload banner's decision, the build's version check and the golden
  * capture/diff. Run with `npm test`.
  *
- * The first test is the one that matters most locally: `.env` holds the
- * PRODUCTION DATABASE_URL and dotenv loads it for every tsx run, so a test
- * that reached for the pool used to reach production. `npm test` now blanks
- * DATABASE_URL, and dotenv never overrides a variable that is already set.
+ * The first test is the one that matters most locally: `.env` used to hold
+ * the PRODUCTION DATABASE_URL (until 25 Nov 2026) and dotenv loads it for
+ * every tsx run, so a test that reached for the pool used to reach
+ * production. `npm test` blanks DATABASE_URL, and dotenv never overrides a
+ * variable that is already set. Off Render, getPool also refuses any host but
+ * this machine's (1.19, test/local-guard.test.ts).
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";

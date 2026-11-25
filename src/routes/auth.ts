@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { hasMyobCredentials } from "../config.js";
+import { hasMyobCredentials, onRender } from "../config.js";
+import { MYOB_OFF_HERE } from "../localGuard.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens } from "../myob/auth.js";
 import { getCompanyInfo } from "../myob/client.js";
 import {
@@ -61,6 +62,8 @@ authRouter.get("/status", async (_req, res) => {
   const store = await loadStore();
   res.json({
     configured: hasMyobCredentials(),
+    // 1.19: true off Render, where MYOB is off on purpose (localGuard.ts).
+    myobOffHere: !onRender,
     storage: storageBackend(),
     connections: store.connections.map((c) => ({
       businessId: c.businessId,
@@ -77,8 +80,9 @@ authRouter.get("/status", async (_req, res) => {
 authRouter.get("/login", (req, res) => {
   if (!hasMyobCredentials()) {
     res.status(503).json({
-      error:
-        "MYOB credentials not configured. Copy .env.example to .env and set MYOB_API_KEY / MYOB_API_SECRET.",
+      error: onRender
+        ? "MYOB credentials not configured. Set MYOB_API_KEY and MYOB_API_SECRET on the Render service, then redeploy."
+        : MYOB_OFF_HERE,
     });
     return;
   }

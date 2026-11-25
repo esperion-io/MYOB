@@ -1,14 +1,35 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import path from "node:path";
+import {
+  isRender,
+  MYOB_OFF_HERE,
+  myobCredentialsUsable,
+  syncIntervalHoursFor,
+} from "./localGuard.js";
+
+/*
+ * Are we on Render? Read from the real environment BEFORE .env is loaded, so
+ * a .env file can never claim to be Render and switch off the guards below
+ * (localGuard.ts). Render sets RENDER=true itself; there is no .env there.
+ */
+export const onRender = isRender(process.env);
+
+dotenv.config();
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) {
     throw new Error(
-      `Missing required env var ${name}. Copy .env.example to .env and fill in MYOB credentials.`,
+      `Missing required env var ${name}. Set it on the Render service (Environment), then redeploy.`,
     );
   }
   return value;
+}
+
+/** Off Render the MYOB key and secret do not exist, whatever the environment says. */
+function myobCredential(name: string): string {
+  if (!onRender) throw new Error(MYOB_OFF_HERE);
+  return required(name);
 }
 
 function optional(name: string): string | undefined {
@@ -27,8 +48,8 @@ export const config = {
    */
   tokenEncryptionKey: optional("TOKEN_ENCRYPTION_KEY"),
   myob: {
-    apiKey: () => required("MYOB_API_KEY"),
-    apiSecret: () => required("MYOB_API_SECRET"),
+    apiKey: () => myobCredential("MYOB_API_KEY"),
+    apiSecret: () => myobCredential("MYOB_API_SECRET"),
     redirectUri: () =>
       optional("MYOB_REDIRECT_URI") ||
       `${process.env.APP_BASE_URL?.trim() || "http://localhost:3000"}/auth/callback`,
@@ -59,8 +80,8 @@ export const config = {
     syncSince: optional("SYNC_SINCE") || "2024-07-01",
     /** Stock-cover target used by purchasing suggestions. */
     targetCoverWeeks: Number(process.env.TARGET_COVER_WEEKS || 8),
-    /** Optional auto-refresh interval (hours). 0 disables. */
-    syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS || 0),
+    /** Optional auto-refresh interval (hours). 0 disables. Always 0 off Render. */
+    syncIntervalHours: syncIntervalHoursFor(process.env.SYNC_INTERVAL_HOURS, onRender),
     /*
      * The run that closes each business day, as HH:MM in Allied's timezone.
      *
@@ -100,8 +121,7 @@ export const config = {
   },
 };
 
+/** Both MYOB credentials are set and usable: never off Render. */
 export function hasMyobCredentials(): boolean {
-  return Boolean(
-    process.env.MYOB_API_KEY?.trim() && process.env.MYOB_API_SECRET?.trim(),
-  );
+  return myobCredentialsUsable(process.env, onRender);
 }
