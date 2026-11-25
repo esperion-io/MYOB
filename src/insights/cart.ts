@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { getPool } from "../db.js";
 import { ensureInsightsSchema } from "../sync/schema.js";
 import { cartStateAll, cartStateOf, inTransaction, logChange } from "./changeLog.js";
+import { LAST_COST_LINES_SQL, billLineCost, pickLastCosts } from "./lastCost.js";
 import { supplierLeadTimes } from "./leadTimes.js";
 import type { SupplierLead } from "./leadTimes.js";
 import type { Gap } from "./projection.js";
@@ -867,27 +868,16 @@ export async function purchaseCart(opts?: Partial<DemandWindow>): Promise<{
     // Allied's figure on the supplier, else the measured median (leadTimes.ts,
     // shared with the expected dates of open purchase orders since 1.9).
     supplierLeadTimes(pool),
-    pool.query(
-      `SELECT DISTINCT ON (l.item_uid, b.supplier_uid)
-              l.item_uid, b.supplier_uid, l.unit_price, b.date::date::text AS last_bought
-       FROM myob_purchase_bill_lines l
-       JOIN myob_purchase_bills b ON b.uid = l.bill_uid
-       WHERE l.item_uid = ANY($1) AND b.supplier_uid IS NOT NULL AND l.unit_price > 0
-       ORDER BY l.item_uid, b.supplier_uid, b.date DESC`,
-      [uids],
-    ),
+    // Every priced bill line; pickLastCosts takes each pair's latest (1.18).
+    pool.query(LAST_COST_LINES_SQL, [uids]),
   ]);
   const { optionsFor, savedFor, ackFor, takenOff, supplierName } = sourcing;
 
   // The lead each line and compare option shows (1.12: an item's own lead
   // only under its usual supplier; see leadForSupplier).
   const leadFor = (item: ItemComputed, supplierUid: string) => leadForSupplier(item, supplierUid, supplierLead);
-  const lastCost = new Map(
-    lastCosts.rows.map((r) => [
-      `${r.item_uid}|${r.supplier_uid}`,
-      Number(r.unit_price),
-    ]),
-  );
+  // What each supplier last charged: one line, always the same one (lastCost.ts).
+  const lastCost = pickLastCosts(lastCosts.rows.map(billLineCost));
   const groups = new Map<string, CartSupplierGroup>();
   const pickConflicts: Awaited<ReturnType<typeof purchaseCart>>["pickConflicts"] = [];
   const removedItems: Awaited<ReturnType<typeof purchaseCart>>["removedItems"] = [];

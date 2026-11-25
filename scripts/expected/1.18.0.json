@@ -1,0 +1,103 @@
+{
+  "version": "1.18.0",
+  "stage": "Stage 20: Last cost from one bill line, every time",
+  "note": "1.18 is a numbers release on one Order list line. The cart's lastCost was the unit price on any line of each supplier's latest bill date for the item (DISTINCT ON (item, supplier) ORDER BY date DESC, no tie-break), so where that date had two prices Postgres returned either, and not always the same one: on 25 Nov 2026 prod served PWST15010T under Universal Corrosion Coatings at 25.34375 and an identical local copy at 25.33 (bill 00023195, 12 Oct 2026: 408 at 25.33 on line 4, 120 at 25.34375 on line 6). From 1.18 it is one line, always the same (src/insights/lastCost.ts pickLastCosts): latest bill date, then a line with qty above 0, then the higher bill number, then the later line, then the bill uid. Only pairs whose latest date had two prices can move; there were 11 on the copy (listed under tiedPairs), and only PWST15010T under UCC was served (on the Order list or in Compare), on prod and the copy alike. Its line and its UCC Compare option move to 25.34375; with them its estCost and the option's suggestedEstCost (243 x 25.34375 = 6,158.53125), UCC's subtotal, the three header totals and, in cart.csv, its Unit cost, Est cost and UCC's block heading, each by 3.34125 (243 x 0.01375) where they move, 3.34 in the header totals, which are rounded to the cent. The header totals and notes[7] are scalars and a position: check their amount, and that notes[7] is still UCC's heading, by hand. On prod, 25 Nov, the line already read 25.34375 (the arbitrary pick landed on the later line), so unless it has flipped by then the deploy diff is release only and the cart entries print as notes. Any other pair moving, or another tied pair coming onto the Order list or into Compare before the deploy, fails this list: re-derive the table from that day's prod capture first.",
+  "reviewed": "Written by hand from two captures (stage-check capture over HTTP, GET only, localhost:3112 with sync off and the MYOB key exported empty) of the local copy allied_dev refreshed from prod on 25 Nov 2026: main (4a5553d, 1.17.0; identical to the earlier 20261125-local-copy capture, 0 differences) then this tree: 12 differences, all listed here, 0 others. This tree's capture against the 25 Nov prod capture: 9 differences, the release block and the float noise prod and the copy already had (BP1675G kit buyPrice, one supplier's purchase_value_window); every /cart and cart.csv figure identical. pickLastCosts checked against an SQL DISTINCT ON with the same total order on every one of the copy's 1,255 item/supplier pairs: 0 disagreements, and 0 after shuffling the input. The old query over all items, over the 11 tied items and over the cart's items gave different picks for the same pairs on the same data (for example BN825G under Bremick 0.1574, 0.1246; PWST15010T 25.34375, 25.34375, 25.33). No database writes.",
+  "tiedPairs": [
+    { "item": "3", "supplier": "BREMICK NZ LIMITED", "latest": "2025-09-17 bill 00021799: line 0 100 @ 0.2319, line 1 100 @ 0.1648", "from118": 0.1648, "served": false },
+    { "item": "4", "supplier": "ANZOR FASTENERS LIMITED", "latest": "2026-11-18 bill 00023460: line 0 20 @ 13.56, line 1 8 @ 4.50875", "from118": 4.50875, "served": false },
+    { "item": "4", "supplier": "HOBSON ENGINEERING Co. PTY.LTD", "latest": "2025-02-20 bill 00020905: line 0 150 @ 6.208667, line 1 150 @ 6.293333", "from118": 6.293333, "served": false },
+    { "item": "B20140S16", "supplier": "BREMICK NZ LIMITED", "latest": "2026-10-16 bill 00023330: line 0 80 @ 4.137786, line 1 60 @ 4.137833", "from118": 4.137833, "served": false },
+    { "item": "BN825G", "supplier": "BREMICK NZ LIMITED", "latest": "2025-04-14 bill 00021129 line 0 200 @ 0.1246; bill 00021229 line 0 200 @ 0.1574", "from118": 0.1574, "served": false },
+    { "item": "CTB12180S16", "supplier": "Jiaxing Goodway Trading Co., Ltd", "latest": "2024-08-08 bill 00019682: line 2 660 @ 1.9987, line 12 0 @ 1.48", "from118": 1.9987, "served": false },
+    { "item": "CTB12220S16", "supplier": "Jiaxing Goodway Trading Co., Ltd", "latest": "2024-08-08 bill 00019682: line 3 652 @ 2.2891, line 13 0 @ 1.65", "from118": 2.2891, "served": false },
+    { "item": "FG", "supplier": "SPECIALISED WASHERS AND GASKETS", "latest": "2026-11-13 bill 00023440: lines 0-4 at 2.24, 2.81, 3.02, 4.19, 5.16", "from118": 5.16, "served": false },
+    { "item": "N24G8", "supplier": "HANOVA INTERNATIONAL LTD", "latest": "2024-07-11 bill 00019705: line 21 8280 @ 0.2525, line 22 21244 @ 0.2657", "from118": 0.2657, "served": false },
+    { "item": "PWMHT3L", "supplier": "UNIVERSAL CORROSION COATINGS PTY. LTD", "latest": "2025-12-15 bill 00022007: line 0 160 @ 29.33725, lines 7 and 8 160 @ 29.3369", "from118": 29.3369, "served": false },
+    { "item": "PWST15010T", "supplier": "UNIVERSAL CORROSION COATINGS PTY. LTD", "latest": "2026-10-12 bill 00023195: line 4 408 @ 25.33, line 6 120 @ 25.34375", "from118": 25.34375, "served": true }
+  ],
+  "allow": [
+    {
+      "file": "sync-status.json",
+      "path": "release",
+      "why": "every deploy reports its own version (1.17.0 -> 1.18.0) and commit"
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[02eacbca-4766-4c63-a5ec-cc7ac6206146].lines[f09d5f35-c0b7-4262-bf6e-50030bda5a1e|02eacbca-4766-4c63-a5ec-cc7ac6206146].lastCost",
+      "why": "PWST15010T under UCC: the later line of bill 00023195, always (25.33 -> 25.34375 on the copy; prod already 25.34375)",
+      "before": 25.33,
+      "after": 25.34375
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[02eacbca-4766-4c63-a5ec-cc7ac6206146].lines[f09d5f35-c0b7-4262-bf6e-50030bda5a1e|02eacbca-4766-4c63-a5ec-cc7ac6206146].estCost",
+      "why": "qty 243 x the line's lastCost",
+      "before": 6155.19,
+      "after": 6158.53125
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[02eacbca-4766-4c63-a5ec-cc7ac6206146].lines[f09d5f35-c0b7-4262-bf6e-50030bda5a1e|02eacbca-4766-4c63-a5ec-cc7ac6206146].options[02eacbca-4766-4c63-a5ec-cc7ac6206146].lastCost",
+      "why": "the same pair in Compare: one lastCost map serves the line and its options",
+      "before": 25.33,
+      "after": 25.34375
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[02eacbca-4766-4c63-a5ec-cc7ac6206146].lines[f09d5f35-c0b7-4262-bf6e-50030bda5a1e|02eacbca-4766-4c63-a5ec-cc7ac6206146].options[02eacbca-4766-4c63-a5ec-cc7ac6206146].suggestedEstCost",
+      "why": "the option's suggestion (243) x its lastCost",
+      "before": 6155.19,
+      "after": 6158.53125
+    },
+    {
+      "file": "cart.json",
+      "path": "suppliers[02eacbca-4766-4c63-a5ec-cc7ac6206146].estimatedCost",
+      "why": "UCC's subtotal is the sum of its lines' estCost: + 3.34125",
+      "before": 7088.407523999999,
+      "after": 7091.748774
+    },
+    {
+      "file": "cart.json",
+      "path": "estimatedCost",
+      "why": "the Order list total (rounded to the cent): + 3.34, and no other amount",
+      "before": 323774,
+      "after": 323777.34
+    },
+    {
+      "file": "cart.json",
+      "path": "requirementLow",
+      "why": "the total's low end (no split item, so equal to estimatedCost): + 3.34",
+      "before": 323774,
+      "after": 323777.34
+    },
+    {
+      "file": "cart.json",
+      "path": "requirementHigh",
+      "why": "the total's high end: + 3.34",
+      "before": 323774,
+      "after": 323777.34
+    },
+    {
+      "file": "cart.csv",
+      "path": "rows[PWST15010T|UNIVERSAL CORROSION COATINGS PTY. LTD].Unit cost",
+      "why": "the line's lastCost, to 4 places",
+      "before": "25.33",
+      "after": "25.3438"
+    },
+    {
+      "file": "cart.csv",
+      "path": "rows[PWST15010T|UNIVERSAL CORROSION COATINGS PTY. LTD].Est cost",
+      "why": "the line's estCost, to 4 places",
+      "before": "6155.19",
+      "after": "6158.5313"
+    },
+    {
+      "file": "cart.csv",
+      "path": "notes[7]",
+      "why": "UCC's block heading carries its subtotal (estimated 7088.41 -> 7091.75); notes are positional, so check it is still UCC's heading on the day",
+      "before": "UNIVERSAL CORROSION COATINGS PTY. LTD (Australia) — typical lead time 30 days — 2 line(s), estimated 7088.41",
+      "after": "UNIVERSAL CORROSION COATINGS PTY. LTD (Australia) — typical lead time 30 days — 2 line(s), estimated 7091.75"
+    }
+  ]
+}

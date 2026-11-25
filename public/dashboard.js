@@ -64,9 +64,33 @@ import { inventoryHashFor, overviewTileHash, overviewTileState, usedInCount, use
  * its entry, marked `withdrawn: "<the version that withdrew it>"`, so the list
  * still explains what was live on a given day.
  */
-const UI_VERSION = "1.17.0";
+const UI_VERSION = "1.18.0";
 
 const RELEASES = [
+  {
+    version: "1.18.0",
+    // Set to the ship date, and re-derive PWST15010T's figures from that
+    // day's prod capture (/cart, its line under Universal Corrosion Coatings:
+    // qty x lastCost). On 25 Nov 2026 prod read 243 x 25.34375 = 6,158.53 and
+    // an identical local copy 243 x 25.33 = 6,155.19 (bill 00023195, 12 Oct
+    // 2026: 408 at 25.33 on line 4, 120 at 25.34375 on line 6). 11
+    // item/supplier pairs had two prices on their latest bill date; on prod
+    // and the copy that day PWST15010T under UCC was the only one on the
+    // Order list or in its Compare (all 11 in scripts/expected/1.18.0.json).
+    date: "2026-11-25",
+    stage: "Stage 20: Last cost from one bill line, every time",
+    title: "Purchasing: last cost always comes from the latest bill line",
+    summary: "When a supplier's latest bill had an item on two lines at different prices, Purchasing could show either price as the last cost, and it could change after a sync. It now always takes the later line, so the figure stays put.",
+    numbersChanged: true,
+    numbersShort: "One item on the Order list: PWST15010T from Universal Corrosion Coatings is always $25.34 a roll; it could show $25.33. Its estimated cost and the totals follow.",
+    changes: [
+      "Purchasing's last cost (the unit cost marked \"last paid\" on the Order list, and Last cost in Compare) is what the supplier charged for the item on their latest bill. Sometimes that bill has the item on two lines at different prices. Until now the dashboard could take either line, and which one it took could change from one sync to the next: on 25 November the live dashboard showed $25.34 for PWST15010T and an exact copy of it showed $25.33.",
+      "From this version it is always the same line: the latest bill date; on that day, a line that bought something before a line with a quantity of 0; then the later bill (the higher bill number); then the later line on that bill.",
+      "Where a supplier's latest bill had one price for the item, the last cost is exactly as before. Nothing else on the page changes.",
+    ],
+    numbers: "One line on the Order list, as at 25 November 2026: PWST15010T (150mm x 10m petrolatum tape) from UNIVERSAL CORROSION COATINGS PTY. LTD. Its latest bill, 00023195 of 12 October 2026, has 408 rolls at $25.33 and, on a later line, 120 at $25.34375. Its last cost is now always $25.34, so for 243 rolls its estimated cost is $6,158.53 (shown as $6,159). When the dashboard took the other line it read $25.33 and $6,155.19, $3.34 less. Universal Corrosion Coatings' subtotal, the Order list total and the order sheet move with it by the same $3.34. Ten other items have a bill like this from one of their suppliers, but none of them is on the Order list or in Compare under that supplier today. If one comes onto it, it follows the same rule.",
+    check: "Open Purchasing and find PWST15010T under UNIVERSAL CORROSION COATINGS PTY. LTD: the unit cost reads $25.34, last paid, and the estimated cost $6,159 for 243 rolls. Open Compare on it: Last cost for Universal Corrosion Coatings reads $25.34. In MYOB, bill 00023195 has both lines; the dashboard uses the later one, 120 at $25.34375. It reads the same after every sync.",
+  },
   {
     version: "1.17.0",
     // Set to the ship date. The headlines and summaries of every earlier
