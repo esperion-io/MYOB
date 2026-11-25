@@ -13,6 +13,7 @@ import {
 } from "./projection.js";
 import type { PoolClient } from "pg";
 import { inTransaction, logChange, supplierMetaOf, supplierStateOf } from "./changeLog.js";
+import { ITEM_BILL_LINES_SQL, billLineCost, lastCostKey, latestLines } from "./lastCost.js";
 import {
   applyKitRules,
   deepBuildable,
@@ -2471,7 +2472,7 @@ export async function suppliersList(params: { q?: string } & Partial<DemandWindo
 export async function itemSuppliers(itemUid: string) {
   await ensureInsightsSchema();
   const pool = getPool();
-  const [item, assigned, history] = await Promise.all([
+  const [item, assigned, history, lines] = await Promise.all([
     pool.query(
       `SELECT i.uid, i.number, i.name,
               i.primary_supplier_uid, i.primary_supplier_name, i.supplier_item_number,
@@ -2500,7 +2501,7 @@ export async function itemSuppliers(itemUid: string) {
               SUM(l.qty)::float8 AS qty,
               SUM(COALESCE(l.total, 0))::float8 AS value,
               MAX(b.date) AS last_date,
-              (ARRAY_AGG(l.unit_price ORDER BY b.date DESC))[1]::float8 AS last_unit_price,
+              NULL::float8 AS last_unit_price, -- the latest line's, set below (1.18)
               sup.country, m.region AS region_override
        FROM myob_purchase_bill_lines l
        JOIN myob_purchase_bills b ON b.uid = l.bill_uid
@@ -2511,6 +2512,9 @@ export async function itemSuppliers(itemUid: string) {
        ORDER BY value DESC`,
       [itemUid],
     ),
+    // Every line of the item's bills, $0 lines included, for each supplier's
+    // last price: one line, always the same one, as the cart's (lastCost.ts).
+    pool.query(ITEM_BILL_LINES_SQL, [itemUid]),
   ]);
   if (!item.rows.length) return null;
   // While ruled "no supplier", say which supplier Undo would make preferred again.
@@ -2532,12 +2536,17 @@ export async function itemSuppliers(itemUid: string) {
   });
 
   const assignedUids = new Set(assigned.rows.map((r) => r.supplier_uid as string));
+  // Keyed by supplier: a supplier's bills all carry one name (checked 25 Nov 2026).
+  const latest = latestLines(lines.rows.map(billLineCost));
   return {
     item: item.rows[0],
     assigned: assigned.rows.map(withRegion),
     // Suppliers seen in bills that Allied has not recorded yet — one click to add.
     history: history.rows.map((r) => ({
-      ...withRegion(r),
+      ...withRegion({
+        ...r,
+        last_unit_price: latest.get(lastCostKey(itemUid, r.supplier_uid as string))?.unitPrice ?? null,
+      }),
       already_assigned: assignedUids.has(r.supplier_uid as string),
     })),
   };

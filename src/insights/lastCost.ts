@@ -1,5 +1,7 @@
 /**
- * What a supplier last charged for an item: the cart's lastCost (1.18).
+ * What a supplier last charged for an item (1.18): the cart's lastCost, and
+ * last_unit_price in an item's purchase history (Suppliers who have actually
+ * billed this item).
  *
  * The unit price on the supplier's latest bill line for the item. Before 1.18
  * the cart asked Postgres for "the latest bill date" and nothing more
@@ -18,10 +20,16 @@
  *   4. then the later line on that bill;
  *   5. then the bill uid, so no two lines can ever tie (bill uid and line
  *      index are a bill line's primary key).
- * Only lines priced above 0 count, as before (the query filters them). Steps 2
- * to 5 only ever choose between lines on the same latest date. A pair whose
- * lines on that date share one price reads exactly as before, and so does a
- * pair whose only line on that date bought nothing.
+ * Steps 2 to 5 only ever choose between lines on the same latest date. A pair
+ * whose lines on that date share one price reads exactly as before, and so
+ * does a pair whose only line on that date bought nothing.
+ *
+ * Which lines count is each reader's, as before: the cart only lines priced
+ * above 0 (LAST_COST_LINES_SQL; a $0 cost would make its estimate $0), the
+ * item page every line, so a free last line reads $0.00 there
+ * (ITEM_BILL_LINES_SQL). On the 25 Nov copy the two differ only on the
+ * catch-all item NOTE. The item page had the same tie on the same 11 pairs:
+ * its ARRAY_AGG(unit_price ORDER BY date DESC)[1] took any line of the date.
  *
  * It is a pure function, rather than a longer ORDER BY, so that the rule is
  * tested: `npm test` runs with no database.
@@ -31,7 +39,8 @@
 export interface BillLineCost {
   itemUid: string;
   supplierUid: string;
-  unitPrice: number;
+  /** Never null in the cart's lines (priced above 0); null only if MYOB sent no price. */
+  unitPrice: number | null;
   qty: number | null;
   /** The bill's date. An undated bill ranks below every dated one. */
   date: Date | string | null;
@@ -73,15 +82,20 @@ export function compareBillLines(a: BillLineCost, b: BillLineCost): number {
   return byNumber(a.billNumber, b.billNumber) || a.idx - b.idx || byText(a.billUid, b.billUid);
 }
 
-/** Each item/supplier pair's last cost, keyed by lastCostKey. */
-export function pickLastCosts(lines: Iterable<BillLineCost>): Map<string, number> {
+/** Each item/supplier pair's latest line, keyed by lastCostKey. */
+export function latestLines(lines: Iterable<BillLineCost>): Map<string, BillLineCost> {
   const latest = new Map<string, BillLineCost>();
   for (const line of lines) {
     const key = lastCostKey(line.itemUid, line.supplierUid);
     const held = latest.get(key);
     if (!held || compareBillLines(line, held) > 0) latest.set(key, line);
   }
-  return new Map([...latest].map(([key, line]) => [key, line.unitPrice]));
+  return latest;
+}
+
+/** Each item/supplier pair's last cost, keyed by lastCostKey. */
+export function pickLastCosts(lines: Iterable<BillLineCost>): Map<string, number | null> {
+  return new Map([...latestLines(lines)].map(([key, line]) => [key, line.unitPrice]));
 }
 
 /**
@@ -94,12 +108,22 @@ export const LAST_COST_LINES_SQL = `
   JOIN myob_purchase_bills b ON b.uid = l.bill_uid
   WHERE l.item_uid = ANY($1) AND b.supplier_uid IS NOT NULL AND l.unit_price > 0`;
 
-/** A row of LAST_COST_LINES_SQL as a BillLineCost. */
+/**
+ * The item page's lines (itemSuppliers): every line of every bill with a
+ * supplier, for the one item in $1, $0 lines included.
+ */
+export const ITEM_BILL_LINES_SQL = `
+  SELECT l.item_uid, b.supplier_uid, l.unit_price, l.qty, b.date, b.number, b.uid AS bill_uid, l.idx
+  FROM myob_purchase_bill_lines l
+  JOIN myob_purchase_bills b ON b.uid = l.bill_uid
+  WHERE l.item_uid = $1 AND b.supplier_uid IS NOT NULL`;
+
+/** A row of LAST_COST_LINES_SQL or ITEM_BILL_LINES_SQL as a BillLineCost. */
 export function billLineCost(r: Record<string, unknown>): BillLineCost {
   return {
     itemUid: String(r.item_uid),
     supplierUid: String(r.supplier_uid),
-    unitPrice: Number(r.unit_price),
+    unitPrice: r.unit_price == null ? null : Number(r.unit_price),
     qty: r.qty == null ? null : Number(r.qty),
     date: (r.date as Date | string | null) ?? null,
     billNumber: r.number == null ? null : String(r.number),

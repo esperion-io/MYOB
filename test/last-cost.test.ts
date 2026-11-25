@@ -7,13 +7,22 @@
  * Coatings read 25.34375 on production and 25.33 on an identical copy (bill
  * 00023195, 12 Oct 2026, one line at each), and 11 item/supplier pairs had
  * such a tie. The cases below are those bills' own lines (src/insights/lastCost.ts
- * has the rule).
+ * has the rule). The item page's Last price (purchase history) had the same
+ * tie on the same pairs, and from 1.18 takes the same line.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { compareBillLines, lastCostKey, pickLastCosts, type BillLineCost } from "../src/insights/lastCost.js";
+import {
+  billLineCost,
+  compareBillLines,
+  lastCostKey,
+  latestLines,
+  pickLastCosts,
+  type BillLineCost,
+} from "../src/insights/lastCost.js";
 
 const UCC = "02eacbca-4766-4c63-a5ec-cc7ac6206146"; // Universal Corrosion Coatings
 const BREMICK = "BREMICK";
@@ -135,8 +144,43 @@ test("no two lines tie, so every arrival order gives the same last cost", () => 
   assert.deepEqual([...seen], [25.4]);
 });
 
-test("the cart reads its last costs through pickLastCosts, with no tie-prone copy left", () => {
-  const cart = readFileSync(fileURLToPath(new URL("../src/insights/cart.ts", import.meta.url)), "utf8");
-  assert.match(cart, /pickLastCosts\(/);
-  assert.doesNotMatch(cart, /DISTINCT ON \(l\.item_uid, b\.supplier_uid\)/);
+test("the item page takes the same line as the cart, but keeps its $0 lines", () => {
+  // Same tie: the item page's Last price for PWST15010T is the cart's.
+  assert.equal(latestLines(PWST).get(lastCostKey("PWST15010T", UCC))?.unitPrice, 25.34375);
+  // Shaped on the catch-all item NOTE under Bremick (the 25 Nov copy): an older
+  // priced line, then a later $0 one. The item page lists every line, so it
+  // reads $0.00; the cart counts only lines priced above 0, so it costs 56.22.
+  const note = [
+    line({ itemUid: "NOTE", supplierUid: BREMICK, date: "2025-01-10T00:00:00Z", billNumber: "00020001", unitPrice: 56.22 }),
+    line({ itemUid: "NOTE", supplierUid: BREMICK, date: "2025-06-10T00:00:00Z", billNumber: "00021001", unitPrice: 0 }),
+  ];
+  assert.equal(latestLines(note).get(lastCostKey("NOTE", BREMICK))?.unitPrice, 0);
+  assert.equal(costOf(note.filter((l) => (l.unitPrice ?? 0) > 0), "NOTE", BREMICK), 56.22);
+});
+
+test("a row with no price reads as no price, not $0", () => {
+  const r = { item_uid: "I", supplier_uid: "S", unit_price: null, qty: "2", date: null, number: null, bill_uid: "B", idx: 3 };
+  assert.deepEqual(billLineCost(r), {
+    itemUid: "I", supplierUid: "S", unitPrice: null, qty: 2, date: null, billNumber: null, billUid: "B", idx: 3,
+  });
+});
+
+const SRC = fileURLToPath(new URL("../src", import.meta.url));
+function tsFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((f) => {
+    const full = join(dir, f);
+    if (statSync(full).isDirectory()) return tsFiles(full);
+    return f.endsWith(".ts") ? [full] : [];
+  });
+}
+
+test("the cart and the item page read last prices through lastCost.ts, with no tie-prone copy left", () => {
+  const read = (f: string) => readFileSync(join(SRC, f), "utf8");
+  assert.match(read("insights/cart.ts"), /pickLastCosts\(/);
+  assert.match(read("insights/queries.ts"), /latestLines\(/);
+  for (const file of tsFiles(SRC)) {
+    const text = readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /DISTINCT ON \(l\.item_uid, b\.supplier_uid\)/, file);
+    assert.doesNotMatch(text, /ARRAY_AGG\(l\.unit_price/, file);
+  }
 });
