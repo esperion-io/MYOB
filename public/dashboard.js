@@ -73,7 +73,7 @@ const RELEASES = [
     // figure, so there is nothing to re-derive: off Render the app now refuses
     // a database that isn't this machine's, schedules no sync and ignores the
     // MYOB key (src/localGuard.ts); on Render (RENDER=true) nothing changes.
-    date: "2026-11-26",
+    date: "2026-11-27",
     stage: "Stage 21: Safeguards on development copies",
     title: "Behind the scenes: safeguards on our test copies of the dashboard",
     summary: "We added safeguards so the copies of the dashboard we test changes on don't reach the live dashboard or its connection to MYOB by accident. Nothing on screen changes: figures, the Order list and the exports stay exactly as they were.",
