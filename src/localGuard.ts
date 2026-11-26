@@ -101,7 +101,8 @@ export function localDatabaseProblem(url: string, env: Env): string | null {
     `Refusing DATABASE_URL: ${
       host == null ? "its host can't be read (it must be a postgres:// or postgresql:// URL that node-postgres can parse)" : `its host is ${host}`
     }. ` +
-    `Off Render the database must be on this machine (${LOCAL_DATABASE_HOSTS.join(", ")}), ` +
+    `Off Render the database must be on this machine (${LOCAL_DATABASE_HOSTS.join(", ")}; ` +
+    "a bracketed host such as [::1] is a name to node-postgres, so write localhost), " +
     "so that nothing here can reach production. Use the local copy (allied_dev on localhost; " +
     "see CLAUDE.md in the folder above this repository)."
   );
