@@ -84,10 +84,10 @@ export function databaseHost(url: string, env: Env): string | null {
   }
   let host = typeof parsed.host === "string" ? parsed.host : "";
   if (!host) host = env.PGHOST || "localhost";
-  host = host.toLowerCase();
-  // The URL parser keeps IPv6 brackets; node-postgres is handed the address.
-  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
-  return host;
+  // Lowercased only. node-postgres keeps any [ ]: it hands "[::1]" or
+  // "[localhost]" to the system resolver as a name, not as an address, so a
+  // bracketed host is judged as written and refused.
+  return host.toLowerCase();
 }
 
 /**
@@ -99,7 +99,7 @@ export function localDatabaseProblem(url: string, env: Env): string | null {
   if (host != null && LOCAL_DATABASE_HOSTS.includes(host)) return null;
   return (
     `Refusing DATABASE_URL: ${
-      host == null ? "its host can't be read (only a postgres:// or postgresql:// URL is read)" : `its host is ${host}`
+      host == null ? "its host can't be read (it must be a postgres:// or postgresql:// URL that node-postgres can parse)" : `its host is ${host}`
     }. ` +
     `Off Render the database must be on this machine (${LOCAL_DATABASE_HOSTS.join(", ")}), ` +
     "so that nothing here can reach production. Use the local copy (allied_dev on localhost; " +

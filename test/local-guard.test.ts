@@ -45,7 +45,6 @@ const accepted = [
   "postgres://localhost/allied_dev",
   "postgres://anthony:pw@localhost:5432/allied_dev",
   "postgresql://127.0.0.1:5432/allied_dev",
-  "postgres://[::1]:5432/allied_dev",
   "postgres://LOCALHOST/allied_dev",
   "postgres://anthony@/allied_dev", // no host: node-postgres falls back to PGHOST, then localhost
   "postgres://anthony@db.invalid/allied_dev?host=localhost", // the query parameter wins
@@ -73,6 +72,10 @@ const refused: [string, string | null][] = [
   ["http://localhost/allied", null],
   ["mysql://localhost/allied", null],
   [" postgres://localhost/allied_dev", null], // pg reads this relative to postgres://base
+  // node-postgres keeps [ ] and hands the bracketed name to the resolver.
+  ["postgres://[::1]:5432/allied_dev", "[::1]"],
+  ["postgres://u:s3cret@db.invalid/allied?host=[localhost]", "[localhost]"],
+  ["postgres://u:s3cret@%5Blocalhost%5D/allied", "[localhost]"],
   // pg encodes a string with a space or a stray "%" before parsing it, so an
   // escaped "host" key stays escaped for pg: the URL's own host is used.
   ["postgres://u:s3cret@db.invalid/allied?h%6Fst=localhost&application_name=dev local", "db.invalid"],
@@ -90,7 +93,7 @@ test("any other host is refused, named, and the password never appears", () => {
     const problem = localDatabaseProblem(url, {});
     assert.ok(problem, `${url} must be refused`);
     assert.match(problem, /^Refusing DATABASE_URL: /);
-    assert.match(problem, host == null ? /its host can't be read/ : new RegExp(`its host is ${host.replace(/[.]/g, "\\.")}\\.`));
+    assert.match(problem, host == null ? /its host can't be read/ : new RegExp(`its host is ${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.`));
     assert.match(problem, /localhost, 127\.0\.0\.1, ::1/);
     assert.ok(!problem.includes("s3cret"), "the URL's password must not be echoed");
   }
@@ -107,7 +110,7 @@ test("no host in the URL means PGHOST, as node-postgres reads it", () => {
 test("the host read here is the one node-postgres would connect to", () => {
   // node-postgres' own reading, without a client, a pool or a socket.
   const ConnectionParameters = require("pg/lib/connection-parameters.js");
-  const bare = (host: string) => host.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  const bare = (host: string) => host.toLowerCase();
   const saved = process.env.PGHOST;
   try {
     for (const pghost of [undefined, "db.invalid"]) {
@@ -128,17 +131,17 @@ test("the host read here is the one node-postgres would connect to", () => {
 test("whatever the guard accepts, node-postgres reads as this machine too (thousands of tricky URLs)", () => {
   const ConnectionParameters = require("pg/lib/connection-parameters.js");
   const local = new Set(["localhost", "127.0.0.1", "::1"]);
-  const bare = (host: string) => host.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  const bare = (host: string) => host.toLowerCase();
   const schemes = ["postgres://", "postgresql://", "POSTGRES://"];
   const users = ["", "u@", "u:s3cret@", "localhost@", "u%40x@"];
-  const hosts = ["localhost", "LOCALHOST", "127.0.0.1", "[::1]", "", "db.invalid", "%6cocalhost", "localhost\\", "localhost.db.invalid"];
-  const queries = ["", "?host=localhost", "?h%6Fst=localhost", "?host=db.invalid", "?host=%2Ftmp", "?host=localhost&host=db.invalid", "?host=db.invalid&host=localhost"];
+  const hosts = ["localhost", "LOCALHOST", "127.0.0.1", "[::1]", "", "db.invalid", "%6cocalhost", "localhost\\", "localhost.db.invalid", "[localhost]", "%5Blocalhost%5D", "[127.0.0.1]"];
+  const queries = ["", "?host=localhost", "?h%6Fst=localhost", "?host=db.invalid", "?host=%2Ftmp", "?host=localhost&host=db.invalid", "?host=db.invalid&host=localhost", "?host=[localhost]", "?host=%5B::1%5D", "?host=::1"];
   const tails = ["", "&x=a b", "&x=%zz", "&x=%4", "&x=%41"];
   const saved = process.env.PGHOST;
   let accepted = 0;
   let checked = 0;
   try {
-    for (const pghost of [undefined, "db.invalid"]) {
+    for (const pghost of [undefined, "db.invalid", "[localhost]"]) {
       if (pghost == null) delete process.env.PGHOST;
       else process.env.PGHOST = pghost;
       for (const scheme of schemes) for (const user of users) for (const host of hosts) for (const query of queries) for (const tail of tails) {
