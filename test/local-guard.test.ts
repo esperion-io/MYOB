@@ -72,6 +72,12 @@ const refused: [string, string | null][] = [
   ["https://localhost\\@db.invalid/allied?application_name=dev local", null],
   ["http://localhost/allied", null],
   ["mysql://localhost/allied", null],
+  [" postgres://localhost/allied_dev", null], // pg reads this relative to postgres://base
+  // pg encodes a string with a space or a stray "%" before parsing it, so an
+  // escaped "host" key stays escaped for pg: the URL's own host is used.
+  ["postgres://u:s3cret@db.invalid/allied?h%6Fst=localhost&application_name=dev local", "db.invalid"],
+  ["postgresql://u:s3cret@db.invalid/allied?h%6Fst=localhost&x=%zz", "db.invalid"],
+  ["postgres://u@%6cocalhost/allied?x=a b", "%6cocalhost"],
 ];
 
 test("a database on this machine is accepted, by name or address", () => {
@@ -117,6 +123,47 @@ test("the host read here is the one node-postgres would connect to", () => {
     if (saved == null) delete process.env.PGHOST;
     else process.env.PGHOST = saved;
   }
+});
+
+test("whatever the guard accepts, node-postgres reads as this machine too (thousands of tricky URLs)", () => {
+  const ConnectionParameters = require("pg/lib/connection-parameters.js");
+  const local = new Set(["localhost", "127.0.0.1", "::1"]);
+  const bare = (host: string) => host.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  const schemes = ["postgres://", "postgresql://", "POSTGRES://"];
+  const users = ["", "u@", "u:s3cret@", "localhost@", "u%40x@"];
+  const hosts = ["localhost", "LOCALHOST", "127.0.0.1", "[::1]", "", "db.invalid", "%6cocalhost", "localhost\\", "localhost.db.invalid"];
+  const queries = ["", "?host=localhost", "?h%6Fst=localhost", "?host=db.invalid", "?host=%2Ftmp", "?host=localhost&host=db.invalid", "?host=db.invalid&host=localhost"];
+  const tails = ["", "&x=a b", "&x=%zz", "&x=%4", "&x=%41"];
+  const saved = process.env.PGHOST;
+  let accepted = 0;
+  let checked = 0;
+  try {
+    for (const pghost of [undefined, "db.invalid"]) {
+      if (pghost == null) delete process.env.PGHOST;
+      else process.env.PGHOST = pghost;
+      for (const scheme of schemes) for (const user of users) for (const host of hosts) for (const query of queries) for (const tail of tails) {
+        const rest = query ? query + tail : tail ? "?" + tail.slice(1) : "";
+        const url = `${scheme}${user}${host}/allied${rest}`;
+        let theirs: string;
+        try {
+          theirs = bare(String(new ConnectionParameters({ connectionString: url }).host));
+        } catch {
+          continue; // node-postgres can't read it either, so it can't connect anywhere
+        }
+        checked++;
+        const ours = databaseHost(url, { PGHOST: pghost });
+        if (ours != null) assert.equal(ours, theirs, `${url} with PGHOST=${pghost ?? "(unset)"}`);
+        if (localDatabaseProblem(url, { PGHOST: pghost }) == null) {
+          accepted++;
+          assert.ok(local.has(theirs), `accepted ${url}, which node-postgres reads as ${theirs}`);
+        }
+      }
+    }
+  } finally {
+    if (saved == null) delete process.env.PGHOST;
+    else process.env.PGHOST = saved;
+  }
+  assert.ok(checked > 8000 && accepted > 500, `swept ${checked} URLs, ${accepted} accepted`);
 });
 
 test("off Render the sync interval is always 0; on Render it is SYNC_INTERVAL_HOURS as before", () => {

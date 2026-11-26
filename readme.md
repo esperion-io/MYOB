@@ -174,9 +174,10 @@ MYOB Business API  --(read-only GETs)-->  sync engine  -->  Postgres mirror
 
 1. Set `DATABASE_URL` (required), `DASHBOARD_ACCESS_KEY` (recommended) and
    optionally `SYNC_WINDOW_DAYS` / `TARGET_COVER_WEEKS` / `SYNC_INTERVAL_HOURS`.
-2. Deploy, open `/dashboard` on the Render service, run **Full sync** (first run
-   reads the whole history window; a few minutes for Allied's dataset). Never
-   from a development machine: off Render, Sync now is refused (1.19).
+2. First-time setup of a new deployment only: open its `/dashboard` and run
+   **Full sync** (it reads the whole history window; a few minutes for Allied's
+   dataset). Allied's live service already syncs on its schedule. Off Render,
+   Sync now is refused (1.19).
 3. Afterwards use **Incremental sync** (or set `SYNC_INTERVAL_HOURS`).
 
 ### Optional tuning

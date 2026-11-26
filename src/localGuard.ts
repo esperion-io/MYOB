@@ -20,7 +20,11 @@
  * a .env file cannot claim to be Render.
  *
  * Everything here is pure: each function judges the environment it is given.
+ * (databaseHost loads node-postgres' own connection-string parser on first
+ * use, which is off Render only.)
  */
+
+import { createRequire } from "node:module";
 
 export type Env = Readonly<Record<string, string | undefined>>;
 
@@ -38,41 +42,47 @@ export const MYOB_OFF_HERE =
   "because production's MYOB login is single-use and spending it from here would break production's " +
   "MYOB connection. Work on the local copy instead (see CLAUDE.md in the folder above this repository).";
 
+type PgParse = (connectionString: string) => { host?: string | null };
+let pgParse: PgParse | undefined;
+
 /**
- * The host node-postgres would connect to for this connection string, read
- * the way it reads it (pg-connection-string's parse, then
- * ConnectionParameters): a `host` query parameter wins over the URL's host
- * (the last one, if repeated), and an empty host falls back to PGHOST, then
- * localhost. A Unix socket comes back as its path. Null when the string can't
- * be read or isn't a postgres:// / postgresql:// URL, which the caller refuses.
+ * node-postgres' own connection-string parser: the copy of pg-connection-string
+ * that the installed `pg` itself requires, so the host read here is the host
+ * it would use, by construction, not by imitation. (An imitation drifted: pg
+ * encodes a string with a space or a stray "%" before parsing it, so
+ * "postgres://…@<remote>/db?h%6Fst=localhost&x=a b" read as localhost to
+ * new URL() and as <remote> to pg.) Loaded on first use, which is off Render
+ * only.
+ */
+function parseAsPg(url: string): { host?: string | null } {
+  if (!pgParse) {
+    const fromHere = createRequire(import.meta.url);
+    const fromPg = createRequire(fromHere.resolve("pg"));
+    pgParse = (fromPg("pg-connection-string") as { parse: PgParse }).parse;
+  }
+  return pgParse(url);
+}
+
+/** What we read at all: a postgres:// or postgresql:// URL, a socket: URL, or a socket path. */
+const POSTGRES_URL = /^(?:postgres(?:ql)?:\/\/|socket:|\/)/i;
+
+/**
+ * The host node-postgres would connect to for this connection string: its
+ * own parse (a `host` query parameter wins over the URL's host, a socket
+ * comes back as its path), then, as ConnectionParameters does, PGHOST when
+ * that is empty, then localhost. Null when the string isn't a Postgres URL
+ * or can't be parsed, which the caller refuses. Other schemes are never read:
+ * pg would connect on them too, and nothing local needs one.
  */
 export function databaseHost(url: string, env: Env): string | null {
-  if (url.startsWith("/")) return url.split(" ")[0];
-  let parsed: URL;
-  let emptyHost = false;
+  if (!POSTGRES_URL.test(url)) return null;
+  let parsed: { host?: string | null };
   try {
-    parsed = new URL(url);
-  } catch {
-    // pg-connection-string's own retry for a URL with no host ("postgres://user@/db").
-    try {
-      parsed = new URL(url.replace("@/", "@___DUMMY___/"));
-      emptyHost = true;
-    } catch {
-      return null;
-    }
-  }
-  if (parsed.protocol === "socket:") return decodeURI(parsed.pathname) || null;
-  // Only Postgres URLs. For http(s)/ws/ftp/file the URL parser reads "\" as "/",
-  // while pg-connection-string may encode it first, so the two can disagree on
-  // the host ("https://localhost\@db.invalid/…"): refuse rather than guess.
-  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") return null;
-  const fromQuery = parsed.searchParams.getAll("host").at(-1);
-  let host: string;
-  try {
-    host = fromQuery || (emptyHost ? "" : decodeURIComponent(parsed.hostname));
+    parsed = parseAsPg(url);
   } catch {
     return null;
   }
+  let host = typeof parsed.host === "string" ? parsed.host : "";
   if (!host) host = env.PGHOST || "localhost";
   host = host.toLowerCase();
   // The URL parser keeps IPv6 brackets; node-postgres is handed the address.
