@@ -13,7 +13,7 @@
     "check:release": "node scripts/check-release.mjs",
     "stage-check": "node scripts/stage-check.mjs",
     "test": "DATABASE_URL= tsx --test test/*.test.ts",
-    "dev:local": "sh -c 'set -a; . ./.env.local; set +a; case \"$DATABASE_URL\" in *localhost*) ;; *) echo \"REFUSING TO START: DATABASE_URL is not localhost\" >&2; exit 1;; esac; exec npx tsx src/index.ts'"
+    "dev:local": "sh -c 'set -a; . ./.env.local; set +a; unset RENDER TAKE_BOOT_BACKUP; case \"$DATABASE_URL\" in *localhost*) ;; *) echo \"REFUSING TO START: DATABASE_URL is not localhost\" >&2; exit 1;; esac; exec npx tsx src/index.ts'"
   },
   "engines": {
     "node": ">=20"

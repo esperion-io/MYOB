@@ -25,7 +25,7 @@ Foundation app for connecting to MYOB Business / AccountRight Online company fil
 3. Set the generated **API Key** and **API Secret** as `MYOB_API_KEY` / `MYOB_API_SECRET` on the Render service. They are used on Render only: off Render the app ignores them (see Run locally).
 4. Authorising user must be a company file **Administrator**.
 5. For keys created after March 2025, use the new SME scopes (already set in `.env.example`): Contact (`sme-contacts-*`), Sale (`sme-sales`), Purchase (`sme-purchases`), Inventory (`sme-inventory`). Re-run **Connect MYOB** after changing scopes so the company file re-consents.
-6. MYOB currently expects redirect URIs to be `https://` for newer keys. For local HTTPS, use a tunnel (ngrok/cloudflared) and register that URL.
+6. MYOB currently expects redirect URIs to be `https://` for newer keys: register the Render service's `https://…/auth/callback`. MYOB is connected from Render only, never from a development machine (see Run locally).
 
 ### TODO — values only you can provide
 
@@ -49,8 +49,8 @@ Foundation app for connecting to MYOB Business / AccountRight Online company fil
 
 The dashboard is live on Render for Allied, and its MYOB login is a **single-use refresh token**: if anything on a development machine spends it, production's MYOB connection breaks. So development and testing happen on a local copy of the production database, with sync and MYOB switched off. The rules are in `CLAUDE.md` in the folder above this repository (`allied/CLAUDE.md`); in short:
 
-- **Run the app with the `allied-local-preview` launch config** (`.claude/local-preview.sh`, http://localhost:3112): the local database `allied_dev` only, sync off, MYOB off, no access key. To run a branch checked out in another worktree: `.claude/local-preview.sh <worktree path>` (one preview at a time).
-- **The data is a copy of production** in local Postgres (`allied_dev` on localhost). Refresh it with `.claude/refresh-local-db.sh` (stop the preview first). It reads production read-only and never downloads the MYOB login. Saves (cart, suppliers, minimums) change only the copy.
+- **Run the app with the `allied-local-preview` launch config** (`allied/.claude/local-preview.sh`, http://localhost:3112): the local database `allied_dev` only, sync off, MYOB off, no access key. To run a branch checked out in another worktree: `allied/.claude/local-preview.sh <worktree path>` (one preview at a time).
+- **The data is a copy of production** in local Postgres (`allied_dev` on localhost). Refresh it with `allied/.claude/refresh-local-db.sh` (stop the preview first). It reads production read-only and never downloads the MYOB login. Saves (cart, suppliers, minimums) change only the copy.
 - `npm run dev` and `npm run dev:local` also run locally, on the database in `.env` / `.env.local` (localhost); prefer the preview.
 - **Off Render the app enforces this itself** (from 1.19, `src/localGuard.ts`): it refuses to start on a `DATABASE_URL` whose host isn't localhost, 127.0.0.1 or ::1, never schedules a sync, refuses Sync now, and treats `MYOB_API_KEY` / `MYOB_API_SECRET` as absent. Render sets `RENDER=true`, which turns all of that off there. "Not on Render: MYOB is off on this machine, on purpose" in the boot log is expected.
 - **Never** point the app, a script or a test at production's database, put a MYOB key in `.env` or `.env.local`, press **Sync now**, or connect a MYOB company file locally. `setup-local.sh` is retired: it copied production's settings into `.env`.
@@ -174,8 +174,9 @@ MYOB Business API  --(read-only GETs)-->  sync engine  -->  Postgres mirror
 
 1. Set `DATABASE_URL` (required), `DASHBOARD_ACCESS_KEY` (recommended) and
    optionally `SYNC_WINDOW_DAYS` / `TARGET_COVER_WEEKS` / `SYNC_INTERVAL_HOURS`.
-2. Deploy, open `/dashboard`, run **Full sync** (first run reads the whole
-   history window; a few minutes for Allied's dataset).
+2. Deploy, open `/dashboard` on the Render service, run **Full sync** (first run
+   reads the whole history window; a few minutes for Allied's dataset). Never
+   from a development machine: off Render, Sync now is refused (1.19).
 3. Afterwards use **Incremental sync** (or set `SYNC_INTERVAL_HOURS`).
 
 ### Optional tuning

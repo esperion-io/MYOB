@@ -65,6 +65,13 @@ const refused: [string, string | null][] = [
   ["socket:/tmp?db=allied", "/tmp"],
   ["//db.invalid/allied", "//db.invalid/allied"], // node-postgres reads a leading / as a socket path
   ["not a connection string", null],
+  // Only postgres:// and postgresql:// are read. For a special scheme the URL
+  // parser reads "\" as "/" (host localhost) while pg-connection-string, which
+  // encodes a string with a space first, sees the backslash as part of the
+  // user name and connects to db.invalid: the two must never be asked to agree.
+  ["https://localhost\\@db.invalid/allied?application_name=dev local", null],
+  ["http://localhost/allied", null],
+  ["mysql://localhost/allied", null],
 ];
 
 test("a database on this machine is accepted, by name or address", () => {

@@ -48,7 +48,7 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const BASES = {
-  local: "http://localhost:3111",
+  local: "http://localhost:3112", // the allied-local-preview (allied/.claude/local-preview.sh)
   prod: "https://esperion-inventory-dashboard.onrender.com",
 };
 

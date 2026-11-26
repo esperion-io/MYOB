@@ -324,7 +324,7 @@ test("stage-check sends the key as a header, never in a URL, and never writes it
 });
 
 test("stage-check --base takes local, prod or a URL, and refuses a key in the URL", () => {
-  assert.equal(resolveBase(undefined), "http://localhost:3111");
+  assert.equal(resolveBase(undefined), "http://localhost:3112");
   assert.equal(resolveBase("prod"), "https://esperion-inventory-dashboard.onrender.com");
   assert.throws(() => resolveBase("http://localhost:3111/?key=abc"), /DASHBOARD_KEY/);
   assert.throws(() => resolveBase("ftp://x"), /--base must be/);

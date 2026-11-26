@@ -75,8 +75,8 @@ const RELEASES = [
     // MYOB key (src/localGuard.ts); on Render (RENDER=true) nothing changes.
     date: "2026-11-26",
     stage: "Stage 21: Development copies can't reach the live dashboard",
-    title: "Behind the scenes: our test copies can't touch the live dashboard",
-    summary: "We made sure the copies of the dashboard we test changes on can never reach the live dashboard or its connection to MYOB. Nothing on screen changes: figures, the Order list and the exports stay exactly as they were.",
+    title: "Behind the scenes: safeguards on our test copies of the dashboard",
+    summary: "We added safeguards so the copies of the dashboard we test changes on don't reach the live dashboard or its connection to MYOB by accident. Nothing on screen changes: figures, the Order list and the exports stay exactly as they were.",
     numbersChanged: false,
     visible: false,
     changes: [

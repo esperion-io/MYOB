@@ -44,7 +44,7 @@ export const MYOB_OFF_HERE =
  * ConnectionParameters): a `host` query parameter wins over the URL's host
  * (the last one, if repeated), and an empty host falls back to PGHOST, then
  * localhost. A Unix socket comes back as its path. Null when the string can't
- * be read, which the caller refuses.
+ * be read or isn't a postgres:// / postgresql:// URL, which the caller refuses.
  */
 export function databaseHost(url: string, env: Env): string | null {
   if (url.startsWith("/")) return url.split(" ")[0];
@@ -62,6 +62,10 @@ export function databaseHost(url: string, env: Env): string | null {
     }
   }
   if (parsed.protocol === "socket:") return decodeURI(parsed.pathname) || null;
+  // Only Postgres URLs. For http(s)/ws/ftp/file the URL parser reads "\" as "/",
+  // while pg-connection-string may encode it first, so the two can disagree on
+  // the host ("https://localhost\@db.invalid/…"): refuse rather than guess.
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") return null;
   const fromQuery = parsed.searchParams.getAll("host").at(-1);
   let host: string;
   try {
@@ -84,7 +88,9 @@ export function localDatabaseProblem(url: string, env: Env): string | null {
   const host = databaseHost(url, env);
   if (host != null && LOCAL_DATABASE_HOSTS.includes(host)) return null;
   return (
-    `Refusing DATABASE_URL: ${host == null ? "its host can't be read" : `its host is ${host}`}. ` +
+    `Refusing DATABASE_URL: ${
+      host == null ? "its host can't be read (only a postgres:// or postgresql:// URL is read)" : `its host is ${host}`
+    }. ` +
     `Off Render the database must be on this machine (${LOCAL_DATABASE_HOSTS.join(", ")}), ` +
     "so that nothing here can reach production. Use the local copy (allied_dev on localhost; " +
     "see CLAUDE.md in the folder above this repository)."
